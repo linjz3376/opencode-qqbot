@@ -1,5 +1,5 @@
 // @input:  ./config, ./qq/* (types, api, sender), ./opencode/* (client, sessions), ./commands
-// @output: createBridge
+// @output: createBridge, isAllowedUser, milestoneTargets, loadWatchedMap, saveWatchedMap
 // @pos:    根层 - 核心桥接: QQ 消息 -> OpenCode -> QQ 回复
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs"
 import { join } from "path"
@@ -335,6 +335,7 @@ export function createBridge(
       activeWatches.set(userId, sessionID)
       lastCtx.set(userId, ctx)
       subscribeSession(sessionID, userId)
+      saveWatchedMap(activeWatches) // R2-P1-3：落盘，重启恢复
       return [
         `👁 已开启观察：${sessionID}`,
         "该会话的工具调用/执行完成会实时推送摘要，/watch off 停止。",
@@ -346,6 +347,7 @@ export function createBridge(
       if (!sid) return "当前没有开启观察"
       activeWatches.delete(userId)
       unsubscribeSession(sid, userId)
+      saveWatchedMap(activeWatches) // R2-P1-3：落盘，重启不复活
       return `已停止观察：${sid}`
     },
     status(userId) {
@@ -384,6 +386,27 @@ export function createBridge(
     pendingSelections,
     watch: watchApi,
     mirror: mirrorApi,
+  }
+
+  // R2 修复批次启动项（2026-10-14）
+  if (config.allowedUsers.length === 0) {
+    console.warn("[security] ALLOWED_USERS 为空 → 所有消息将被拒绝（fail-closed）；请在 ~/.openqq/.env 配置白名单")
+  }
+  // R2-P1-3：恢复持久化的 /watch 订阅（里程碑已改 /watch 专属，重启不得静默丢）
+  {
+    const saved = loadWatchedMap()
+    const known = new Set(sessions.all().map((x) => x.sessionId))
+    let pruned = false
+    for (const [uid, sid] of Object.entries(saved)) {
+      if (!known.has(sid)) {
+        pruned = true
+        continue
+      }
+      activeWatches.set(uid, sid)
+      subscribeSession(sid, uid)
+      console.log(`[watch] 恢复订阅 ${uid.slice(0, 8)}… → ${sid}`)
+    }
+    if (pruned) saveWatchedMap(activeWatches)
   }
 
   // 摘要镜像：启动时对全部映射会话挂常驻订阅
@@ -573,8 +596,40 @@ async function maybeHandlePendingSelection(
   return handlePendingSelection(ctx.userId, Number(ctx.content.trim()), commandContext)
 }
 
-function isAllowedUser(userId: string, allowedUsers: string[]): boolean {
-  return allowedUsers.length === 0 || allowedUsers.includes(userId)
+// R2-P1-1（2026-10-14）：空名单 fail-closed——配置缺失时宁可全拒，不静默
+// 全开（首轮 P0-2 只闭了配置层，本次闭结构层）。
+export function isAllowedUser(userId: string, allowedUsers: string[]): boolean {
+  if (allowedUsers.length === 0) return false
+  return allowedUsers.includes(userId)
+}
+
+// R2-P1-3（2026-10-14）：/watch 持久化——里程碑已改 /watch 专属，重启静默丢
+// 订阅不可接受；与 greeted.json 同款风格（损坏即空、文件名参数化供单测）。
+const WATCH_FILE = join(homedir(), ".openqq", "watch.json")
+
+export function loadWatchedMap(file: string = WATCH_FILE): Record<string, string> {
+  try {
+    if (existsSync(file)) {
+      const raw = readFileSync(file, "utf-8")
+      const obj = JSON.parse(raw)
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        const out: Record<string, string> = {}
+        for (const [k, v] of Object.entries(obj)) if (typeof v === "string" && v) out[k] = v
+        return out
+      }
+    }
+  } catch {
+    // 损坏即空
+  }
+  return {}
+}
+
+export function saveWatchedMap(m: ReadonlyMap<string, string>, file: string = WATCH_FILE): void {
+  try {
+    writeFileSync(file, JSON.stringify(Object.fromEntries(m), null, 2))
+  } catch (error) {
+    console.warn("[watch] 持久化失败:", error instanceof Error ? error.message : error)
+  }
 }
 
 const GREETED_FILE = join(homedir(), ".openqq", "greeted.json")

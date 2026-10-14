@@ -8,6 +8,7 @@ import type {
   GatewayHelloData,
   GatewayReadyData,
   GroupMessageEvent,
+  MessageAttachment,
   MessageContext,
   WSPayload,
 } from "./types.js"
@@ -132,6 +133,20 @@ function stripGroupAtPrefix(content: string): string {
   return normalized.replace(/^<@!?.+?>\s*/u, "").trim()
 }
 
+/** 载荷日志打码（R2-P2-1）：签名 URL 是短时效凭据不入日志，只留校准
+ *  所需的 host/类型/大小/文件名 */
+function briefAttachments(atts: MessageAttachment[]): unknown[] {
+  return atts.map((a) => {
+    let host = "?"
+    try {
+      host = new URL(a.url).hostname
+    } catch {
+      /* 保留 ? */
+    }
+    return { host, content_type: a.content_type, size: a.size, filename: a.filename }
+  })
+}
+
 function toC2CMessageContext(event: C2CMessageEvent): MessageContext {
   return {
     type: "c2c",
@@ -226,8 +241,8 @@ async function handleDispatchEvent(
     case "C2C_MESSAGE_CREATE": {
       const message = toC2CMessageContext(payload.d as C2CMessageEvent)
       if (message.attachments?.length) {
-        // 原生附件接入（2026-10-14）：留原始载荷探测点，校准 QQ 下载链路
-        console.log("[gateway] 附件载荷:", JSON.stringify(message.attachments))
+        // R2-P2-1：打码载荷（签名 URL 不入日志），host/类型/大小够 B7 校准
+        console.log("[gateway] 附件载荷:", JSON.stringify(briefAttachments(message.attachments)))
       }
       if (!message.content && !message.attachments?.length) {
         return
@@ -239,7 +254,8 @@ async function handleDispatchEvent(
     case "GROUP_AT_MESSAGE_CREATE": {
       const message = toGroupMessageContext(payload.d as GroupMessageEvent)
       if (message.attachments?.length) {
-        console.log("[gateway] 附件载荷:", JSON.stringify(message.attachments))
+        // R2-P2-1：打码载荷（签名 URL 不入日志）
+        console.log("[gateway] 附件载荷:", JSON.stringify(briefAttachments(message.attachments)))
       }
       if (!message.content && !message.attachments?.length) {
         return
