@@ -107,6 +107,8 @@ export interface MessageContext {
   groupId?: string
   msgId: string
   content: string
+  /** 图片等富媒体附件（原生附件接入 2026-10-14；此前在网关被静默丢弃） */
+  attachments?: MessageAttachment[]
   timestamp?: string
   rawEvent?: C2CMessageEvent | GroupMessageEvent
 }

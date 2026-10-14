@@ -138,6 +138,7 @@ function toC2CMessageContext(event: C2CMessageEvent): MessageContext {
     userId: event.author.user_openid,
     msgId: event.id,
     content: normalizeMessageContent(event.content),
+    attachments: event.attachments,
     timestamp: event.timestamp,
     rawEvent: event,
   }
@@ -150,6 +151,7 @@ function toGroupMessageContext(event: GroupMessageEvent): MessageContext {
     groupId: event.group_openid,
     msgId: event.id,
     content: stripGroupAtPrefix(event.content),
+    attachments: event.attachments,
     timestamp: event.timestamp,
     rawEvent: event,
   }
@@ -223,7 +225,11 @@ async function handleDispatchEvent(
 
     case "C2C_MESSAGE_CREATE": {
       const message = toC2CMessageContext(payload.d as C2CMessageEvent)
-      if (!message.content) {
+      if (message.attachments?.length) {
+        // 原生附件接入（2026-10-14）：留原始载荷探测点，校准 QQ 下载链路
+        console.log("[gateway] 附件载荷:", JSON.stringify(message.attachments))
+      }
+      if (!message.content && !message.attachments?.length) {
         return
       }
       await options.onMessage(message)
@@ -232,7 +238,10 @@ async function handleDispatchEvent(
 
     case "GROUP_AT_MESSAGE_CREATE": {
       const message = toGroupMessageContext(payload.d as GroupMessageEvent)
-      if (!message.content) {
+      if (message.attachments?.length) {
+        console.log("[gateway] 附件载荷:", JSON.stringify(message.attachments))
+      }
+      if (!message.content && !message.attachments?.length) {
         return
       }
       await options.onMessage(message)

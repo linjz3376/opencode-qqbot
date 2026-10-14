@@ -34,6 +34,9 @@ export interface PromptOptions {
 }
 
 export interface PromptAndWaitOptions extends PromptOptions {
+  // 原生附件（2026-10-14）：prompt body 的 files（v2 PromptInput schema 内
+  // 字段，additionalProperties:false 不会剥它；model/agent 才会被剥）
+  files?: Array<{ uri: string; name?: string }>
   // 轮询中发现待审批权限时调用；返回用户的审批决策后，promptAndWait 负责
   // POST reply 并继续等待 idle。审批等待时间不计入 5 分钟超时。
   onPermission?: (req: PermissionRequest) => Promise<PermissionDecision>
@@ -207,7 +210,8 @@ export function createClient(baseUrl: string): OpencodeClient {
     async promptAndWait(sessionId, text, options) {
       // v2: prompt body 只接受 {text,...}（additionalProperties:false），model/agent
       // 会被静默剥离 —— 不再往 body 里塞；模型/agent 由 SessionManager 走 session 级端点。
-      const body: { text: string } = { text }
+      const body: { text: string; files?: Array<{ uri: string; name?: string }> } = { text }
+      if (options?.files?.length) body.files = options.files
 
       // 债务D1：子会话（subagent）审批检测——session 详情带 parentID
       //（2026-10-13 探针实证：task 工具的子会话 parentID 精确指向主会话）。

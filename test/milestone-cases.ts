@@ -1,6 +1,6 @@
 // 里程碑过滤回归（2026-10-14 用户反馈：文件类工具裸路径推送无意义 → 静默）
 // formatMilestone：仅动作类（shell 命令）tool.called 推送；文件类 null 但缓存仍写。
-import { formatMilestone } from "../src/bridge.ts"
+import { formatMilestone, milestoneTargets } from "../src/bridge.ts"
 
 const results: Array<[string, boolean, string]> = []
 const check = (name: string, ok: boolean, detail = "") => results.push([name, ok, detail])
@@ -39,6 +39,21 @@ check("字符串 input 推送", strLine === "🔧 echo hi", String(strLine))
 // 7. 命令含密钥 → 脱敏仍生效
 const sec = formatMilestone(ev("session.tool.called", { id: "t6", input: { command: "set PASSWORD=hunter2secret && x" } }), calls)
 check("命令脱敏", (sec?.includes("***") ?? false) && !sec!.includes("hunter2secret"), sec ?? "null")
+
+// ===== 里程碑投递目标：/watch 专属（2026-10-14 拍板）=====
+// 8. 未开 watch → 零投递（自身回合回显/镜像来源均不隐式携带）
+check("watch关→零投递", milestoneTargets(new Map(), "ses_x").length === 0)
+
+// 9. 开了 watch 且指向该会话 → 投递
+const aw = new Map([["u1", "ses_x"]])
+check("watch开本会话→[u1]", JSON.stringify(milestoneTargets(aw, "ses_x")) === '["u1"]')
+
+// 10. watch 指向别的会话 → 本会话零投递
+check("watch他会话→零", milestoneTargets(new Map([["u1", "ses_y"]]), "ses_x").length === 0)
+
+// 11. 多用户仅命中订阅者
+const aw2 = new Map([["u1", "ses_x"], ["u2", "ses_y"], ["u3", "ses_x"]])
+check("多用户只命中订阅者", JSON.stringify(milestoneTargets(aw2, "ses_x")) === '["u1","u3"]')
 
 const fails = results.filter(([, ok]) => !ok)
 for (const [n, ok, d] of results) console.log(`${ok ? "ok  " : "FAIL"} ${n}${d ? " — " + d : ""}`)

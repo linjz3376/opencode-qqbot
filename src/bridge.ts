@@ -8,6 +8,7 @@ import type { Config } from "./config.js"
 import type { MessageContext } from "./qq/types.js"
 import { getAccessToken, sendC2CMessage, sendGroupMessage, getNextMsgSeq } from "./qq/api.js"
 import { replyToQQ } from "./qq/sender.js"
+import { prepareQQAttachments, augmentPromptWithAttachments, purgeOldQQImages } from "./qq/media.js"
 import type { OpencodeClient, PermissionDecision, PermissionRequest } from "./opencode/client.js"
 import { collectReplyText } from "./opencode/client.js"
 import { createEventStream, type V2Event } from "./opencode/eventstream.js"
@@ -57,8 +58,8 @@ export function createBridge(
   const pendingPermissions = new Map<string, PendingPermission>()
 
   // ===== 实时观察 / 回合过程推送 =====
-  // 单条 SSE 连接按 sessionID 分流，多订阅者（自身回合 + /watch）共享；
-  // 同一会话重复订阅同 userId 不会双发（Set 去重）。
+  // 单条 SSE 连接按 sessionID 分流，多订阅者共享（同会话同 userId Set 去重不双发）。
+  // 里程碑投递 = /watch 专属（2026-10-14 拍板）；sessionSubs 只管 SSE 活性与去重。
   const eventStream = createEventStream(client.baseUrl)
   const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   const sessionUnsubs = new Map<string, () => void>()  // sessionID -> SSE 退订
@@ -104,9 +105,9 @@ export function createBridge(
   function onSessionEvent(sessionID: string, ev: V2Event): void {
     const line = formatMilestone(ev, callCache)
     if (!line) return
-    const targets = sessionSubs.get(sessionID)
-    if (!targets) return
-    for (const userId of targets) enqueuePush(userId, line)
+    // 2026-10-14 用户拍板：里程碑只投 /watch 显式订阅者——自身回合回显与
+    // 会话订阅表的其他来源一律不再隐式携带（镜像只发📋摘要卡）。
+    for (const userId of milestoneTargets(activeWatches, sessionID)) enqueuePush(userId, line)
   }
 
   function enqueuePush(userId: string, line: string): void {
@@ -387,6 +388,8 @@ export function createBridge(
 
   // 摘要镜像：启动时对全部映射会话挂常驻订阅
   ensureMirrorSubs()
+  // 图片落盘：清理 7 天前的 QQ 图片（原生附件接入）
+  purgeOldQQImages()
 
   const handleMessage = async (ctx: MessageContext): Promise<void> => {
     try {
@@ -396,7 +399,8 @@ export function createBridge(
       }
 
       const content = ctx.content.trim()
-      if (!content) {
+      // 纯图消息（无文字但有附件）同样放行；真空消息才丢
+      if (!content && !ctx.attachments?.length) {
         return
       }
       // 记录最近消息上下文：观察/过程推送的通道选择（被动优先）
@@ -451,13 +455,21 @@ export function createBridge(
         sessionId = session.sessionId
         // 新回合取代旧的后台等待（steer 合并运行时只投递一次合并结果）
         bgWaits.get(sessionId)?.cancel()
-        // 自身回合过程可见：与 /watch 共用订阅通道（同会话同用户 Set 去重不双发）
+        // 会话订阅通道（SSE 活性 + 同会话同用户 Set 去重不双发）；里程碑投递
+        // 已改 /watch 专属（2026-10-14），此订阅只保通道不再隐式携带推送
         subscribeSession(sessionId, ctx.userId)
         // 摘要镜像：新映射会话补挂订阅；QQ 轮次在途标记（防完成后重复镜像）
         ensureMirrorSubs()
         qqTurnActive.add(sessionId)
         turnStart = Date.now()
-        const replyText = await client.promptAndWait(sessionId, content, {
+        // 原生附件接入（2026-10-14）：QQ 图片下载落盘 → prompt files；
+        // 下载失败/类型不支持转成可见文字备注，绝不静默丢
+        const prepared = await prepareQQAttachments(ctx.attachments, () =>
+          getAccessToken(config.qq.appId, config.qq.clientSecret),
+        )
+        const { text: promptText, files } = augmentPromptWithAttachments(content, prepared)
+        const replyText = await client.promptAndWait(sessionId, promptText, {
+          files: files.length ? files : undefined,
           onPermission: (req) => waitForPermissionDecision(ctx, req, sessionId),
           onPermissionReplied: (d) => {
             void safeDeliver(ctx, `已${DECISION_LABELS[d]}，AI 将继续执行…`)
@@ -676,6 +688,20 @@ const DECISION_LABELS: Record<PermissionDecision, string> = {
   once: "允许（本次）",
   always: "总是允许（已存入项目白名单）",
   reject: "拒绝",
+}
+
+// 里程碑投递目标（纯函数，供单测）：只认 /watch 显式订阅（activeWatches）。
+// 2026-10-14 拍板：推不推完全由用户显式控制；sessionSubs（自身回合/镜像等
+// 来源）不再隐式携带里程碑，避免"没开 /watch 却在收"的噪声。
+export function milestoneTargets(
+  activeWatches: ReadonlyMap<string, string>,
+  sessionID: string,
+): string[] {
+  const out: string[] = []
+  for (const [userId, sid] of activeWatches) {
+    if (sid === sessionID) out.push(userId)
+  }
+  return out
 }
 
 // 解析用户的审批回复（自然语言或 /allow /always /deny 命令式）。
