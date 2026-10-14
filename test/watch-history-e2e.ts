@@ -27,7 +27,13 @@ await fetch(`${base}/session/${sid}/prompt`, {
   method: "POST", headers: H,
   body: JSON.stringify({ text: "执行 shell 命令 echo stream-test-999，然后告诉我输出" }),
 })
-await new Promise((r) => setTimeout(r, 14000))
+// 自适应等待轮次终态（2026-10-14 修：①写死 14s 慢模型下漏终态；②首版 startsWith("session.execution.")
+// 误把 .started 当终态 → 窗口 1s 自关。终态仅 succeeded/failed 两种）
+const deadline = Date.now() + 90_000
+while (Date.now() < deadline && !seen.some((t) => t === "session.execution.succeeded" || t === "session.execution.failed")) {
+  await new Promise((r) => setTimeout(r, 1000))
+}
+await new Promise((r) => setTimeout(r, 500)) // 终态事件与消息落库的排序余量
 console.log("T1 events:", JSON.stringify(seen))
 assert(seen.includes("session.tool.called"), "收到 tool.called")
 assert(seen.includes("session.execution.succeeded"), "收到 execution.succeeded")
