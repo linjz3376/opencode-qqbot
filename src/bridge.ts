@@ -1,15 +1,15 @@
-// @input:  ./config, ./qq/* (types, api, sender), ./opencode/* (client, sessions), ./commands
-// @output: createBridge, isAllowedUser, milestoneTargets, loadWatchedMap, saveWatchedMap
+// @input:  ./config, ./qq/* (types, api, sender), ./opencode/* (client, sessions), ./commands, ./core/*
+// @output: createBridge, isAllowedUser, milestoneTargets, loadWatchedMap, saveWatchedMap,
+//          （O7b 再导出）parsePermissionDecision, formatPermissionPrompt
 // @pos:    根层 - 核心桥接: QQ 消息 -> OpenCode -> QQ 回复
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
 import type { Config } from "./config.js"
 import type { MessageContext } from "./qq/types.js"
-import { getAccessToken, sendC2CMessage, sendGroupMessage, getNextMsgSeq } from "./qq/api.js"
-import { replyToQQ } from "./qq/sender.js"
+import { getAccessToken } from "./qq/api.js"
 import { prepareQQAttachments, augmentPromptWithAttachments, purgeOldQQImages } from "./qq/media.js"
-import type { OpencodeClient, PermissionDecision, PermissionRequest } from "./opencode/client.js"
+import type { OpencodeClient } from "./opencode/client.js"
 import { collectReplyText } from "./opencode/client.js"
 import { createEventStream, type V2Event } from "./opencode/eventstream.js"
 import { summarizeInput, redactSecrets } from "./opencode/history.js"
@@ -24,28 +24,20 @@ import {
   type PendingSelection,
   type WatchApi,
 } from "./commands.js"
-import { buildDigest } from "./opencode/mirror.js"
+import { createMirror } from "./core/mirror.js"
+import {
+  createPermissionGate,
+  parsePermissionDecision,
+  formatPermissionPrompt,
+  DECISION_LABELS,
+} from "./core/permission.js"
+import { truncate } from "./core/util.js"
+import { createDelivery } from "./core/delivery.js"
+// O7b：解析/格式化保持经 bridge 再导出——单测与既有调用方导入路径不变
+export { parsePermissionDecision, formatPermissionPrompt } from "./core/permission.js"
 
 interface Bridge {
   handleMessage: (ctx: MessageContext) => Promise<void>
-}
-
-// 用户级单槽：一次只有一个待审批请求在等该用户回复
-interface PendingPermission {
-  request: PermissionRequest
-  mainSessionId: string // 审批发起时的主会话（子会话请求需要它做来源标注）
-  resolve: (decision: PermissionDecision) => void
-  timer: ReturnType<typeof setTimeout> | null
-  ctx: MessageContext // O2：落盘快照，跨重启直答用
-  createdAt: number // O2：TTL 基准（落盘与恢复共用）
-  restored?: boolean // O2：启动恢复条目（无活 waiter，走直连 reply）
-}
-
-// 用户级推送队列：节流合并（主动消息配额记账已移至 activeQuota 共享）
-interface PushQueue {
-  lastSent: number
-  timer: ReturnType<typeof setTimeout> | null
-  lines: string[]
 }
 
 export function createBridge(
@@ -58,7 +50,6 @@ export function createBridge(
   // full command list to every user on their next message.
   const greeted = loadGreetedSet()
   const pendingSelections = new Map<string, PendingSelection>()
-  const pendingPermissions = new Map<string, PendingPermission>()
 
   // ===== 实时观察 / 回合过程推送 =====
   // 单条 SSE 连接按 sessionID 分流，多订阅者共享（同会话同 userId Set 去重不双发）。
@@ -68,22 +59,8 @@ export function createBridge(
   const sessionUnsubs = new Map<string, () => void>()  // sessionID -> SSE 退订
   const activeWatches = new Map<string, string>()      // userId -> sessionID（/watch 显式订阅）
   const lastCtx = new Map<string, MessageContext>()    // userId -> 最近消息 ctx（推送通道选择依据）
-  const pushQueues = new Map<string, PushQueue>()
-  const activeQuota = new Map<string, { day: string; count: number; warned: boolean }>()
-  // O5：恢复落盘配额（非当日条目由 deliver 按 day 字段自然重置）
-  for (const [uid, q] of Object.entries(loadQuotaMap())) activeQuota.set(uid, q)
   const bgWaits = new Map<string, { cancel: () => void }>() // 会话 -> 后台等待
   const callCache = new Map<string, string>()              // callID -> 命令摘要（⚠️ 上下文用）
-  const mirrorUnsubs = new Map<string, () => void>()       // 摘要镜像订阅（独立于 /watch）
-  const qqTurnActive = new Set<string>()                   // QQ 发起的轮次在途（镜像跳过防重复）
-  const mirrorState = { enabled: loadMirrorEnabled() }
-
-  const PUSH_MIN_GAP_MS = 2000      // 用户级节流：最快 2 秒一批
-  const PUSH_MAX_LINES = 6          // 队列上限：洪峰丢最旧，防积压
-  // 债务D4（2026-10-13 官方文档查证）：主动消息频控 = 单关系 1000 条/天 + 20/qpm，
-  // Bot 维度认证 10/qps（超限报 40034100）。原自设 15/天过度保守 → 默认 100 留
-  // 余量，可用 env QQ_ACTIVE_DAILY_LIMIT 覆盖。
-  const ACTIVE_DAILY_LIMIT = Number(process.env.QQ_ACTIVE_DAILY_LIMIT ?? 100)
 
   function subscribeSession(sessionID: string, userId: string): void {
     if (!sessionSubs.has(sessionID)) {
@@ -115,151 +92,7 @@ export function createBridge(
     for (const userId of milestoneTargets(activeWatches, sessionID)) enqueuePush(userId, line)
   }
 
-  function enqueuePush(userId: string, line: string): void {
-    let q = pushQueues.get(userId)
-    if (!q) {
-      q = { lastSent: 0, timer: null, lines: [] }
-      pushQueues.set(userId, q)
-    }
-    if (q.lines.length >= PUSH_MAX_LINES) q.lines.shift()
-    q.lines.push(line)
-    if (q.timer) return
-    const wait = Math.max(0, PUSH_MIN_GAP_MS - (Date.now() - q.lastSent))
-    q.timer = setTimeout(() => {
-      q!.timer = null
-      void flushPush(userId)
-    }, wait)
-  }
-
-  // 统一投递：被动回复优先（ctx.msg_id，5 分钟窗口内、无配额消耗）；
-  // 窗口过期/失败降级主动消息（计日配额，超限告警一次）。
-  // 观察推送与最终回复共用——超长回合（>被动窗口）的答案靠它送达
-  //（2026-10-13 实测教训：回合 >5 分钟时旧路径答案永久丢失）。
-  async function deliver(ctx: MessageContext, text: string): Promise<void> {
-    try {
-      await sendReply(ctx, text)
-      return
-    } catch (error) {
-      console.warn(
-        "[bridge] 被动回复失败（可能超 5 分钟窗口），降级主动消息:",
-        error instanceof Error ? error.message : error,
-      )
-    }
-
-    const today = new Date().toISOString().slice(0, 10)
-    let q = activeQuota.get(ctx.userId)
-    if (!q || q.day !== today) {
-      q = { day: today, count: 0, warned: false }
-      activeQuota.set(ctx.userId, q)
-    }
-    if (q.count >= ACTIVE_DAILY_LIMIT) {
-      if (!q.warned) {
-        q.warned = true
-        saveQuotaMap(activeQuota) // O5：告警态也落盘
-        console.warn(`[bridge] 用户 ${ctx.userId} 今日主动推送配额用尽，窗口外消息无法送达`)
-        try {
-          await sendActive(ctx, "⚠️ 今日主动推送配额已用尽（QQ 限制），窗口外消息明日恢复送达")
-        } catch {
-          // 告警也发不出去就静默
-        }
-      }
-      throw new Error("主动消息配额已用尽，本条无法送达")
-    }
-    await sendActive(ctx, text)
-    q.count++
-    saveQuotaMap(activeQuota) // O5：计数落盘，跨重启不归零
-  }
-
-  async function flushPush(userId: string): Promise<void> {
-    const q = pushQueues.get(userId)
-    const ctx = lastCtx.get(userId)
-    if (!q || q.lines.length === 0) return
-    if (!ctx) {
-      q.lines.length = 0
-      return
-    }
-    const text = q.lines.splice(0, q.lines.length).map((l) => `· ${l}`).join("\n")
-    q.lastSent = Date.now()
-    try {
-      await deliver(ctx, text)
-    } catch (error) {
-      console.error("[bridge] 观察推送失败（被动+主动均失败，丢弃本批）:", error)
-    }
-  }
-
-  async function safeDeliver(c: MessageContext, text: string): Promise<void> {
-    try {
-      await deliver(c, text)
-    } catch (error) {
-      console.error("[bridge] 消息无法送达（被动+主动均失败）:", error)
-    }
-  }
-
-  // ===== 摘要镜像（E 阶段 A 方案）：桌面会话轮次完成 → QQ 摘要卡 =====
-  // 与 /watch 观察推送互补：观察给过程里程碑，镜像给问答正文摘要。
-  // QQ 自己发起的轮次由 promptAndWait 正常回复，不重复镜像（qqTurnActive 守卫）。
-  function ensureMirrorSubs(): void {
-    if (!mirrorState.enabled) return
-    for (const { sessionId } of sessions.all()) {
-      if (mirrorUnsubs.has(sessionId)) continue
-      mirrorUnsubs.set(
-        sessionId,
-        eventStream.subscribe(sessionId, (ev) => {
-          if (!mirrorState.enabled) return
-          if (ev.type !== "session.execution.succeeded") return
-          if (qqTurnActive.has(sessionId)) {
-            console.log(`[mirror] 跳过：QQ 回合在途（由 promptAndWait 直答）session=${sessionId}`)
-            return
-          }
-          void mirrorTurn(sessionId)
-        }),
-      )
-    }
-  }
-
-  function disableMirrorSubs(): void {
-    for (const unsub of mirrorUnsubs.values()) unsub()
-    mirrorUnsubs.clear()
-  }
-
-  // QQ 轮次结束后延迟解锁镜像：SSE 完成事件可能晚于 promptAndWait 返回，
-  // 5 秒宽限内若又有新 QQ 回合/后台等待在途则不解锁（防竞态开窗）。
-  function scheduleMirrorUnlock(sessionId: string): void {
-    setTimeout(() => {
-      if (bgWaits.has(sessionId)) return
-      const ownerBusy = sessions
-        .all()
-        .some((x) => x.sessionId === sessionId && busyUsers.has(x.userId))
-      if (ownerBusy) return
-      qqTurnActive.delete(sessionId)
-    }, 5000)
-  }
-
-  async function mirrorTurn(sessionID: string): Promise<void> {
-    try {
-      const owners = sessions.all().filter((x) => x.sessionId === sessionID).map((x) => x.userId)
-      if (owners.length === 0) {
-        console.log(`[mirror] 跳过：会话无映射主人 session=${sessionID}`)
-        return
-      }
-      const listJson = await client.session.messages({ path: { id: sessionID } })
-      const digest = buildDigest(listJson?.data ?? [])
-      if (!digest) {
-        console.log(`[mirror] 跳过：无可摘要内容（空轮/纯工具轮）session=${sessionID}`)
-        return
-      }
-      for (const userId of owners) {
-        // 无最近 ctx（重启后尚未收到新消息）→ 构造主动通道 ctx，
-        // deliver 的被动尝试失败会自然降级为主动消息（D4 配额内）。
-        const recent = lastCtx.get(userId)
-        const ctx: MessageContext = recent ?? { type: "c2c", userId, msgId: "", content: "" }
-        await safeDeliver(ctx, digest)
-      }
-      console.log(`[mirror] 会话 ${sessionID} 摘要已镜像给 ${owners.length} 个用户`)
-    } catch (error) {
-      console.error("[mirror] 摘要镜像失败:", error)
-    }
-  }
+  // ===== 摘要镜像域已随 O7d 收进 core/mirror.ts（订阅/在途标记/解锁/摘要投递）=====
 
   // ===== 后台等待：前台超时后不放弃，任务完成时回传结果 =====
   // SSE execution.succeeded 即时触发 + 5 分钟轮询兜底（防 SSE 断连漏事件），
@@ -278,7 +111,7 @@ export function createBridge(
       clearTimeout(giveupTimer)
       bgWaits.delete(sessionId)
       // 后台等待结束（完成/被新回合取代）→ 延迟解锁摘要镜像
-      scheduleMirrorUnlock(sessionId)
+      mirror.scheduleUnlock(sessionId)
     }
 
     async function finish(kind: "done" | "giveup"): Promise<void> {
@@ -328,22 +161,6 @@ export function createBridge(
     console.log(`[bridge] 会话 ${sessionId} 转入后台等待（最长 ${BG_WAIT_MAX_MS / 3_600_000} 小时）`)
   }
 
-  // 主动消息（不带 msg_id）：markdown 优先，失败回退纯文本
-  async function sendActive(ctx: MessageContext, text: string): Promise<void> {
-    const token = await getAccessToken(config.qq.appId, config.qq.clientSecret)
-    const seq = getNextMsgSeq("")
-    const isGroup = ctx.type === "group" && ctx.groupId
-    try {
-      if (isGroup) await sendGroupMessage(token, ctx.groupId!, text, undefined, seq, true)
-      else await sendC2CMessage(token, ctx.userId, text, undefined, seq, true)
-      return
-    } catch (error) {
-      console.error("[bridge] 主动 markdown 发送失败，回退纯文本:", error)
-    }
-    if (isGroup) await sendGroupMessage(token, ctx.groupId!, text, undefined, seq, false)
-    else await sendC2CMessage(token, ctx.userId, text, undefined, seq, false)
-  }
-
   const watchApi: WatchApi = {
     start(userId, sessionID, ctx) {
       const prev = activeWatches.get(userId)
@@ -372,27 +189,16 @@ export function createBridge(
     },
   }
 
-  const mirrorApi: MirrorApi = {
-    set(enabled) {
-      const prev = mirrorState.enabled
-      mirrorState.enabled = enabled
-      saveMirrorEnabled(enabled)
-      if (enabled) {
-        if (!prev) ensureMirrorSubs()
-      } else {
-        disableMirrorSubs()
-      }
-      return enabled
-        ? "✅ 摘要镜像已开启：桌面会话轮次完成后推送问答摘要"
-        : "🔇 摘要镜像已关闭（/mirror on 重新开启）"
-    },
-    status() {
-      const subs = mirrorUnsubs.size
-      return mirrorState.enabled
-        ? `📋 摘要镜像：开（已挂 ${subs} 个会话订阅）`
-        : "📋 摘要镜像：关（/mirror on 开启）"
-    },
-  }
+  // O7c：投递域门面（统一投递/降级/配额/节流队列/被动回复全在 core/delivery.ts）
+  const { enqueuePush, safeDeliver, sendReply } = createDelivery(config, lastCtx)
+
+  // O7b：审批域门面（挂起槽/等待/裁决/跨重启恢复全在 core/permission.ts）
+  const perm = createPermissionGate({ client, sendReply, safeDeliver })
+
+  // O7d：摘要镜像域门面（订阅/回合标记/延迟解锁/摘要投递全在 core/mirror.ts）
+  const mirror = createMirror({ sessions, eventStream, client, lastCtx, safeDeliver, bgWaits, busyUsers })
+
+  const mirrorApi: MirrorApi = mirror.api
 
   const commandContext: CommandContext = {
     config,
@@ -425,41 +231,11 @@ export function createBridge(
     if (pruned) saveWatchedMap(activeWatches)
   }
 
-  // O2（P2-4a）：恢复重启前挂起的审批（30min TTL 内有效）；恢复条目超时则
-  // 直连 reject 解阻塞会话（原 waiter 已不存在，无人代答）
-  {
-    const saved = loadPendingPermMap()
-    for (const [uid, e] of Object.entries(saved)) {
-      const left = PERM_PROMPT_TTL_MS - (Date.now() - e.createdAt)
-      if (left <= 0) continue
-      const timer = setTimeout(() => {
-        if (pendingPermissions.get(uid)?.request.id === e.request.id) {
-          pendingPermissions.delete(uid)
-          savePendingPermMap(pendingPermissions)
-          void client.permission
-            .reply({
-              path: { sessionID: e.request.sessionID, requestID: e.request.id },
-              body: { decision: "reject" },
-            })
-            .catch(() => {})
-          void safeDeliver(e.ctx, "审批超时（30 分钟），已自动拒绝该权限请求").catch(() => {})
-        }
-      }, left)
-      pendingPermissions.set(uid, {
-        request: e.request,
-        mainSessionId: e.mainSessionId,
-        resolve: () => {},
-        timer,
-        ctx: e.ctx,
-        createdAt: e.createdAt,
-        restored: true,
-      })
-      console.log(`[perm] 恢复重启前挂起的审批 ${uid.slice(0, 8)}… request=${e.request.id}`)
-    }
-  }
+  // O2（P2-4a）：恢复重启前挂起的审批（逻辑随 O7b 收进 core/permission.ts）
+  perm.restore()
 
   // 摘要镜像：启动时对全部映射会话挂常驻订阅
-  ensureMirrorSubs()
+  mirror.ensureSubs()
   // 图片落盘：清理 7 天前的 QQ 图片（原生附件接入）
   purgeOldQQImages()
 
@@ -487,10 +263,10 @@ export function createBridge(
       // 权限审批决策优先于命令/普通消息：原 prompt 在 promptAndWait 里
       // 挂起等待该 promise（busy 检查也在其后，不会被"处理中"拒绝）。
       const decision = parsePermissionDecision(content)
-      if (decision && pendingPermissions.has(ctx.userId)) {
+      if (decision && perm.hasPending(ctx.userId)) {
         // 债务D2：不在这里发"已允许"——等 client 的 reply POST 成功回调
         //（onPermissionReplied）再确认；404（桌面已批）走 onPermissionConflict。
-        resolvePermission(ctx.userId, decision)
+        perm.resolve(ctx.userId, decision)
         return
       }
 
@@ -507,7 +283,7 @@ export function createBridge(
       }
 
       // 审批待决时，普通消息不进新 prompt（会话正阻塞在审批上），重发审批菜单
-      const pendingPerm = pendingPermissions.get(ctx.userId)
+      const pendingPerm = perm.getPending(ctx.userId)
       if (pendingPerm) {
         await sendReply(ctx, formatPermissionPrompt(pendingPerm.request, pendingPerm.mainSessionId))
         return
@@ -531,8 +307,7 @@ export function createBridge(
         // 已改 /watch 专属（2026-10-14），此订阅只保通道不再隐式携带推送
         subscribeSession(sessionId, ctx.userId)
         // 摘要镜像：新映射会话补挂订阅；QQ 轮次在途标记（防完成后重复镜像）
-        ensureMirrorSubs()
-        qqTurnActive.add(sessionId)
+        mirror.beginTurn(sessionId)
         turnStart = Date.now()
         // 原生附件接入（2026-10-14）：QQ 图片下载落盘 → prompt files；
         // 下载失败/类型不支持转成可见文字备注，绝不静默丢
@@ -542,7 +317,7 @@ export function createBridge(
         const { text: promptText, files } = augmentPromptWithAttachments(content, prepared)
         const replyText = await client.promptAndWait(sessionId, promptText, {
           files: files.length ? files : undefined,
-          onPermission: (req) => waitForPermissionDecision(ctx, req, sessionId),
+          onPermission: (req) => perm.waitForDecision(ctx, req, sessionId),
           onPermissionReplied: (d) => {
             void safeDeliver(ctx, `已${DECISION_LABELS[d]}，AI 将继续执行…`)
           },
@@ -570,7 +345,7 @@ export function createBridge(
       } finally {
         if (sessionId) unsubscribeSession(sessionId, ctx.userId) // /watch 若仍挂着则保留订阅
         // 镜像解锁：转后台的任务由 bgWait 完成时解锁，其余延迟 5 秒（SSE 事件宽限）
-        if (sessionId && !bgWaits.has(sessionId)) scheduleMirrorUnlock(sessionId)
+        if (sessionId && !bgWaits.has(sessionId)) mirror.scheduleUnlock(sessionId)
         busyUsers.delete(ctx.userId)
       }
     } catch (error) {
@@ -581,70 +356,6 @@ export function createBridge(
         console.error("[bridge] failed to send error reply:", replyError)
       }
     }
-  }
-
-  async function sendReply(ctx: MessageContext, text: string): Promise<void> {
-    const accessToken = await getAccessToken(config.qq.appId, config.qq.clientSecret)
-    await replyToQQ(accessToken, ctx, text, config.maxReplyLength)
-  }
-
-  // promptAndWait 的 onPermission 回调：推 QQ 审批菜单，挂起等待用户回复。
-  // 只有 用户回复 或 30 分钟 TTL 会 resolve —— 后者自动拒绝，避免永久挂起。
-  function waitForPermissionDecision(
-    ctx: MessageContext,
-    request: PermissionRequest,
-    mainSessionId: string,
-  ): Promise<PermissionDecision> {
-    return new Promise<PermissionDecision>((resolve) => {
-      const timer = setTimeout(() => {
-        if (pendingPermissions.get(ctx.userId)?.request.id === request.id) {
-          pendingPermissions.delete(ctx.userId)
-          savePendingPermMap(pendingPermissions)
-          resolve("reject")
-          void sendReply(ctx, "审批超时（30 分钟），已自动拒绝该权限请求").catch(() => {})
-        }
-      }, PERM_PROMPT_TTL_MS)
-
-      pendingPermissions.set(ctx.userId, {
-        request,
-        mainSessionId,
-        resolve,
-        timer,
-        ctx,
-        createdAt: Date.now(),
-      })
-      savePendingPermMap(pendingPermissions) // O2：落盘，重启不丢
-      // 通知失败不 reject promise（用户仍可能稍后主动回复）
-      void sendReply(ctx, formatPermissionPrompt(request, mainSessionId)).catch((error) => {
-        console.error("[bridge] 发送审批请求失败:", error)
-      })
-    })
-  }
-
-  function resolvePermission(userId: string, decision: PermissionDecision): void {
-    const entry = pendingPermissions.get(userId)
-    if (!entry) return
-    if (entry.timer) clearTimeout(entry.timer)
-    pendingPermissions.delete(userId)
-    savePendingPermMap(pendingPermissions)
-    if (entry.restored) {
-      // O2（P2-4a）：跨重启——原 waiter 已随进程消失，直连 POST reply 争取
-      // 原位生效；会话已不在等待则明确回执"重新发起"，绝不灌会话当普通消息
-      void (async () => {
-        const label = decision === "always" ? "总是允许" : decision === "once" ? "允许" : "拒绝"
-        try {
-          await client.permission.reply({
-            path: { sessionID: entry.request.sessionID, requestID: entry.request.id },
-            body: { decision },
-          })
-          await safeDeliver(entry.ctx, `✅ 审批已跨重启完成（${label}），原会话已继续`)
-        } catch {
-          await safeDeliver(entry.ctx, "⚠️ 审批未能跨重启完成（原请求可能已失效），请重新发起原操作")
-        }
-      })()
-      return
-    }
-    entry.resolve(decision)
   }
 
   return { handleMessage }
@@ -708,84 +419,6 @@ export function saveWatchedMap(m: ReadonlyMap<string, string>, file: string = WA
   }
 }
 
-// O2（2026-10-15，P2-4a）：审批中断态落盘——重启前挂起的审批重启后仍可
-// 处置（直连 reply 或明确回执），不再出现"回复允许灌进会话当普通消息"的
-// 误导路径。与 greeted/watch.json 同款风格（损坏即空）。
-const PENDING_PERM_FILE = join(homedir(), ".openqq", "pending-permissions.json")
-
-type PersistedPermission = {
-  request: PermissionRequest
-  mainSessionId: string
-  createdAt: number
-  ctx: MessageContext
-}
-
-function loadPendingPermMap(): Record<string, PersistedPermission> {
-  try {
-    if (existsSync(PENDING_PERM_FILE)) {
-      const raw = readFileSync(PENDING_PERM_FILE, "utf-8")
-      const obj = JSON.parse(raw)
-      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-        const out: Record<string, PersistedPermission> = {}
-        for (const [k, v] of Object.entries(obj)) {
-          const e = v as PersistedPermission
-          if (e && e.request?.id && e.ctx?.userId && typeof e.createdAt === "number") out[k] = e
-        }
-        return out
-      }
-    }
-  } catch {
-    // 损坏即空
-  }
-  return {}
-}
-
-function savePendingPermMap(m: ReadonlyMap<string, PendingPermission>): void {
-  try {
-    const out: Record<string, PersistedPermission> = {}
-    for (const [uid, e] of m) {
-      if (!e.ctx) continue
-      out[uid] = { request: e.request, mainSessionId: e.mainSessionId, createdAt: e.createdAt, ctx: e.ctx }
-    }
-    writeFileSync(PENDING_PERM_FILE, JSON.stringify(out))
-  } catch (error) {
-    console.warn("[perm] 审批态落盘失败:", error instanceof Error ? error.message : error)
-  }
-}
-
-// O5（2026-10-15，P2-4b）：主动配额落盘——跨重启不归零，防日配额轻微超发。
-const QUOTA_FILE = join(homedir(), ".openqq", "quota.json")
-
-function loadQuotaMap(): Record<string, { day: string; count: number; warned: boolean }> {
-  try {
-    if (existsSync(QUOTA_FILE)) {
-      const raw = readFileSync(QUOTA_FILE, "utf-8")
-      const obj = JSON.parse(raw)
-      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-        const out: Record<string, { day: string; count: number; warned: boolean }> = {}
-        for (const [k, v] of Object.entries(obj)) {
-          const e = v as { day?: unknown; count?: unknown; warned?: unknown }
-          if (typeof e?.day === "string" && typeof e.count === "number") {
-            out[k] = { day: e.day, count: e.count, warned: Boolean(e.warned) }
-          }
-        }
-        return out
-      }
-    }
-  } catch {
-    // 损坏即空
-  }
-  return {}
-}
-
-function saveQuotaMap(m: ReadonlyMap<string, { day: string; count: number; warned: boolean }>): void {
-  try {
-    writeFileSync(QUOTA_FILE, JSON.stringify(Object.fromEntries(m)))
-  } catch (error) {
-    console.warn("[bridge] 配额落盘失败:", error instanceof Error ? error.message : error)
-  }
-}
-
 const GREETED_FILE = join(homedir(), ".openqq", "greeted.json")
 
 function loadGreetedSet(): Set<string> {
@@ -811,44 +444,6 @@ function saveGreetedSet(set: Set<string>): void {
     console.error("[bridge] 保存 greeted 失败:", error)
   }
 }
-
-// 摘要镜像开关（~/.openqq/settings.json 持久；BOM 防御与 greeted 一致）
-const MIRROR_SETTINGS_FILE = join(homedir(), ".openqq", "settings.json")
-
-function loadMirrorEnabled(): boolean {
-  try {
-    if (existsSync(MIRROR_SETTINGS_FILE)) {
-      const raw = readFileSync(MIRROR_SETTINGS_FILE, "utf-8").replace(/^\uFEFF/, "")
-      const parsed = JSON.parse(raw)
-      if (typeof parsed?.mirror === "boolean") return parsed.mirror
-    }
-  } catch {
-    // fall through to default
-  }
-  return true // 默认开（用户点单 A 摘要镜像）
-}
-
-function saveMirrorEnabled(enabled: boolean): void {
-  try {
-    mkdirSync(join(homedir(), ".openqq"), { recursive: true })
-    let existing: Record<string, unknown> = {}
-    if (existsSync(MIRROR_SETTINGS_FILE)) {
-      try {
-        const raw = readFileSync(MIRROR_SETTINGS_FILE, "utf-8").replace(/^\uFEFF/, "")
-        const parsed = JSON.parse(raw)
-        if (parsed && typeof parsed === "object") existing = parsed
-      } catch {
-        // 损坏则重建
-      }
-    }
-    existing.mirror = enabled
-    writeFileSync(MIRROR_SETTINGS_FILE, JSON.stringify(existing, null, 2), "utf-8")
-  } catch (error) {
-    console.error("[mirror] 保存设置失败:", error)
-  }
-}
-
-const PERM_PROMPT_TTL_MS = 30 * 60 * 1000
 
 // 里程碑映射（事件载荷实测 2026-10-13）：
 //   tool.called.data.input{command,...} → 动作可见
@@ -893,12 +488,6 @@ export function formatMilestone(ev: V2Event, calls?: Map<string, string>): strin
   }
 }
 
-const DECISION_LABELS: Record<PermissionDecision, string> = {
-  once: "允许（本次）",
-  always: "总是允许（已存入项目白名单）",
-  reject: "拒绝",
-}
-
 // 里程碑投递目标（纯函数，供单测）：只认 /watch 显式订阅（activeWatches）。
 // 2026-10-14 拍板：推不推完全由用户显式控制；sessionSubs（自身回合/镜像等
 // 来源）不再隐式携带里程碑，避免"没开 /watch 却在收"的噪声。
@@ -911,51 +500,6 @@ export function milestoneTargets(
     if (sid === sessionID) out.push(userId)
   }
   return out
-}
-
-// 解析用户的审批回复（自然语言或 /allow /always /deny 命令式）。
-// 优先级：绝对否定 > 总是 > 允许。
-// 安全方向性：审批场景下误判的代价不对称 —— 误拒只需重试，误放行会执行
-// 危险命令。所以否定词最优先，且「不X」前缀词（不同意/不允许/不要/别）
-// 必须盖住「X」（同意/允许）与「总是」（总是不允许 ≠ 总是允许）。
-export function parsePermissionDecision(content: string): PermissionDecision | null {
-  const t = content
-    .trim()
-    .toLowerCase()
-    .replace(/^\/(allow|always|deny|reject|ok|yes|no)\s*$/, "$1")
-  if (!t) return null
-  // 债务D5：混合否定增强——"不ok/不太行/否决/驳回/不可以"等一律 reject。
-  // 方向性不变：否定最优先，歧义一律倒向拒绝（误拒可重试，误放行是事故）。
-  if (
-    /\b(deny|reject|no|nope|nah)\b|拒绝|否决|驳回|不准|不给|^否$|别|不要|不\s*(同意|允许|批准|许可|行|ok|okay|可以)|不(太|怎么|太特么)\s*(行|ok|okay|可以)/.test(t)
-  )
-    return "reject"
-  if (/\balways\b|总是(?!不)|永久/.test(t)) return "always"
-  if (/\b(allow|approve|yes|ok|y)\b|允许|同意|批准/.test(t)) return "once"
-  return null
-}
-
-export function formatPermissionPrompt(request: PermissionRequest, mainSessionId?: string): string {
-  const lines = ["🔐 需要权限审批", `动作：${request.action || "(未知)"}`]
-  // 债务D1：子会话（subagent）发起的审批要标注来源，用户知道批的是谁
-  if (mainSessionId && request.sessionID && request.sessionID !== mainSessionId) {
-    lines.push(`来源：子会话 ${request.sessionID}（subagent 发起）`)
-  }
-  const resources = (request.resources ?? []).slice(0, 5)
-  if (resources.length > 0) {
-    lines.push("资源：")
-    for (const r of resources) lines.push(`  ${truncate(r, 300)}`)
-  }
-  if (request.message) lines.push(`说明：${truncate(request.message, 300)}`)
-  lines.push("")
-  lines.push("回复「允许」= 仅本次｜「总是」= 保存为项目级白名单（后续同类命令永久放行）｜「拒绝」= 驳回（含本会话其他待审）")
-  lines.push("（30 分钟无响应自动拒绝，也可用 /allow /always /deny）")
-  return lines.join("\n")
-}
-
-function truncate(value: string, max: number): string {
-  const s = value.replace(/\s+/g, " ").trim()
-  return s.length > max ? `${s.slice(0, max)}…` : s
 }
 
 function toErrorMessage(error: unknown): string {
