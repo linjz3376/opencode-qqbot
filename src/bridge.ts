@@ -35,7 +35,10 @@ interface PendingPermission {
   request: PermissionRequest
   mainSessionId: string // 审批发起时的主会话（子会话请求需要它做来源标注）
   resolve: (decision: PermissionDecision) => void
-  timer: ReturnType<typeof setTimeout>
+  timer: ReturnType<typeof setTimeout> | null
+  ctx: MessageContext // O2：落盘快照，跨重启直答用
+  createdAt: number // O2：TTL 基准（落盘与恢复共用）
+  restored?: boolean // O2：启动恢复条目（无活 waiter，走直连 reply）
 }
 
 // 用户级推送队列：节流合并（主动消息配额记账已移至 activeQuota 共享）
@@ -67,6 +70,8 @@ export function createBridge(
   const lastCtx = new Map<string, MessageContext>()    // userId -> 最近消息 ctx（推送通道选择依据）
   const pushQueues = new Map<string, PushQueue>()
   const activeQuota = new Map<string, { day: string; count: number; warned: boolean }>()
+  // O5：恢复落盘配额（非当日条目由 deliver 按 day 字段自然重置）
+  for (const [uid, q] of Object.entries(loadQuotaMap())) activeQuota.set(uid, q)
   const bgWaits = new Map<string, { cancel: () => void }>() // 会话 -> 后台等待
   const callCache = new Map<string, string>()              // callID -> 命令摘要（⚠️ 上下文用）
   const mirrorUnsubs = new Map<string, () => void>()       // 摘要镜像订阅（独立于 /watch）
@@ -150,6 +155,7 @@ export function createBridge(
     if (q.count >= ACTIVE_DAILY_LIMIT) {
       if (!q.warned) {
         q.warned = true
+        saveQuotaMap(activeQuota) // O5：告警态也落盘
         console.warn(`[bridge] 用户 ${ctx.userId} 今日主动推送配额用尽，窗口外消息无法送达`)
         try {
           await sendActive(ctx, "⚠️ 今日主动推送配额已用尽（QQ 限制），窗口外消息明日恢复送达")
@@ -161,6 +167,7 @@ export function createBridge(
     }
     await sendActive(ctx, text)
     q.count++
+    saveQuotaMap(activeQuota) // O5：计数落盘，跨重启不归零
   }
 
   async function flushPush(userId: string): Promise<void> {
@@ -200,7 +207,10 @@ export function createBridge(
         eventStream.subscribe(sessionId, (ev) => {
           if (!mirrorState.enabled) return
           if (ev.type !== "session.execution.succeeded") return
-          if (qqTurnActive.has(sessionId)) return
+          if (qqTurnActive.has(sessionId)) {
+            console.log(`[mirror] 跳过：QQ 回合在途（由 promptAndWait 直答）session=${sessionId}`)
+            return
+          }
           void mirrorTurn(sessionId)
         }),
       )
@@ -228,10 +238,16 @@ export function createBridge(
   async function mirrorTurn(sessionID: string): Promise<void> {
     try {
       const owners = sessions.all().filter((x) => x.sessionId === sessionID).map((x) => x.userId)
-      if (owners.length === 0) return
+      if (owners.length === 0) {
+        console.log(`[mirror] 跳过：会话无映射主人 session=${sessionID}`)
+        return
+      }
       const listJson = await client.session.messages({ path: { id: sessionID } })
       const digest = buildDigest(listJson?.data ?? [])
-      if (!digest) return
+      if (!digest) {
+        console.log(`[mirror] 跳过：无可摘要内容（空轮/纯工具轮）session=${sessionID}`)
+        return
+      }
       for (const userId of owners) {
         // 无最近 ctx（重启后尚未收到新消息）→ 构造主动通道 ctx，
         // deliver 的被动尝试失败会自然降级为主动消息（D4 配额内）。
@@ -409,6 +425,39 @@ export function createBridge(
     if (pruned) saveWatchedMap(activeWatches)
   }
 
+  // O2（P2-4a）：恢复重启前挂起的审批（30min TTL 内有效）；恢复条目超时则
+  // 直连 reject 解阻塞会话（原 waiter 已不存在，无人代答）
+  {
+    const saved = loadPendingPermMap()
+    for (const [uid, e] of Object.entries(saved)) {
+      const left = PERM_PROMPT_TTL_MS - (Date.now() - e.createdAt)
+      if (left <= 0) continue
+      const timer = setTimeout(() => {
+        if (pendingPermissions.get(uid)?.request.id === e.request.id) {
+          pendingPermissions.delete(uid)
+          savePendingPermMap(pendingPermissions)
+          void client.permission
+            .reply({
+              path: { sessionID: e.request.sessionID, requestID: e.request.id },
+              body: { decision: "reject" },
+            })
+            .catch(() => {})
+          void safeDeliver(e.ctx, "审批超时（30 分钟），已自动拒绝该权限请求").catch(() => {})
+        }
+      }, left)
+      pendingPermissions.set(uid, {
+        request: e.request,
+        mainSessionId: e.mainSessionId,
+        resolve: () => {},
+        timer,
+        ctx: e.ctx,
+        createdAt: e.createdAt,
+        restored: true,
+      })
+      console.log(`[perm] 恢复重启前挂起的审批 ${uid.slice(0, 8)}… request=${e.request.id}`)
+    }
+  }
+
   // 摘要镜像：启动时对全部映射会话挂常驻订阅
   ensureMirrorSubs()
   // 图片落盘：清理 7 天前的 QQ 图片（原生附件接入）
@@ -550,12 +599,21 @@ export function createBridge(
       const timer = setTimeout(() => {
         if (pendingPermissions.get(ctx.userId)?.request.id === request.id) {
           pendingPermissions.delete(ctx.userId)
+          savePendingPermMap(pendingPermissions)
           resolve("reject")
           void sendReply(ctx, "审批超时（30 分钟），已自动拒绝该权限请求").catch(() => {})
         }
       }, PERM_PROMPT_TTL_MS)
 
-      pendingPermissions.set(ctx.userId, { request, mainSessionId, resolve, timer })
+      pendingPermissions.set(ctx.userId, {
+        request,
+        mainSessionId,
+        resolve,
+        timer,
+        ctx,
+        createdAt: Date.now(),
+      })
+      savePendingPermMap(pendingPermissions) // O2：落盘，重启不丢
       // 通知失败不 reject promise（用户仍可能稍后主动回复）
       void sendReply(ctx, formatPermissionPrompt(request, mainSessionId)).catch((error) => {
         console.error("[bridge] 发送审批请求失败:", error)
@@ -566,8 +624,26 @@ export function createBridge(
   function resolvePermission(userId: string, decision: PermissionDecision): void {
     const entry = pendingPermissions.get(userId)
     if (!entry) return
-    clearTimeout(entry.timer)
+    if (entry.timer) clearTimeout(entry.timer)
     pendingPermissions.delete(userId)
+    savePendingPermMap(pendingPermissions)
+    if (entry.restored) {
+      // O2（P2-4a）：跨重启——原 waiter 已随进程消失，直连 POST reply 争取
+      // 原位生效；会话已不在等待则明确回执"重新发起"，绝不灌会话当普通消息
+      void (async () => {
+        const label = decision === "always" ? "总是允许" : decision === "once" ? "允许" : "拒绝"
+        try {
+          await client.permission.reply({
+            path: { sessionID: entry.request.sessionID, requestID: entry.request.id },
+            body: { decision },
+          })
+          await safeDeliver(entry.ctx, `✅ 审批已跨重启完成（${label}），原会话已继续`)
+        } catch {
+          await safeDeliver(entry.ctx, "⚠️ 审批未能跨重启完成（原请求可能已失效），请重新发起原操作")
+        }
+      })()
+      return
+    }
     entry.resolve(decision)
   }
 
@@ -629,6 +705,84 @@ export function saveWatchedMap(m: ReadonlyMap<string, string>, file: string = WA
     writeFileSync(file, JSON.stringify(Object.fromEntries(m), null, 2))
   } catch (error) {
     console.warn("[watch] 持久化失败:", error instanceof Error ? error.message : error)
+  }
+}
+
+// O2（2026-10-15，P2-4a）：审批中断态落盘——重启前挂起的审批重启后仍可
+// 处置（直连 reply 或明确回执），不再出现"回复允许灌进会话当普通消息"的
+// 误导路径。与 greeted/watch.json 同款风格（损坏即空）。
+const PENDING_PERM_FILE = join(homedir(), ".openqq", "pending-permissions.json")
+
+type PersistedPermission = {
+  request: PermissionRequest
+  mainSessionId: string
+  createdAt: number
+  ctx: MessageContext
+}
+
+function loadPendingPermMap(): Record<string, PersistedPermission> {
+  try {
+    if (existsSync(PENDING_PERM_FILE)) {
+      const raw = readFileSync(PENDING_PERM_FILE, "utf-8")
+      const obj = JSON.parse(raw)
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        const out: Record<string, PersistedPermission> = {}
+        for (const [k, v] of Object.entries(obj)) {
+          const e = v as PersistedPermission
+          if (e && e.request?.id && e.ctx?.userId && typeof e.createdAt === "number") out[k] = e
+        }
+        return out
+      }
+    }
+  } catch {
+    // 损坏即空
+  }
+  return {}
+}
+
+function savePendingPermMap(m: ReadonlyMap<string, PendingPermission>): void {
+  try {
+    const out: Record<string, PersistedPermission> = {}
+    for (const [uid, e] of m) {
+      if (!e.ctx) continue
+      out[uid] = { request: e.request, mainSessionId: e.mainSessionId, createdAt: e.createdAt, ctx: e.ctx }
+    }
+    writeFileSync(PENDING_PERM_FILE, JSON.stringify(out))
+  } catch (error) {
+    console.warn("[perm] 审批态落盘失败:", error instanceof Error ? error.message : error)
+  }
+}
+
+// O5（2026-10-15，P2-4b）：主动配额落盘——跨重启不归零，防日配额轻微超发。
+const QUOTA_FILE = join(homedir(), ".openqq", "quota.json")
+
+function loadQuotaMap(): Record<string, { day: string; count: number; warned: boolean }> {
+  try {
+    if (existsSync(QUOTA_FILE)) {
+      const raw = readFileSync(QUOTA_FILE, "utf-8")
+      const obj = JSON.parse(raw)
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        const out: Record<string, { day: string; count: number; warned: boolean }> = {}
+        for (const [k, v] of Object.entries(obj)) {
+          const e = v as { day?: unknown; count?: unknown; warned?: unknown }
+          if (typeof e?.day === "string" && typeof e.count === "number") {
+            out[k] = { day: e.day, count: e.count, warned: Boolean(e.warned) }
+          }
+        }
+        return out
+      }
+    }
+  } catch {
+    // 损坏即空
+  }
+  return {}
+}
+
+function saveQuotaMap(m: ReadonlyMap<string, { day: string; count: number; warned: boolean }>): void {
+  try {
+    writeFileSync(QUOTA_FILE, JSON.stringify(Object.fromEntries(m)))
+  } catch (error) {
+    console.warn("[bridge] 配额落盘失败:", error instanceof Error ? error.message : error)
   }
 }
 

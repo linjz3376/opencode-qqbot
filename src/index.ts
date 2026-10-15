@@ -11,6 +11,27 @@ import { startGateway } from "./qq/gateway.js"
 import { startBackgroundTokenRefresh, stopBackgroundTokenRefresh } from "./qq/api.js"
 import { createBridge } from "./bridge.js"
 
+// O1（2026-10-15）：开机竞态退避等待——桌面服务未就绪时 20s 重试、15 分钟
+// 上限。今晨实证（09:04–09:31）：fail-fast 秒退 → 看门狗 10 分钟粒度空转 4 次；
+// 退避后服务就绪即起，不再依赖下个看门狗 tick。
+async function waitForOpencode(client: ReturnType<typeof createClient>): Promise<void> {
+  const deadline = Date.now() + 15 * 60 * 1000
+  let attempt = 0
+  for (;;) {
+    try {
+      await healthCheck(client)
+      return
+    } catch (error) {
+      attempt++
+      if (Date.now() >= deadline) throw error
+      console.log(
+        `[index] OpenCode 未就绪（第 ${attempt} 次）：${error instanceof Error ? error.message : error} —20s 后重试`,
+      )
+      await new Promise((r) => setTimeout(r, 20_000))
+    }
+  }
+}
+
 async function main(): Promise<void> {
   await ensureConfig()
   const config = loadConfig()
@@ -20,7 +41,7 @@ async function main(): Promise<void> {
   }
 
   const client = createClient(config.opencode.baseUrl)
-  await healthCheck(client)
+  await waitForOpencode(client)
 
   startBackgroundTokenRefresh(config.qq.appId, config.qq.clientSecret)
 
