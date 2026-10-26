@@ -64,6 +64,9 @@ export interface SessionMessage {
 
 export interface OpencodeClient {
   baseUrl: string
+  // HC2（2026-10-26）：运行中热换基（端口漂移自愈）。原地改闭包 base，
+  // 引用不变——sessions/bridge 等持有方零感知。
+  rebase(url: string): void
   session: {
     create(body?: Record<string, unknown>): Promise<{ data?: { id: string; title?: string } }>
     list(): Promise<{ data?: unknown[] }>
@@ -114,7 +117,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 export function createClient(baseUrl: string): OpencodeClient {
-  const base = baseUrl.replace(/\/+$/, "")
+  // HC2：let 而非 const —— rebase 热换基需要
+  let base = baseUrl.replace(/\/+$/, "")
   const password = process.env.OPENCODE_PASSWORD
   const authHeaders: Record<string, string> = { "Content-Type": "application/json" }
   if (password) {
@@ -143,7 +147,17 @@ export function createClient(baseUrl: string): OpencodeClient {
   }
 
   const oc: OpencodeClient = {
-    baseUrl: base,
+    get baseUrl() {
+      return base
+    },
+
+    rebase(nextUrl: string) {
+      const next = nextUrl.replace(/\/+$/, "")
+      if (next !== base) {
+        console.log(`[opencode] 热换基：${base} → ${next}`)
+        base = next
+      }
+    },
 
     session: {
       async create(body = {}) {
@@ -320,10 +334,10 @@ export function getClient(): OpencodeClient {
   return client
 }
 
-export async function healthCheck(oc: OpencodeClient): Promise<void> {
+export async function healthCheck(oc: OpencodeClient, quiet = false): Promise<void> {
   try {
     await oc.session.list()
-    console.log("[opencode] 连接正常")
+    if (!quiet) console.log("[opencode] 连接正常")
   } catch (error) {
     throw new Error(`OpenCode 连接失败: ${error instanceof Error ? error.message : String(error)}`)
   }

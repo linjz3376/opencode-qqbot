@@ -63,6 +63,16 @@ export class EventStream {
     return this.listeners.size
   }
 
+  // HC2（2026-10-26）：运行中热换基（端口漂移自愈）。不影响当前连接；
+  // 断线重连的下一轮 fetch 即走新址。复盘3-F 的单引号日志 bug 顺手修复。
+  rebase(nextUrl: string): void {
+    const next = nextUrl.replace(/\/+$/, "")
+    if (next !== this.base) {
+      console.log(`[eventstream] 热换基：${this.base} → ${next}`)
+      this.base = next
+    }
+  }
+
   private async consume(): Promise<void> {
     this.running = true
     while (this.listeners.size > 0) {
@@ -89,7 +99,7 @@ export class EventStream {
       } catch (error) {
         if (this.listeners.size === 0) break
         console.error(
-          "[eventstream] 连接中断，${this.backoffMs}ms 后重连:",
+          `[eventstream] 连接中断，${this.backoffMs}ms 后重连:`,
           error instanceof Error ? error.message : String(error),
         )
         await sleep(this.backoffMs)

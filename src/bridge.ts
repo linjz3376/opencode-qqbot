@@ -38,6 +38,8 @@ export { parsePermissionDecision, formatPermissionPrompt } from "./core/permissi
 
 interface Bridge {
   handleMessage: (ctx: MessageContext) => Promise<void>
+  // HC2（2026-10-26）：暴露事件流句柄，index 侧链路自愈巡检需对其热换基
+  eventStream: ReturnType<typeof createEventStream>
 }
 
 export function createBridge(
@@ -358,7 +360,7 @@ export function createBridge(
     }
   }
 
-  return { handleMessage }
+  return { handleMessage, eventStream }
 }
 
 async function maybeHandlePendingSelection(

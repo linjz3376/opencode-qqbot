@@ -7,6 +7,8 @@ import { join } from "path"
 import { homedir } from "os"
 import { createClient, healthCheck, type OpencodeClient } from "./opencode/client.js"
 import { discoverOpencode, persistDiscovery } from "./core/discovery.js"
+import { startLinkWatch } from "./core/linkwatch.js"
+import { getAccessToken, sendC2CMessage, getNextMsgSeq } from "./qq/api.js"
 import { SessionManager } from "./opencode/sessions.js"
 import { startGateway } from "./qq/gateway.js"
 import { startBackgroundTokenRefresh, stopBackgroundTokenRefresh } from "./qq/api.js"
@@ -64,6 +66,24 @@ async function main(): Promise<void> {
 
   const sessions = new SessionManager(client)
   const bridge = createBridge(config, client, sessions)
+  const { eventStream } = bridge
+
+  // HC2（2026-10-26）：运行中链路自愈巡检 + QQ 告警。
+  // 告警走主动消息（allowlist 首个用户），markdown 失败回退纯文本；
+  // 去重由 linkwatch 状态机保证（每事故 open + fixed 各 ≤1 条）。
+  const alarm = async (text: string): Promise<void> => {
+    const uid = config.allowedUsers[0]
+    if (!uid) return
+    const token = await getAccessToken(config.qq.appId, config.qq.clientSecret)
+    const seq = getNextMsgSeq("")
+    try {
+      await sendC2CMessage(token, uid, text, undefined, seq, true)
+    } catch (error) {
+      console.warn("[index] 告警 markdown 发送失败，回退纯文本:", error instanceof Error ? error.message : error)
+      await sendC2CMessage(token, uid, text, undefined, seq, false)
+    }
+  }
+  const linkWatch = startLinkWatch({ client, onRebase: (url) => eventStream.rebase(url), alarm })
 
   const gateway = await startGateway({
     appId: config.qq.appId,
@@ -96,6 +116,7 @@ async function main(): Promise<void> {
     shuttingDown = true
     console.log(`[index] 收到 ${signal}，开始退出...`)
     clearInterval(heartbeatTimer)
+    linkWatch.stop()
     gateway.stop()
     stopBackgroundTokenRefresh()
     setTimeout(() => process.exit(0), 0)
