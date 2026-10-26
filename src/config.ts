@@ -66,7 +66,7 @@ export async function ensureConfig(): Promise<void> {
     `QQ_APP_ID=${appId}`,
     `QQ_APP_SECRET=${appSecret}`,
     `QQ_SANDBOX=false`,
-    `# OPENCODE_BASE_URL=http://localhost:4096`,
+    `# OPENCODE_BASE_URL=http://127.0.0.1:<端口>/api（桌面 2.1.x 端口动态，失联时启动流程会自动发现）`,
     `ALLOWED_USERS=`,
     `MAX_REPLY_LENGTH=3000`,
   ].join("\n") + "\n"

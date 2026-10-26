@@ -5,7 +5,8 @@ import { loadConfig, ensureConfig } from "./config.js"
 import { mkdirSync, writeFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
-import { createClient, healthCheck } from "./opencode/client.js"
+import { createClient, healthCheck, type OpencodeClient } from "./opencode/client.js"
+import { discoverOpencode, persistDiscovery } from "./core/discovery.js"
 import { SessionManager } from "./opencode/sessions.js"
 import { startGateway } from "./qq/gateway.js"
 import { startBackgroundTokenRefresh, stopBackgroundTokenRefresh } from "./qq/api.js"
@@ -14,19 +15,36 @@ import { createBridge } from "./bridge.js"
 // O1（2026-10-15）：开机竞态退避等待——桌面服务未就绪时 20s 重试、15 分钟
 // 上限。今晨实证（09:04–09:31）：fail-fast 秒退 → 看门狗 10 分钟粒度空转 4 次；
 // 退避后服务就绪即起，不再依赖下个看门狗 tick。
-async function waitForOpencode(client: ReturnType<typeof createClient>): Promise<void> {
+// HC1（2026-10-26）：2.1.3 服务端口动态化（实证 49374→28894）。连不上时在
+// 第 1/4/7… 次重试前触发回环端口签名扫描，命中即重建 client 并落盘
+// ~/.openqq/last-discovered.json。.env 配置仍是第一优先，配置可达时零扫描。
+async function waitForOpencode(
+  clientFactory: (url: string) => OpencodeClient,
+  initialUrl: string,
+): Promise<OpencodeClient> {
   const deadline = Date.now() + 15 * 60 * 1000
   let attempt = 0
+  let url = initialUrl
+  let client = clientFactory(url)
   for (;;) {
     try {
       await healthCheck(client)
-      return
+      return client
     } catch (error) {
       attempt++
       if (Date.now() >= deadline) throw error
       console.log(
         `[index] OpenCode 未就绪（第 ${attempt} 次）：${error instanceof Error ? error.message : error} —20s 后重试`,
       )
+      if (attempt === 1 || attempt % 3 === 0) {
+        const found = await discoverOpencode({ password: process.env.OPENCODE_PASSWORD })
+        if (found && found.baseUrl !== url) {
+          console.log(`[index] 端口漂移自动发现：${url} → ${found.baseUrl}（v${found.version}），改用之`)
+          persistDiscovery(found)
+          url = found.baseUrl
+          client = clientFactory(url)
+        }
+      }
       await new Promise((r) => setTimeout(r, 20_000))
     }
   }
@@ -37,11 +55,10 @@ async function main(): Promise<void> {
   const config = loadConfig()
 
   if (!config.opencode.baseUrl) {
-    throw new Error("缺少 OPENCODE_BASE_URL，指向 OpenCode 桌面版 API（如 http://localhost:49374/api）")
+    throw new Error("缺少 OPENCODE_BASE_URL，指向 OpenCode 桌面版 API（如 http://127.0.0.1:<端口>/api；2.1.x 端口动态，失联时启动流程会自动发现）")
   }
 
-  const client = createClient(config.opencode.baseUrl)
-  await waitForOpencode(client)
+  const client = await waitForOpencode((u) => createClient(u), config.opencode.baseUrl)
 
   startBackgroundTokenRefresh(config.qq.appId, config.qq.clientSecret)
 
