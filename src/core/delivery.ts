@@ -9,6 +9,7 @@ import type { Config } from "../config.js"
 import type { MessageContext } from "../qq/types.js"
 import { getAccessToken, sendC2CMessage, sendGroupMessage, getNextMsgSeq } from "../qq/api.js"
 import { replyToQQ } from "../qq/sender.js"
+import { ReplyLimiter } from "./reply-limiter.js"
 
 // 用户级推送队列：节流合并（主动消息配额记账已移至 activeQuota 共享）
 interface PushQueue {
@@ -72,6 +73,10 @@ export function createDelivery(
 
   const pushQueues = new Map<string, PushQueue>()
   const activeQuota = new Map<string, { day: string; count: number; warned: boolean }>()
+  // B1（2026-10-29，吸收自 openclaw-qqbot reply-limiter）：被动回复限额预判——
+  // 单 msgId 4 次/1h 窗口，耗尽/过期直接转主动，省一次注定被拒的 API 往返。
+  // 记账点在 sendReply 成功路径（统一出口，bridge 直调与 deliver 共用）。
+  const passiveLimiter = new ReplyLimiter()
   // O5：恢复落盘配额（非当日条目由 deliver 按 day 字段自然重置）
   for (const [uid, q] of Object.entries(loadQuotaMap())) activeQuota.set(uid, q)
 
@@ -113,14 +118,22 @@ export function createDelivery(
   // 观察推送与最终回复共用——超长回合（>被动窗口）的答案靠它送达
   //（2026-10-13 实测教训：回合 >5 分钟时旧路径答案永久丢失）。
   async function deliver(ctx: MessageContext, text: string): Promise<void> {
-    try {
-      await sendReply(ctx, text)
-      return
-    } catch (error) {
-      console.warn(
-        "[bridge] 被动回复失败（可能超 5 分钟窗口），降级主动消息:",
-        error instanceof Error ? error.message : error,
+    // B1：被动尝试前预判额度，耗尽/过期直接走主动（避免注定被拒的被动请求）
+    const passive = ctx.msgId ? passiveLimiter.checkLimit(ctx.msgId) : null
+    if (passive?.shouldFallbackToProactive) {
+      console.log(
+        `[bridge] 被动回复${passive.fallbackReason === "expired" ? "窗口已过期" : "次数已耗尽"}，直接走主动通道: msgId=${ctx.msgId}`,
       )
+    } else {
+      try {
+        await sendReply(ctx, text)
+        return
+      } catch (error) {
+        console.warn(
+          "[bridge] 被动回复失败（可能超 5 分钟窗口），降级主动消息:",
+          error instanceof Error ? error.message : error,
+        )
+      }
     }
 
     const today = new Date().toISOString().slice(0, 10)
@@ -174,6 +187,8 @@ export function createDelivery(
   async function sendReply(ctx: MessageContext, text: string): Promise<void> {
     const accessToken = await getAccessToken(config.qq.appId, config.qq.clientSecret)
     await replyToQQ(accessToken, ctx, text, config.maxReplyLength)
+    // B1：被动回复成功才记额度（失败不计，避免虚耗）；bridge 直调与 deliver 共用此出口
+    if (ctx.msgId) passiveLimiter.record(ctx.msgId)
   }
 
   return { enqueuePush, deliver, safeDeliver, sendReply }

@@ -17,6 +17,10 @@ const GROUP_AND_C2C_EVENT_INTENT = 1 << 25
 const MAX_RECONNECT_DELAY_MS = 30_000
 const BASE_RECONNECT_DELAY_MS = 1_000
 const INVALID_SESSION_DELAY_MS = 3_000
+// B2（2026-10-29，对齐官方 qqbot-nodejs protocol/gateway/constants.ts）：
+// 4008 = 被平台限流，官方语义须长退避 60s（RATE_LIMIT_DELAY），否则重连风暴加重限流
+const RATE_LIMITED_CLOSE_CODE = 4008
+const RATE_LIMITED_RECONNECT_DELAY_MS = 60_000
 const RESUME_RESET_CLOSE_CODES = new Set([4006, 4007, 4009])
 const FATAL_CLOSE_CODES = new Set([4914, 4915])
 
@@ -406,6 +410,13 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayCont
         if (code === 4004) {
           clearTokenCache()
           state.accessToken = null
+        }
+
+        // B2：4008 平台限流 → 官方语义 60s 长退避（对齐 qqbot-nodejs RATE_LIMIT_DELAY），
+        // 与指数退避（1s 起步 30s 封顶，等价收敛于官方阶梯 [1,2,5,10,30,60]）互补
+        if (code === RATE_LIMITED_CLOSE_CODE) {
+          scheduleReconnect(state, connect, RATE_LIMITED_RECONNECT_DELAY_MS)
+          return
         }
 
         if (FATAL_CLOSE_CODES.has(code)) {
