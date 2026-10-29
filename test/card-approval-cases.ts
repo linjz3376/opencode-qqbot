@@ -113,6 +113,20 @@ function evt(d: ApprovalButtonData["d"], user = "u_owner_001"): InteractionEvent
   check("缺 user/button_data → 不消费", !noUser && !noData)
 }
 
+// 3h 群场景：点击者身份走 group_member_openid（自我评审修复——槽位按 member_openid 索引）
+{
+  const log: Array<{ uid: string; d: string }> = []
+  const groupEvt: InteractionEvent = {
+    id: "it_g1",
+    scene: "group",
+    group_openid: "g_001",
+    group_member_openid: "u_owner_001", // 群里无 user_openid
+    data: { type: 11, resolved: { button_data: encodeButtonData({ t: "approval", r: REQ.id, d: "once" }) } },
+  }
+  const handled = handleApprovalInteraction(groupEvt, fakeGate("u_owner_001", log))
+  check("群 member_openid 点击可裁决", handled && log.length === 1 && log[0].uid === "u_owner_001", JSON.stringify(log))
+}
+
 // —— 汇总 ——
 let fails = 0
 for (const [name, ok, detail] of results) {

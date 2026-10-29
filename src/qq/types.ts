@@ -114,6 +114,9 @@ export interface InteractionEvent {
   scene?: string
   user_openid?: string
   group_openid?: string
+  /** 群场景点击者身份（自我评审 2026-10-29：挂起槽对群用户用 member_openid 索引，
+   *  只认 user_openid 会导致群按钮点击被静默拒识） */
+  group_member_openid?: string
   data?: { type?: number; resolved?: InteractionButtonResolved }
 }
 

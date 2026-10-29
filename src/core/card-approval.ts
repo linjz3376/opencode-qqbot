@@ -115,9 +115,11 @@ export interface ApprovalGateLike {
 }
 
 /** 互动回调 → 审批裁决。返回 true=已消费（含 ignore 吞掉）；false=非本域事件。
- *  竞态：文字回复与按钮先到先赢（resolve 后槽位即清空，后到者自然落空）。 */
+ *  竞态：文字回复与按钮先到先赢（resolve 后槽位即清空，后到者自然落空）。
+ *  身份：C2C 用 user_openid；群场景点击者走 group_member_openid（与挂起槽
+ *  对群用户的 member_openid 索引一致，自我评审 2026-10-29 修复）。 */
 export function handleApprovalInteraction(event: InteractionEvent, gate: ApprovalGateLike): boolean {
-  const userId = event.user_openid
+  const userId = event.user_openid ?? event.group_member_openid
   if (!userId) return false
   const button = decodeButtonData(event.data?.resolved?.button_data)
   if (!button) return false
