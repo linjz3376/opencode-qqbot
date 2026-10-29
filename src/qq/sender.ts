@@ -90,11 +90,51 @@ function utf8Bytes(s: string): number {
   return encoder.encode(s).length
 }
 
-// 按 UTF-8 字节边界分割长消息：每片 ≤ maxBytes 字节，且不在多字节字符/代理对中间切断。
-// 优先在段落(\n\n)、其次换行(\n)处断开，最后才硬切。
-export function splitMessage(text: string, maxBytes: number = MARKDOWN_MAX_BYTES): string[] {
-  if (utf8Bytes(text) <= maxBytes) return [text]
+// —— 结构化分条（2026-10-29 固化：设计吸收自 dsh-qqbot transport/chunker.ts，P0）——
+// dsh 语义：GFM 表格聚成原子单元不跨片拆散 + 按行边界打包；
+// 我方在 dsh 之上补两件事：① 字节预算（QQ 按 UTF-8 字节限长，dsh 按字符数会
+// 踩中文 3 字节坑）② 围栏修补——在代码块中间切断时给前片补闭合 ```、后片补
+// 开围栏（带语言），保证每片 markdown 独立可渲染。
+const GFM_TABLE_LINE = /^\s*\|.*\|\s*$/
+const CODE_FENCE_OPEN = /^\s*```(\S*)/
 
+interface LineUnit {
+  /** 行原文（含结尾 \n，全文末行除外） */
+  text: string
+  bytes: number
+  /** 本行是围栏行时记录语言，否则 null */
+  fenceLang: string | null
+}
+
+function toLineUnits(text: string): LineUnit[] {
+  const rawLines = text.split("\n")
+  const units: LineUnit[] = []
+  let tableBuf: string[] = []
+  const flushTable = (isLast: boolean): void => {
+    if (tableBuf.length === 0) return
+    const body = tableBuf.join("\n") + (isLast ? "" : "\n")
+    units.push({ text: body, bytes: utf8Bytes(body), fenceLang: null })
+    tableBuf = []
+  }
+
+  rawLines.forEach((line, idx) => {
+    const isLast = idx === rawLines.length - 1
+    if (GFM_TABLE_LINE.test(line)) {
+      tableBuf.push(line)
+      if (isLast) flushTable(true)
+      return
+    }
+    flushTable(isLast)
+    const fence = CODE_FENCE_OPEN.exec(line)
+    const body = line + (isLast ? "" : "\n")
+    units.push({ text: body, bytes: utf8Bytes(body), fenceLang: fence ? fence[1] : null })
+  })
+  return units
+}
+
+// 超大单元（巨型表格行/无换行长行）的字节级兜底切分：
+// 优先段落(\n\n)、其次换行(\n)、最后码点边界硬切（不切多字节字符/代理对）。
+function splitOversizeUnit(text: string, maxBytes: number): string[] {
   const chunks: string[] = []
   const total = text.length
   let start = 0
@@ -104,13 +144,11 @@ export function splitMessage(text: string, maxBytes: number = MARKDOWN_MAX_BYTES
       chunks.push(text.slice(start))
       break
     }
-
-    // 从 start 开始按码点累加字节，找到不超过 maxBytes 的最大边界
     let bytes = 0
     let i = start
-    let lastParaBreak = -1 // \n\n 之后的位置
-    let lastLineBreak = -1 // 单个 \n 之后的位置
-    let hardCut = -1       // 字节上限处（码点边界）
+    let lastParaBreak = -1
+    let lastLineBreak = -1
+    let hardCut = -1
 
     while (i < total) {
       const cp = text.codePointAt(i)!
@@ -121,25 +159,65 @@ export function splitMessage(text: string, maxBytes: number = MARKDOWN_MAX_BYTES
       i += cpStr.length
       hardCut = i
       if (cp === 0x0a) {
-        // i-1 是当前 \n；i-2 是它前一个字符，若也是 \n 则构成段落分隔
-        if (i - 2 >= start && text[i - 2] === "\n") {
-          lastParaBreak = i
-        } else {
-          lastLineBreak = i
-        }
+        if (i - 2 >= start && text[i - 2] === "\n") lastParaBreak = i
+        else lastLineBreak = i
       }
     }
 
     let splitAt = lastParaBreak > start ? lastParaBreak : lastLineBreak > start ? lastLineBreak : hardCut
     if (splitAt <= start) splitAt = hardCut
-    if (splitAt <= start) splitAt = Math.min(start + 1, total) // 兜底，避免死循环
+    if (splitAt <= start) splitAt = Math.min(start + 1, total)
 
     const chunk = text.slice(start, splitAt)
     if (chunk.trim()) chunks.push(chunk)
     start = splitAt
   }
-
   return chunks
+}
+
+export function splitMessage(text: string, maxBytes: number = MARKDOWN_MAX_BYTES): string[] {
+  if (utf8Bytes(text) <= maxBytes) return [text]
+
+  const units = toLineUnits(text)
+  const chunks: string[] = []
+  let cur = ""
+  let curBytes = 0
+  let prefix = "" // 围栏内切断时，下一片需补的开围栏（带语言）
+  let openLang: string | null = null // 原文全局围栏状态（跨片跟踪）
+
+  const flush = (): void => {
+    const body = cur
+    cur = ""
+    curBytes = 0
+    const inside = openLang !== null
+    const out = prefix + body + (inside ? (body.endsWith("\n") ? "```\n" : "\n```\n") : "")
+    prefix = inside ? `\`\`\`${openLang}\n` : ""
+    if (out.trim()) chunks.push(out)
+  }
+
+  for (const u of units) {
+    if (u.bytes > maxBytes) {
+      // 超大单元：先封当前片，再字节级兜底切（围栏行本身不可能超大，不参与围栏语义）
+      if (cur) flush()
+      const parts = splitOversizeUnit(u.text, maxBytes)
+      for (let k = 0; k < parts.length - 1; k++) chunks.push(parts[k])
+      cur = parts[parts.length - 1] ?? ""
+      curBytes = utf8Bytes(cur)
+      continue
+    }
+    const prefixBytes = prefix ? utf8Bytes(prefix) : 0
+    if (cur && curBytes + prefixBytes + u.bytes > maxBytes) {
+      flush()
+    }
+    cur += u.text
+    curBytes += u.bytes
+    if (u.fenceLang !== null) {
+      openLang = openLang === null ? u.fenceLang : null
+    }
+  }
+  flush()
+
+  return chunks.length > 0 ? chunks : [text]
 }
 
 // 发送单个分片: 先尝试 markdown，失败则回退纯文本。
