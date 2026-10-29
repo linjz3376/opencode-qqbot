@@ -33,6 +33,8 @@ import {
 } from "./core/permission.js"
 import { truncate } from "./core/util.js"
 import { createDelivery } from "./core/delivery.js"
+import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approval.js"
+import type { InteractionEvent } from "./qq/types.js"
 // O7b：解析/格式化保持经 bridge 再导出——单测与既有调用方导入路径不变
 export { parsePermissionDecision, formatPermissionPrompt } from "./core/permission.js"
 
@@ -40,6 +42,8 @@ interface Bridge {
   handleMessage: (ctx: MessageContext) => Promise<void>
   // HC2（2026-10-26）：暴露事件流句柄，index 侧链路自愈巡检需对其热换基
   eventStream: ReturnType<typeof createEventStream>
+  // A 项（2026-10-29）：卡片按钮互动回调（index 侧挂到 QQ 网关 onInteraction）
+  handleInteraction: (event: InteractionEvent) => void
 }
 
 export function createBridge(
@@ -195,7 +199,14 @@ export function createBridge(
   const { enqueuePush, safeDeliver, sendReply } = createDelivery(config, lastCtx)
 
   // O7b：审批域门面（挂起槽/等待/裁决/跨重启恢复全在 core/permission.ts）
-  const perm = createPermissionGate({ client, sendReply, safeDeliver })
+  const perm = createPermissionGate({
+    client,
+    sendReply,
+    safeDeliver,
+    // A 项：审批卡片发送（失败自动降级文字菜单，permission 域内处理）
+    sendApprovalPrompt: (ctx, request, mainSessionId) =>
+      sendApprovalCard({ appId: config.qq.appId, clientSecret: config.qq.clientSecret }, ctx, request, mainSessionId),
+  })
 
   // O7d：摘要镜像域门面（订阅/回合标记/延迟解锁/摘要投递全在 core/mirror.ts）
   const mirror = createMirror({ sessions, eventStream, client, lastCtx, safeDeliver, bgWaits, busyUsers })
@@ -360,7 +371,7 @@ export function createBridge(
     }
   }
 
-  return { handleMessage, eventStream }
+  return { handleMessage, eventStream, handleInteraction: (event) => void handleApprovalInteraction(event, perm) }
 }
 
 async function maybeHandlePendingSelection(

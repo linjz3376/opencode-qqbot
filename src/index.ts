@@ -89,6 +89,7 @@ async function main(): Promise<void> {
     appId: config.qq.appId,
     clientSecret: config.qq.clientSecret,
     onMessage: bridge.handleMessage,
+    onInteraction: (event) => bridge.handleInteraction(event),
     onReady: () => {
       console.log("[index] QQ Gateway 已就绪")
     },

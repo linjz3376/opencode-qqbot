@@ -92,10 +92,29 @@ export interface GatewayReadyData {
  * WebSocket 事件负载
  */
 export interface WSPayload<T = unknown> {
+
   op: number
   d?: T
   s?: number
   t?: string
+}
+
+/**
+ * 按钮交互回调事件（INTERACTION_CREATE）——A 项卡片审批（2026-10-29）。
+ * 形状对齐 P0 官方 @tencent-connect/qqbot-nodejs protocol/types.ts。
+ */
+export interface InteractionButtonResolved {
+  button_id?: string
+  button_data?: string
+}
+
+export interface InteractionEvent {
+  id: string
+  type?: number
+  scene?: string
+  user_openid?: string
+  group_openid?: string
+  data?: { type?: number; resolved?: InteractionButtonResolved }
 }
 
 /**

@@ -1,19 +1,22 @@
-// @input:  ws, ./api (getAccessToken, getGatewayUrl), ./types (MessageContext)
+// @input:  ws, ./api (getAccessToken, getGatewayUrl, acknowledgeInteraction), ./types (MessageContext, InteractionEvent)
 // @output: startGateway, MessageHandler
 // @pos:    qq层 - QQ Bot WebSocket Gateway 状态机 (心跳/重连/消息分发)
 import WebSocket from "ws"
-import { clearTokenCache, getAccessToken, getGatewayUrl } from "./api.js"
+import { acknowledgeInteraction, clearTokenCache, getAccessToken, getGatewayUrl } from "./api.js"
 import type {
   C2CMessageEvent,
   GatewayHelloData,
   GatewayReadyData,
   GroupMessageEvent,
+  InteractionEvent,
   MessageAttachment,
   MessageContext,
   WSPayload,
 } from "./types.js"
 
 const GROUP_AND_C2C_EVENT_INTENT = 1 << 25
+// A 项（2026-10-29）：按钮互动回调 intent，P0 实证（qqbot-nodejs constants.ts INTERACTION = 1<<26）
+const INTERACTION_INTENT = 1 << 26
 const MAX_RECONNECT_DELAY_MS = 30_000
 const BASE_RECONNECT_DELAY_MS = 1_000
 const INVALID_SESSION_DELAY_MS = 3_000
@@ -31,6 +34,8 @@ export interface GatewayOptions {
   clientSecret: string
   onMessage: MessageHandler
   onReady?: () => void
+  /** A 项（2026-10-29）：按钮互动回调（INTERACTION_CREATE）——卡片审批的入口 */
+  onInteraction?: (event: InteractionEvent) => void | Promise<void>
 }
 
 interface GatewayState {
@@ -193,7 +198,7 @@ function sendIdentify(ws: WebSocket, accessToken: string): void {
     op: 2,
     d: {
       token: `QQBot ${accessToken}`,
-      intents: GROUP_AND_C2C_EVENT_INTENT,
+      intents: GROUP_AND_C2C_EVENT_INTENT | INTERACTION_INTENT,
       shard: [0, 1],
       properties: {
         os: process.platform,
@@ -265,6 +270,19 @@ async function handleDispatchEvent(
         return
       }
       await options.onMessage(message)
+      return
+    }
+
+    case "INTERACTION_CREATE": {
+      // A 项（2026-10-29）：按钮互动回调。平台要求 3 秒内响应且同 id 只能
+      // 响应一次——先立即 ack（不等业务处理结果），再分发业务。
+      const interaction = payload.d as InteractionEvent
+      if (state.accessToken && interaction?.id) {
+        void acknowledgeInteraction(state.accessToken, interaction.id).catch((error) => {
+          console.error("[qq-gateway] 互动响应失败:", error instanceof Error ? error.message : error)
+        })
+      }
+      await options.onInteraction?.(interaction)
       return
     }
 

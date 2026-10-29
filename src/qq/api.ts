@@ -246,12 +246,29 @@ export interface MessageResponse {
  * 构建消息体。
  * markdown=true 时用 msg_type=2（markdown 消息），content 放 markdown 原文；
  * 否则用 msg_type=0（纯文本）。注意: 传 markdown 时 content 字段必须为空。
+ * keyboard 仅 markdown 卡片可携带（A 项 2026-10-29，形状对齐 P0 官方 SDK）。
  */
+export interface KeyboardButton {
+  id: string
+  render_data: { label: string; visited_label: string; style: number }
+  action: {
+    type: number
+    permission: { type: number; specify_user_ids?: string[] }
+    data: string
+    click_limit?: number
+  }
+}
+
+export interface InlineKeyboard {
+  content: { rows: Array<{ buttons: KeyboardButton[] }> }
+}
+
 function buildMessageBody(
   content: string,
   msgId: string | undefined,
   msgSeq: number,
   markdown = false,
+  keyboard?: InlineKeyboard,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     msg_seq: msgSeq,
@@ -269,6 +286,10 @@ function buildMessageBody(
     body.msg_id = msgId
   }
 
+  if (keyboard) {
+    body.keyboard = keyboard
+  }
+
   return body
 }
 
@@ -284,9 +305,10 @@ export async function sendC2CMessage(
   msgId?: string,
   msgSeq?: number,
   markdown = false,
+  keyboard?: InlineKeyboard,
 ): Promise<MessageResponse> {
   const resolvedMsgSeq = msgSeq ?? (msgId ? getNextMsgSeq(msgId) : 1)
-  const body = buildMessageBody(content, msgId, resolvedMsgSeq, markdown)
+  const body = buildMessageBody(content, msgId, resolvedMsgSeq, markdown, keyboard)
   return apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body)
 }
 
@@ -325,10 +347,20 @@ export async function sendGroupMessage(
   msgId?: string,
   msgSeq?: number,
   markdown = false,
+  keyboard?: InlineKeyboard,
 ): Promise<MessageResponse> {
   const resolvedMsgSeq = msgSeq ?? (msgId ? getNextMsgSeq(msgId) : 1)
-  const body = buildMessageBody(content, msgId, resolvedMsgSeq, markdown)
+  const body = buildMessageBody(content, msgId, resolvedMsgSeq, markdown, keyboard)
   return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, body)
+}
+
+/**
+ * 响应按钮互动回调（A 项 2026-10-29，端点对齐 P0 官方 SDK acknowledgeInteraction）。
+ * QQ 平台要求收到 INTERACTION_CREATE 后 3 秒内响应，同 id 只能响应一次——
+ * 调用方必须先 ack 再执行业务处理。
+ */
+export async function acknowledgeInteraction(accessToken: string, interactionId: string, code = 0): Promise<void> {
+  await apiRequest(accessToken, "PUT", `/interactions/${interactionId}`, { code })
 }
 
 interface BackgroundTokenRefreshOptions {

@@ -77,6 +77,8 @@ export interface PermissionGateDeps {
   client: OpencodeClient
   sendReply: (ctx: MessageContext, text: string) => Promise<void>
   safeDeliver: (ctx: MessageContext, text: string) => Promise<void>
+  /** A 项（2026-10-29）：卡片按钮审批发送通道；返回 false 时本域自动降级文字菜单 */
+  sendApprovalPrompt?: (ctx: MessageContext, request: PermissionRequest, mainSessionId: string) => Promise<boolean>
 }
 
 export interface PermissionGate {
@@ -130,10 +132,18 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         createdAt: Date.now(),
       })
       savePendingPermMap(pendingPermissions) // O2：落盘，重启不丢
-      // 通知失败不 reject promise（用户仍可能稍后主动回复）
-      void sendReply(ctx, formatPermissionPrompt(request, mainSessionId)).catch((error) => {
-        console.error("[bridge] 发送审批请求失败:", error)
-      })
+      // A 项（2026-10-29）：卡片按钮优先，发送失败降级文字菜单；两者都失败
+      // 不 reject promise（用户仍可能稍后主动回复）
+      void (async () => {
+        const sentByCard = deps.sendApprovalPrompt
+          ? await deps.sendApprovalPrompt(ctx, request, mainSessionId).catch(() => false)
+          : false
+        if (!sentByCard) {
+          await sendReply(ctx, formatPermissionPrompt(request, mainSessionId)).catch((error) => {
+            console.error("[bridge] 发送审批请求失败:", error)
+          })
+        }
+      })()
     })
   }
 
