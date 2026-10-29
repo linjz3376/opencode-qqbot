@@ -33,13 +33,28 @@ check("空历史返回 null", buildDigest([]) === null)
 // 4. 只有 user 没有回复 → null
 check("无回复返回 null", buildDigest(mk([{ id: "u1", type: "user", text: "在吗" }])) === null)
 
-// 5. 超长答案截断 + 提示行
+// 5. 默认全文不截断（E2，2026-10-29 用户要求"摘要回全文"）
 const longText = "字".repeat(2000)
 const dLong = buildDigest(mk([
   { id: "a2", type: "assistant", content: [{ type: "text", text: longText }] },
   { id: "u2", type: "user", text: "长文" },
 ]))
-check("超长截断到 600+省略号", (dLong?.includes("…") ?? false) && (dLong?.includes("答案共 2000 字") ?? false))
+check(
+  "默认全文不截断（含完整 2000 字、无省略号无提示行）",
+  (dLong?.includes(longText) ?? false) && !(dLong?.includes("…") ?? false) && !(dLong?.includes("答案共") ?? false),
+)
+
+// 5b. 配置截断模式：QQ_DIGEST_ANSWER_MAX_CHARS>0 恢复旧行为（可逆开关）
+process.env.QQ_DIGEST_ANSWER_MAX_CHARS = "600"
+const dLongCapped = buildDigest(mk([
+  { id: "a2", type: "assistant", content: [{ type: "text", text: longText }] },
+  { id: "u2", type: "user", text: "长文" },
+]))
+check(
+  "配置 600 恢复截断+提示行",
+  (dLongCapped?.includes("…") ?? false) && (dLongCapped?.includes("答案共 2000 字") ?? false),
+)
+delete process.env.QQ_DIGEST_ANSWER_MAX_CHARS
 
 // 6. 脱敏：答案含 token 不外泄
 const dSecret = buildDigest(mk([
