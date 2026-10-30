@@ -7,7 +7,7 @@ import { join } from "path"
 import { homedir } from "os"
 import type { Config } from "./config.js"
 import type { MessageContext } from "./qq/types.js"
-import { getAccessToken } from "./qq/api.js"
+import { getAccessToken, sendC2CInputNotify } from "./qq/api.js"
 import { prepareQQAttachments, augmentPromptWithAttachments, purgeOldQQImages } from "./qq/media.js"
 import type { OpencodeClient } from "./opencode/client.js"
 import { collectReplyText } from "./opencode/client.js"
@@ -37,6 +37,22 @@ import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approva
 import type { InteractionEvent } from "./qq/types.js"
 // O7b：解析/格式化保持经 bridge 再导出——单测与既有调用方导入路径不变
 export { parsePermissionDecision, formatPermissionPrompt } from "./core/permission.js"
+
+// E 闲置回收纯函数（导出供测试，2026-10-29）：返回应回收的闲置会话 id——
+// 超过 idleMs 无活动且未被 /watch 显式盯住的会话。
+export function evictableIdleSessions(
+  lastActivity: ReadonlyMap<string, number>,
+  watched: ReadonlySet<string>,
+  now: number,
+  idleMs: number,
+): string[] {
+  const out: string[] = []
+  for (const [sid, at] of lastActivity) {
+    if (watched.has(sid)) continue
+    if (now - at > idleMs) out.push(sid)
+  }
+  return out
+}
 
 interface Bridge {
   handleMessage: (ctx: MessageContext) => Promise<void>
@@ -68,7 +84,27 @@ export function createBridge(
   const bgWaits = new Map<string, { cancel: () => void }>() // 会话 -> 后台等待
   const callCache = new Map<string, string>()              // callID -> 命令摘要（⚠️ 上下文用）
 
+  // E（2026-10-29 同步升级，吸收 dsh session/idle-evictor）：闲置会话回收——
+  // 长期无活动的会话退订 SSE，降 opencode 服务端事件扇出；/watch 显式盯着的
+  // 会话豁免；用户再来消息时 subscribeSession 会重新挂上。env QQ_SESSION_IDLE_HOURS。
+  const sessionLastActivity = new Map<string, number>()
+  const IDLE_EVICT_MS = (() => {
+    const h = Number(process.env.QQ_SESSION_IDLE_HOURS ?? "6")
+    return Number.isFinite(h) && h > 0 ? Math.floor(h * 3600_000) : 6 * 3600_000
+  })()
+  setInterval(() => {
+    const now = Date.now()
+    for (const sid of evictableIdleSessions(sessionLastActivity, new Set(activeWatches.values()), now, IDLE_EVICT_MS)) {
+      sessionUnsubs.get(sid)?.()
+      sessionUnsubs.delete(sid)
+      sessionSubs.delete(sid)
+      sessionLastActivity.delete(sid)
+      console.log(`[bridge] 闲置会话已回收（${Math.round(IDLE_EVICT_MS / 3600_000)}h 无活动）: ${sid}`)
+    }
+  }, 30 * 60 * 1000)
+
   function subscribeSession(sessionID: string, userId: string): void {
+    sessionLastActivity.set(sessionID, Date.now())
     if (!sessionSubs.has(sessionID)) {
       sessionSubs.set(sessionID, new Set())
       sessionUnsubs.set(
@@ -87,10 +123,12 @@ export function createBridge(
       sessionSubs.delete(sessionID)
       sessionUnsubs.get(sessionID)?.()
       sessionUnsubs.delete(sessionID)
+      sessionLastActivity.delete(sessionID)
     }
   }
 
   function onSessionEvent(sessionID: string, ev: V2Event): void {
+    sessionLastActivity.set(sessionID, Date.now())
     const line = formatMilestone(ev, callCache)
     if (!line) return
     // 2026-10-14 用户拍板：里程碑只投 /watch 显式订阅者——自身回合回显与
@@ -309,11 +347,20 @@ export function createBridge(
 
       busyUsers.add(ctx.userId)
 
+      // B3（2026-10-29 同步升级）：C2C typing 指示——长回合处理中给用户
+      // "对方正在输入"体感（官方 input_notify，仅 C2C；失败静默不阻塞主流程）
+      if (ctx.type === "c2c") {
+        void getAccessToken(config.qq.appId, config.qq.clientSecret)
+          .then((token) => sendC2CInputNotify(token, ctx.userId, ctx.msgId, 60))
+          .catch(() => {})
+      }
+
       let sessionId = ""
       let turnStart = 0
       try {
         const session = await sessions.getOrCreate(ctx.userId)
         sessionId = session.sessionId
+        sessionLastActivity.set(sessionId, Date.now())
         // 新回合取代旧的后台等待（steer 合并运行时只投递一次合并结果）
         bgWaits.get(sessionId)?.cancel()
         // 会话订阅通道（SSE 活性 + 同会话同用户 Set 去重不双发）；里程碑投递

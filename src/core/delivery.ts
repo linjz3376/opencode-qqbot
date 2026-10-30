@@ -51,6 +51,22 @@ function saveQuotaMap(m: ReadonlyMap<string, { day: string; count: number; warne
   }
 }
 
+// B-msgid 纯函数（导出供测试，2026-10-29）：挑选可"骑"的被动 msg_id——
+// 同一聊天类型、时间戳在窗口内才有效；任何不对齐都返回 undefined（回落真主动）。
+export function selectRideMsgId(
+  last: MessageContext | undefined,
+  ctx: MessageContext,
+  now: number,
+  windowMs: number,
+): string | undefined {
+  if (!last?.msgId) return undefined
+  if (last.type !== ctx.type) return undefined
+  const ts = Number(last.timestamp ?? 0)
+  if (!Number.isFinite(ts) || ts <= 0) return undefined
+  if (now - ts > windowMs) return undefined
+  return last.msgId
+}
+
 export interface Delivery {
   enqueuePush: (userId: string, line: string) => void
   deliver: (ctx: MessageContext, text: string) => Promise<void>
@@ -70,6 +86,15 @@ export function createDelivery(
   // Bot 维度认证 10/qps（超限报 40034100）。原自设 15/天过度保守 → 默认 100 留
   // 余量，可用 env QQ_ACTIVE_DAILY_LIMIT 覆盖。
   const ACTIVE_DAILY_LIMIT = Number(process.env.QQ_ACTIVE_DAILY_LIMIT ?? 100)
+
+  // B-msgid（2026-10-29，吸收 dsh transport/msgid-cache）：主动降级前尝试让发送
+  // "骑"该用户最近的被动 msg_id——平台窗口内接受则按被动计（不耗主动配额）。
+  // 窗口口径保守取 5 分钟（社区亦有 60 分钟说法；骑失败无副作用自动回落真主动，
+  // 故从保守值起步，可用 QQ_PASSIVE_RIDE_WINDOW_MS 调整）。
+  const RIDE_WINDOW_MS = (() => {
+    const n = Number(process.env.QQ_PASSIVE_RIDE_WINDOW_MS ?? "300000")
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 300_000
+  })()
 
   const pushQueues = new Map<string, PushQueue>()
   const activeQuota = new Map<string, { day: string; count: number; warned: boolean }>()
@@ -136,6 +161,21 @@ export function createDelivery(
       }
     }
 
+    // B-msgid（吸收 dsh msgid-cache，2026-10-29）：主动降级前尝试"骑"该用户最近
+    // 的被动 msg_id——平台窗口内接受则按被动计（不耗主动配额、记 B1 账本）；
+    // 骑失败无副作用，回落下方真主动流程。
+    const rideMsgId = selectRideMsgId(lastCtx.get(ctx.userId), ctx, Date.now(), RIDE_WINDOW_MS)
+    if (rideMsgId) {
+      try {
+        await sendActive(ctx, text, rideMsgId)
+        passiveLimiter.record(rideMsgId)
+        console.log(`[bridge] 主动降级已骑被动窗口 msgId=${rideMsgId}，省一次主动配额`)
+        return
+      } catch {
+        console.log("[bridge] 骑被动窗口失败（窗口可能已过），回落真主动消息")
+      }
+    }
+
     const today = new Date().toISOString().slice(0, 10)
     let q = activeQuota.get(ctx.userId)
     if (!q || q.day !== today) {
@@ -168,20 +208,21 @@ export function createDelivery(
     }
   }
 
-  // 主动消息（不带 msg_id）：markdown 优先，失败回退纯文本
-  async function sendActive(ctx: MessageContext, text: string): Promise<void> {
+  // 主动消息（不带 msg_id）：markdown 优先，失败回退纯文本。
+  // passiveMsgId（B-msgid 2026-10-29）："骑"被动窗口时传入，平台接受则按被动计。
+  async function sendActive(ctx: MessageContext, text: string, passiveMsgId?: string): Promise<void> {
     const token = await getAccessToken(config.qq.appId, config.qq.clientSecret)
-    const seq = getNextMsgSeq("")
+    const seq = getNextMsgSeq(passiveMsgId ?? "")
     const isGroup = ctx.type === "group" && ctx.groupId
     try {
-      if (isGroup) await sendGroupMessage(token, ctx.groupId!, text, undefined, seq, true)
-      else await sendC2CMessage(token, ctx.userId, text, undefined, seq, true)
+      if (isGroup) await sendGroupMessage(token, ctx.groupId!, text, passiveMsgId, seq, true)
+      else await sendC2CMessage(token, ctx.userId, text, passiveMsgId, seq, true)
       return
     } catch (error) {
       console.error("[bridge] 主动 markdown 发送失败，回退纯文本:", error)
     }
-    if (isGroup) await sendGroupMessage(token, ctx.groupId!, text, undefined, seq, false)
-    else await sendC2CMessage(token, ctx.userId, text, undefined, seq, false)
+    if (isGroup) await sendGroupMessage(token, ctx.groupId!, text, passiveMsgId, seq, false)
+    else await sendC2CMessage(token, ctx.userId, text, passiveMsgId, seq, false)
   }
 
   async function sendReply(ctx: MessageContext, text: string): Promise<void> {
