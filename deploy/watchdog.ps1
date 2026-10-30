@@ -11,8 +11,11 @@ function Log([string]$msg) {
   Add-Content -Path $watchdogLog -Value ("{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg)
 }
 
-$bot = Get-CimInstance Win32_Process -Filter "Name='bun.exe'" |
-  Where-Object { $_.CommandLine -match 'opencode-qq-bot' }
+# 匹配 dev 仓路径与 npm 缓存路径（opencode-qqbot 无连字符）两种形态；bun/node 双运行时。
+# 多匹配时（活跃+待命并存）取任一判活性、清理时全杀。
+$bots = @(Get-CimInstance Win32_Process -Filter "Name='bun.exe' OR Name='node.exe'" |
+  Where-Object { $_.CommandLine -match 'opencode-qq-?bot' })
+$bot = $bots[0]
 
 $reason = $null
 if (-not $bot) {
@@ -21,8 +24,8 @@ if (-not $bot) {
 elseif (Test-Path $hb) {
   $ageMin = ((Get-Date) - (Get-Item $hb).LastWriteTime).TotalMinutes
   if ($ageMin -gt 5) {
-    $reason = "心跳陈旧 $([int]$ageMin) 分钟（进程 pid=$($bot.ProcessId) 疑似僵死）"
-    Stop-Process -Id $bot.ProcessId -Force -ErrorAction SilentlyContinue
+    $reason = "心跳陈旧 $([int]$ageMin) 分钟（进程疑似僵死）"
+    $bots | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Seconds 1
   }
 }
@@ -31,7 +34,7 @@ else {
   $procAgeMin = ((Get-Date) - $bot.CreationDate).TotalMinutes
   if ($procAgeMin -gt 2) {
     $reason = "心跳文件缺失（进程 pid=$($bot.ProcessId) 已运行 $([int]$procAgeMin) 分钟）"
-    Stop-Process -Id $bot.ProcessId -Force -ErrorAction SilentlyContinue
+    $bots | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Seconds 1
   }
 }

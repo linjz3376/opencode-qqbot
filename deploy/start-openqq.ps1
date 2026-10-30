@@ -7,9 +7,10 @@ $logDir = "C:\Users\linjz\AppData\Local\Temp\opencode"
 $repo = "C:\Users\linjz\dev\opencode-qq-bot"
 $bun = "C:\Users\linjz\AppData\Roaming\npm\node_modules\bun\bin\bun.exe"
 
-# --- 单实例锁：匹配 CommandLine 含 opencode-qq-bot 的 bun（新仓路径与旧 npm 路径均命中）---
-$existing = Get-CimInstance Win32_Process -Filter "Name='bun.exe'" |
-  Where-Object { $_.CommandLine -match 'opencode-qq-bot' }
+# --- 单实例锁：匹配 CommandLine 含 opencode-qq-bot 的 bun/node（dev 仓路径、旧 npm 路径、
+#     npm 缓存插件拉起形态（opencode-qqbot 无连字符）均命中；2026-10-30 扩匹配实证债）---
+$existing = Get-CimInstance Win32_Process -Filter "Name='bun.exe' OR Name='node.exe'" |
+  Where-Object { $_.CommandLine -match 'opencode-qq-?bot' }
 if ($existing) {
   Write-Output "[launcher] 已有实例 pid=$($existing.ProcessId)，退出（单实例锁）"
   exit 0

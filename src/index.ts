@@ -54,6 +54,12 @@ async function waitForOpencode(
 }
 
 async function main(): Promise<void> {
+  // P2（2026-10-30 清债）：插件拉起等无控制台场景的文件日志双写（bun fd 重定向
+  // 实测不落盘，改为进程内 tee）。计划任务通道有 PowerShell 重定向，不受影响。
+  if (process.env.QQ_LOG_FILE) {
+    const { installFileLog } = await import("./core/file-log.js")
+    installFileLog(process.env.QQ_LOG_FILE)
+  }
   await ensureConfig()
   const config = loadConfig()
 

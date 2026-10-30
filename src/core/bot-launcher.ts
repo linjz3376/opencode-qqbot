@@ -6,7 +6,7 @@
 // 子进程脱离 serve 生命周期（serve 重载/重启不碰 bot）。运行时解析 bun→node：
 // bun 直接跑源码（.js→.ts 映射）；node 跑发布时预打的 dist/openqq-bot.js bundle。
 import { spawn, spawnSync } from "child_process"
-import { existsSync, mkdirSync, openSync, readFileSync } from "fs"
+import { existsSync, readFileSync } from "fs"
 import { join, dirname } from "path"
 import { homedir } from "os"
 
@@ -58,8 +58,14 @@ export function resolveBotEntry(
 }
 
 /** 构造拉起计划（纯函数供测试）。entry 由 resolveBotEntry 解析。 */
-export function buildLaunchPlan(runtime: Runtime, entry: string): LaunchPlan {
-  const env = { ...process.env, QQ_INSTANCE_LOCK: "try" } // 拉起即抢锁，抢不到自动退出
+export function buildLaunchPlan(runtime: Runtime, entry: string, logPath?: string): LaunchPlan {
+  // QQ_INSTANCE_LOCK=try：拉起即抢锁，抢不到自动退出（多 location 并发拉起防堆积）
+  // QQ_LOG_FILE：bot 进程内文件日志双写（detached 后无控制台，fd 重定向不可靠）
+  const env = {
+    ...process.env,
+    QQ_INSTANCE_LOCK: "try",
+    ...(logPath ? { QQ_LOG_FILE: logPath } : {}),
+  }
   if (runtime === "bun") return { command: "bun", args: ["run", entry], env }
   return { command: "node", args: [entry], env }
 }
@@ -71,14 +77,14 @@ export function botLogPath(): string {
 
 /**
  * detached 拉起 bot（跨平台同 API；Windows 隐藏控制台窗口）。
+ * 日志由 bot 进程内文件双写承担（QQ_LOG_FILE，见 buildLaunchPlan）——
+ * spawn 侧 fd 重定向在 bun 下实测不落盘（2026-10-30 清债 P2），不再依赖。
  * 返回 pid；拉起失败抛错（调用方记日志）。
  */
-export function spawnBotDetached(plan: LaunchPlan, logPath: string = botLogPath()): number {
-  mkdirSync(join(logPath, ".."), { recursive: true })
-  const out = openSync(logPath, "a")
+export function spawnBotDetached(plan: LaunchPlan): number {
   const child = spawn(plan.command, plan.args, {
     detached: true,
-    stdio: ["ignore", out, out],
+    stdio: "ignore",
     env: plan.env,
     windowsHide: true,
   })

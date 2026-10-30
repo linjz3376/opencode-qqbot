@@ -100,15 +100,23 @@ export function isInstanceAliveAt(path: string, staleMs: number = LOCK_STALE_MS)
   }
 }
 
+// 待命日志节流（2026-10-30 清债 P3）：首次 + 之后每 120 次（=10 分钟）打一条，
+// 长期待命不刷爆日志。纯函数导出供测试。
+export function shouldLogStandby(attempt: number): boolean {
+  return attempt === 0 || attempt % 120 === 0
+}
+
 /**
  * 阻塞式抢锁：抢不到就每 5s 重试，直到成为宿主。
  * 用于启动入口——双开时后到实例待命，宿主退出后自动接管。
  */
 export async function waitInstanceLock(appId: string): Promise<InstanceLock> {
-  for (;;) {
+  for (let attempt = 0; ; attempt++) {
     const lock = acquireInstanceLock(appId)
     if (lock) return lock
-    console.log(`[instance-lock] 已有实例在运行，本实例待命（每 ${LOCK_RETRY_MS / 1000}s 重试抢锁）`)
+    if (shouldLogStandby(attempt)) {
+      console.log(`[instance-lock] 已有实例在运行，本实例待命（每 ${LOCK_RETRY_MS / 1000}s 重试抢锁，日志已节流）`)
+    }
     await new Promise((r) => setTimeout(r, LOCK_RETRY_MS))
   }
 }

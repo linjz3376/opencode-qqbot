@@ -50,8 +50,10 @@ function load(): InflightEntry[] {
   } catch {
     entries = [] // 损坏即空，不阻塞启动
   }
-  // 修剪：已销账超 24h 的不再保留
-  cache = entries.filter((e) => e.state === "inflight" || Date.now() - e.at <= INFLIGHT_MAX_AGE_MS)
+  // 修剪：已销账超 24h 的不再保留；有修剪即落盘（防 settled 条目只进不出）
+  const pruned = entries.filter((e) => e.state === "inflight" || Date.now() - e.at <= INFLIGHT_MAX_AGE_MS)
+  cache = pruned
+  if (pruned.length !== entries.length) save()
   return cache
 }
 

@@ -13,7 +13,7 @@ import { homedir } from "os"
 import { appendFileSync, existsSync, renameSync, statSync } from "fs"
 import { fileURLToPath } from "url"
 import { isInstanceAlive } from "./core/instance-lock.js"
-import { resolveRuntime, buildLaunchPlan, spawnBotDetached, resolveBotEntry, readDotEnvField } from "./core/bot-launcher.js"
+import { resolveRuntime, buildLaunchPlan, spawnBotDetached, resolveBotEntry, readDotEnvField, botLogPath } from "./core/bot-launcher.js"
 
 const ENV_FILE = join(homedir(), ".openqq", ".env")
 const CHECK_INTERVAL_MS = 5 * 60 * 1000 // 看门狗巡检间隔（插件重载会重置，兜底是每小时 reload）
@@ -39,28 +39,41 @@ function probeAppend(line: string): void {
 export default Plugin.define({
   id: "opencode-qqbot",
   setup(_ctx) {
+    // P3（2026-10-30 清债）：阻塞原因告警只在"状态变化"时打——插件每小时重载
+    // + 5min 巡检，缺凭据/无运行时不处理会重复喷日志。恢复畅通时复位。
+    let lastBlocker: string | null = null
+    const warnOnce = (key: string, message: string): void => {
+      if (lastBlocker === key) return
+      lastBlocker = key
+      console.warn(message)
+    }
     const ensure = (): void => {
       try {
         const appId = readDotEnvField(ENV_FILE, "QQ_APP_ID")
         if (!appId) {
-          console.warn(
+          warnOnce(
+            "cred",
             "[opencode-qqbot] 未发现 ~/.openqq/.env 凭据——先运行 npx @linjz/opencode-qqbot setup 扫码绑定（或参考 README 手写 .env），完成后插件将在下次巡检自动拉起 bot",
           )
           return
         }
-        if (isInstanceAlive(appId)) return // 活着，不动
+        if (isInstanceAlive(appId)) {
+          lastBlocker = null // 畅通复位
+          return
+        }
         const entry = resolveBotEntry(fileURLToPath(import.meta.url))
         if (!entry) {
-          console.warn("[opencode-qqbot] 未找到 bot 入口（bot.js / dist/openqq-bot.js / src/index.ts 全缺）——插件安装不完整")
+          warnOnce("entry", "[opencode-qqbot] 未找到 bot 入口（bot.js / dist/openqq-bot.js / src/index.ts 全缺）——插件安装不完整")
           return
         }
         const runtime = resolveRuntime()
         if (!runtime) {
-          console.warn("[opencode-qqbot] 未找到 bun/node 运行时，无法拉起 bot——请安装其中之一（https://bun.sh）")
+          warnOnce("runtime", "[opencode-qqbot] 未找到 bun/node 运行时，无法拉起 bot——请安装其中之一（https://bun.sh）")
           return
         }
-        const pid = spawnBotDetached(buildLaunchPlan(runtime, entry))
+        const pid = spawnBotDetached(buildLaunchPlan(runtime, entry, botLogPath()))
         console.log(`[opencode-qqbot] bot 已拉起（pid=${pid}，runtime=${runtime}，entry=${entry}）`)
+        lastBlocker = null
       } catch (error) {
         // 引导器永不阻断宿主
         console.error("[opencode-qqbot] 拉起失败:", error instanceof Error ? error.message : error)
