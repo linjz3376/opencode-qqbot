@@ -34,6 +34,7 @@ import {
 import { truncate } from "./core/util.js"
 import { createDelivery } from "./core/delivery.js"
 import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approval.js"
+import { createFormBridge } from "./core/form-bridge.js"
 import type { InteractionEvent } from "./qq/types.js"
 // O7b：解析/格式化保持经 bridge 再导出——单测与既有调用方导入路径不变
 export { parsePermissionDecision, formatPermissionPrompt } from "./core/permission.js"
@@ -301,6 +302,57 @@ export function createBridge(
   // O7d：摘要镜像域门面（订阅/回合标记/延迟解锁/摘要投递全在 core/mirror.ts）
   const mirror = createMirror({ sessions, eventStream, client, lastCtx, safeDeliver, bgWaits, busyUsers })
 
+  // L 项（2026-10-30）：表单桥（选择弹窗 A/B/C/D 的 QQ 同步与作答回传）。
+  // 与审批共用"每用户单一交互槽"心智：表单挂起时优先消费用户回复。
+  const formBridge = createFormBridge({ client, sendReply, safeDeliver })
+
+  // L 项：常驻交互监听——轮询全局待答权限 + 表单，反查 QQ 用户后推送。
+  // 覆盖"桌面端回合发起的交互"（昨晚事故盲区）：bot 空闲时也能把弹窗送到 QQ。
+  const INTERACTION_WATCH_MS = (() => {
+    const n = Number(process.env.QQ_INTERACTION_WATCH_SECONDS ?? "12")
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n * 1000) : 12_000
+  })()
+
+  function usersOfSession(sessionID: string): string[] {
+    return sessions
+      .all()
+      .filter((e) => e.sessionId === sessionID)
+      .map((e) => e.userId)
+  }
+
+  function ctxForUser(userId: string): MessageContext {
+    return (
+      lastCtx.get(userId) ?? { type: "c2c", userId, msgId: "", content: "", timestamp: String(Date.now()) }
+    )
+  }
+
+  async function interactionTick(): Promise<void> {
+    try {
+      const [permRes, formRes] = await Promise.all([client.permission.list(), client.form.list()])
+      for (const req of permRes?.data ?? []) {
+        for (const uid of usersOfSession(req.sessionID)) {
+          if (perm.hasPending(uid)) continue // 单一槽：在挂起（含同 id）即跳过
+          perm.pushExternal(uid, ctxForUser(uid), req, req.sessionID)
+        }
+      }
+      for (const form of formRes?.data ?? []) {
+        // 全局列表可能含已答表单：有 state 字段时只推 pending
+        const state = (form as { state?: { status?: string } }).state
+        if (state && state.status !== "pending") continue
+        for (const uid of usersOfSession(form.sessionID)) {
+          formBridge.pushForm(uid, ctxForUser(uid), form)
+        }
+      }
+    } catch (error) {
+      console.error("[interaction-watch] 轮询失败:", error instanceof Error ? error.message : error)
+    }
+  }
+
+  if (INTERACTION_WATCH_MS > 0) {
+    setInterval(() => void interactionTick(), INTERACTION_WATCH_MS)
+    console.log(`[interaction-watch] 常驻交互监听已启动（每 ${INTERACTION_WATCH_MS / 1000}s 轮询权限+表单）`)
+  }
+
   const mirrorApi: MirrorApi = mirror.api
 
   const commandContext: CommandContext = {
@@ -370,6 +422,13 @@ export function createBridge(
         // 债务D2：不在这里发"已允许"——等 client 的 reply POST 成功回调
         //（onPermissionReplied）再确认；404（桌面已批）走 onPermissionConflict。
         perm.resolve(ctx.userId, decision)
+        return
+      }
+
+      // L 项：表单作答消费（选择弹窗 A/B/C/D）——有挂起表单时优先于命令/普通消息。
+      // 文字"允许"与表单答案的歧义：parsePermissionDecision 先行的同时要求存在
+      // 待审权限才会消费；表单槽独立判断，互不串线。
+      if (formBridge.tryResolveText(ctx.userId, content)) {
         return
       }
 

@@ -19,6 +19,28 @@
 //   GET    /model                       -> { data: [ { providerID, modelID } ] } (flat)
 export type PermissionDecision = "once" | "always" | "reject"
 
+// L 项（2026-10-30）：V2 Form（选择表单）类型——P0 实证 openapi Form.* schema。
+// MultiselectField/StringField.options 即 "A/B/C/D 选择弹窗"的选项模型。
+export interface FormOption {
+  value: string
+  label: string
+  description?: string
+}
+
+export type FormField =
+  | { key: string; type: "string"; title?: string; description?: string; required?: boolean; options?: FormOption[]; placeholder?: string }
+  | { key: string; type: "number" | "integer"; title?: string; description?: string; required?: boolean; minimum?: number; maximum?: number }
+  | { key: string; type: "boolean"; title?: string; description?: string; required?: boolean }
+  | { key: string; type: "multiselect"; title?: string; description?: string; required?: boolean; options: FormOption[]; minItems?: number; maxItems?: number; custom?: boolean }
+  | { key: string; type: string; title?: string; description?: string; required?: boolean }
+
+export interface FormInfo {
+  id: string
+  sessionID: string
+  title: string
+  fields: FormField[]
+}
+
 export interface PermissionRequest {
   id: string
   sessionID: string
@@ -79,6 +101,11 @@ export interface OpencodeClient {
   permission: {
     list(): Promise<{ data?: PermissionRequest[] }>
     reply(opts: { path: { sessionID: string; requestID: string }; body: { decision: PermissionDecision } }): Promise<unknown>
+  }
+  // L 项（2026-10-30）：V2 Form API——全局待答表单列表 + 作答（选择弹窗 A/B/C/D 的桥接通道）
+  form: {
+    list(): Promise<{ data?: FormInfo[] }>
+    reply(opts: { path: { sessionID: string; formID: string }; body: { answer: Record<string, unknown> } }): Promise<unknown>
   }
   app: {
     agents(): Promise<{ data?: unknown[] }>
@@ -190,6 +217,20 @@ export function createClient(baseUrl: string): OpencodeClient {
       async reply(opts) {
         return json(
           await req(`/session/${opts.path.sessionID}/permission/${opts.path.requestID}/reply`, {
+            method: "POST",
+            body: JSON.stringify(opts.body),
+          }),
+        )
+      },
+    },
+
+    form: {
+      async list() {
+        return json(await req("/form"))
+      },
+      async reply(opts) {
+        return json(
+          await req(`/session/${opts.path.sessionID}/form/${opts.path.formID}/reply`, {
             method: "POST",
             body: JSON.stringify(opts.body),
           }),

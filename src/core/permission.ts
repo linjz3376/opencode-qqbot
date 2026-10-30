@@ -91,6 +91,9 @@ export interface PermissionGate {
   ) => Promise<PermissionDecision>
   resolve: (userId: string, decision: PermissionDecision) => void
   restore: () => void
+  // L 项（2026-10-30）：常驻监听器发现的外部审批（如桌面端回合发起）——注册
+  // "无活 waiter"槽（restored 语义：裁决走直连 reply），推卡片/文字菜单
+  pushExternal: (userId: string, ctx: MessageContext, request: PermissionRequest, mainSessionId: string) => void
 }
 
 // 审批域门面：挂起槽 + 等待/裁决 + 跨重启恢复。所有状态与文件读写收在本域。
@@ -206,7 +209,55 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     }
   }
 
-  return { hasPending, getPending, waitForDecision, resolve, restore }
+  return { hasPending, getPending, waitForDecision, resolve, restore, pushExternal: pushExternalImpl }
+
+  // L 项（2026-10-30）：常驻交互监听器发现外部审批时的注册入口。与 restore() 同款
+  // "无活 waiter"槽：用户在 QQ 裁决后 resolve() 走直连 POST reply（restored 路径），
+  // 并回执"已从 QQ 批准"。同 request.id 已在挂起则去重。
+  function pushExternalImpl(
+    userId: string,
+    ctx: MessageContext,
+    request: PermissionRequest,
+    mainSessionId: string,
+  ): void {
+    if (pendingPermissions.get(userId)?.request.id === request.id) return
+    // 单一挂起槽：新审批取代旧槽
+    const prev = pendingPermissions.get(userId)
+    if (prev?.timer) clearTimeout(prev.timer)
+
+    const timer = setTimeout(() => {
+      if (pendingPermissions.get(userId)?.request.id !== request.id) return
+      pendingPermissions.delete(userId)
+      savePendingPermMap(pendingPermissions)
+      void client.permission
+        .reply({ path: { sessionID: request.sessionID, requestID: request.id }, body: { decision: "reject" } })
+        .catch(() => {})
+      void safeDeliver(ctx, "审批超时（30 分钟），已自动拒绝该权限请求").catch(() => {})
+    }, PERM_PROMPT_TTL_MS)
+
+    pendingPermissions.set(userId, {
+      request,
+      mainSessionId,
+      resolve: () => {},
+      timer,
+      ctx,
+      createdAt: Date.now(),
+      restored: true,
+    })
+    savePendingPermMap(pendingPermissions)
+    console.log(`[perm] 外部审批已推送 user=${userId.slice(0, 8)}… request=${request.id} action=${request.action}`)
+    // 推送失败不撤槽（用户仍可能文字裁决）
+    void (async () => {
+      const sentByCard = deps.sendApprovalPrompt
+        ? await deps.sendApprovalPrompt(ctx, request, mainSessionId).catch(() => false)
+        : false
+      if (!sentByCard) {
+        await sendReply(ctx, formatPermissionPrompt(request, mainSessionId)).catch((error) => {
+          console.error("[bridge] 发送审批请求失败:", error)
+        })
+      }
+    })()
+  }
 }
 
 // 解析用户的审批回复（自然语言或 /allow /always /deny 命令式）。

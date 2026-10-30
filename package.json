@@ -10,7 +10,7 @@
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun run test/decision-cases.ts && bun run test/milestone-cases.ts && bun run test/attachment-cases.ts && bun run test/r2-hardening-cases.ts && bun run test/e1-mirror-digest.ts && bun run test/mask-headers-cases.ts && bun run test/perm-mock.ts && bun run test/discovery-cases.ts && bun run test/linkwatch-cases.ts && bun run test/reply-limiter-cases.ts && bun run test/card-approval-cases.ts && bun run test/message-split-cases.ts && bun run test/sync-batch1-cases.ts && bun run test/stream-stagger-cases.ts && bun run test/history-render-cases.ts && bun run test/stall-nudge-cases.ts",
+    "test": "bun run test/decision-cases.ts && bun run test/milestone-cases.ts && bun run test/attachment-cases.ts && bun run test/r2-hardening-cases.ts && bun run test/e1-mirror-digest.ts && bun run test/mask-headers-cases.ts && bun run test/perm-mock.ts && bun run test/discovery-cases.ts && bun run test/linkwatch-cases.ts && bun run test/reply-limiter-cases.ts && bun run test/card-approval-cases.ts && bun run test/message-split-cases.ts && bun run test/sync-batch1-cases.ts && bun run test/stream-stagger-cases.ts && bun run test/history-render-cases.ts && bun run test/stall-nudge-cases.ts && bun run test/interaction-watch-cases.ts",
     "test:e2e": "bun run test/watch-history-e2e.ts && bun run test/d1-subagent-ask-e2e.ts && bun run test/d2-conflict-e2e.ts && bun run test/perm-e2e.ts && bun run test/perm-real-e2e.ts",
     "verify": "bun run typecheck && bun run test",
     "verify:full": "bun run verify && bun run test:e2e"
