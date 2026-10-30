@@ -5,6 +5,11 @@ import type { MessageContext } from "./types.js"
 
 const API_BASE = "https://api.sgroup.qq.com"
 const TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
+// 沙箱模式（QQ_SANDBOX=true）：API 底座切沙箱域（QQ 官方文档约定
+// sandbox.api.sgroup.qq.com）；token 端点两环境共用 bots.qq.com。
+// 注意：沙箱 bot 在非沙箱场景会被网关以 4914（offline/sandbox-only）拒绝。
+const API_BASE_SANDBOX = "https://sandbox.api.sgroup.qq.com"
+const API_BASE_EFFECTIVE = process.env.QQ_SANDBOX === "true" ? API_BASE_SANDBOX : API_BASE
 
 let cachedToken: { token: string; expiresAt: number; appId: string } | null = null
 // Singleflight：防止并发获取 Token 时重复请求
@@ -152,7 +157,7 @@ export async function apiRequest<T = unknown>(
   body?: unknown,
   timeoutMs?: number,
 ): Promise<T> {
-  const url = `${API_BASE}${path}`
+  const url = `${API_BASE_EFFECTIVE}${path}`
   const headers: Record<string, string> = {
     Authorization: `QQBot ${accessToken}`,
     "Content-Type": "application/json",
