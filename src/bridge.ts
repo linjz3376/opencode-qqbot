@@ -42,7 +42,7 @@ import {
   pendingInflight,
   classifyInflight,
   INFLIGHT_MAX_AGE_MS,
-  REDISPATCH_MAX_AGE_MS,
+  redispatchMaxAgeMs,
 } from "./core/inflight-journal.js"
 import { extractSendFileMarkers, sendLocalFile } from "./core/send-media.js"
 import type { InteractionEvent } from "./qq/types.js"
@@ -623,13 +623,13 @@ export function createBridge(
           await deliver(ctx, "🔄 重启恢复：你之前的任务仍在执行，完成即回传结果")
           startBackgroundWait(entry.sessionId, ctx, Date.now(), entry.msgId)
           console.log(`[bridge] 启动对账：在途任务已重挂后台等待 msgId=${entry.msgId}`)
-        } else if (ageMs <= REDISPATCH_MAX_AGE_MS) {
+        } else if (ageMs <= redispatchMaxAgeMs()) {
           settleInflight(entry.msgId) // 旧账结清，重派回合走新账（合成 trackId）
           await deliver(ctx, `🔄 重启恢复：重新处理你之前的消息「${entry.text.slice(0, 50)}」`)
           void handleMessage(ctx)
           console.log(`[bridge] 启动对账：丢失消息已重派 msgId=${entry.msgId}`)
         } else {
-          await deliver(ctx, `⚠️ 此前重启期间丢失一条你的消息「${entry.text.slice(0, 50)}」（超 30 分钟未自动重发），需要的话请重发一次`)
+          await deliver(ctx, `⚠️ 此前重启期间丢失一条你的消息「${entry.text.slice(0, 50)}」（超过自动重派窗口未重发），需要的话请重发一次`)
           settleInflight(entry.msgId)
           console.log(`[bridge] 启动对账：超期消息仅通知 msgId=${entry.msgId}`)
         }

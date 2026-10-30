@@ -21,10 +21,16 @@ export interface InflightEntry {
   state: "inflight" | "settled"
 }
 
-// 对账年龄上限：超 24h 的在途账不再追溯（直接清账）
+// 对账年龄上限：超 24h 的在途账不再追溯（直接清账）。
+// 注意：这也是"重派窗口不限时间"的天然上限——重派窗口设得再大，超 24h 的账已清。
 export const INFLIGHT_MAX_AGE_MS = 24 * 60 * 60 * 1000
-// 丢失消息自动重派窗口：30 分钟内视为"意图仍然新鲜"自动重派；超期只通知请用户重发
-export const REDISPATCH_MAX_AGE_MS = 30 * 60 * 1000
+// 丢失消息自动重派窗口（2026-10-30 用户拍板：默认 2 小时，env QQ_REDISPATCH_MAX_AGE_MS
+// 可调；0=关闭自动重派一律通知）。窗口内视为"意图仍然新鲜"自动重派；超期只通知请用户
+// 重发——防"陈旧意图"在重启时被意外执行。
+export function redispatchMaxAgeMs(): number {
+  const n = Number(process.env.QQ_REDISPATCH_MAX_AGE_MS ?? "7200000")
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 7_200_000
+}
 
 // 测试可经 QQ_INFLIGHT_FILE 指向临时文件
 function journalPath(): string {
