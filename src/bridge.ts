@@ -348,19 +348,21 @@ export function createBridge(
 
   async function interactionTick(): Promise<void> {
     try {
-      const [permRes, formRes] = await Promise.all([client.permission.list(), client.form.list()])
+      const [permRes] = await Promise.all([client.permission.list()])
       for (const req of permRes?.data ?? []) {
         for (const uid of usersOfSession(req.sessionID)) {
           if (perm.hasPending(uid)) continue // 单一槽：在挂起（含同 id）即跳过
           perm.pushExternal(uid, ctxForUser(uid), req, req.sessionID)
         }
       }
-      for (const form of formRes?.data ?? []) {
-        // 全局列表可能含已答表单：有 state 字段时只推 pending
-        const state = (form as { state?: { status?: string } }).state
-        if (state && state.status !== "pending") continue
-        for (const uid of usersOfSession(form.sessionID)) {
-          formBridge.pushForm(uid, ctxForUser(uid), form)
+      // 表单按会话列表（GET /api/form 是 location 维度，bot cwd 不在会话项目会漏）
+      for (const entry of sessions.all()) {
+        const forms = (await client.form.list({ sessionID: entry.sessionId }).catch(() => undefined))?.data ?? []
+        for (const form of forms) {
+          // 会话级列表返回 Form.Info（无 state）；带 state 时只推 pending
+          const state = (form as { state?: { status?: string } }).state
+          if (state && state.status !== "pending") continue
+          formBridge.pushForm(entry.userId, ctxForUser(entry.userId), form)
         }
       }
     } catch (error) {

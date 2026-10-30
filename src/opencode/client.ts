@@ -102,9 +102,10 @@ export interface OpencodeClient {
     list(): Promise<{ data?: PermissionRequest[] }>
     reply(opts: { path: { sessionID: string; requestID: string }; body: { decision: PermissionDecision } }): Promise<unknown>
   }
-  // L 项（2026-10-30）：V2 Form API——全局待答表单列表 + 作答（选择弹窗 A/B/C/D 的桥接通道）
+  // L 项（2026-10-30）：V2 Form API——按会话列表（实测 GET /api/form 是 location 维度，
+  // bot 进程 cwd 与会话项目不一致会漏；会话级列表才可靠）+ 作答
   form: {
-    list(): Promise<{ data?: FormInfo[] }>
+    list(input: { sessionID: string }): Promise<{ data?: FormInfo[] }>
     reply(opts: { path: { sessionID: string; formID: string }; body: { answer: Record<string, unknown> } }): Promise<unknown>
   }
   app: {
@@ -225,8 +226,8 @@ export function createClient(baseUrl: string): OpencodeClient {
     },
 
     form: {
-      async list() {
-        return json(await req("/form"))
+      async list(input) {
+        return json(await req(`/session/${input.sessionID}/form`))
       },
       async reply(opts) {
         return json(
