@@ -13,6 +13,7 @@ import { SessionManager } from "./opencode/sessions.js"
 import { startGateway } from "./qq/gateway.js"
 import { startBackgroundTokenRefresh, stopBackgroundTokenRefresh } from "./qq/api.js"
 import { createBridge } from "./bridge.js"
+import { waitInstanceLock, INSTANCE_LOCK_DISABLED_ENV, type InstanceLock } from "./core/instance-lock.js"
 
 // O1（2026-10-15）：开机竞态退避等待——桌面服务未就绪时 20s 重试、15 分钟
 // 上限。今晨实证（09:04–09:31）：fail-fast 秒退 → 看门狗 10 分钟粒度空转 4 次；
@@ -55,6 +56,14 @@ async function waitForOpencode(
 async function main(): Promise<void> {
   await ensureConfig()
   const config = loadConfig()
+
+  // M 项（2026-10-30，吸收竞品 proper-lockfile 方案零依赖手写）：单实例锁防多开——
+  // 双实例同 bot 会被 QQ 网关互踢。后到实例待命轮询，宿主退出/暴毙（30s 僵尸判定）
+  // 后自动接管。QQ_INSTANCE_LOCK=false 可关闭（如部署层已有单实例语义）。
+  let instanceLock: InstanceLock | null = null
+  if (process.env[INSTANCE_LOCK_DISABLED_ENV] !== "false") {
+    instanceLock = await waitInstanceLock(config.qq.appId)
+  }
 
   if (!config.opencode.baseUrl) {
     throw new Error("缺少 OPENCODE_BASE_URL，指向 OpenCode 桌面版 API（如 http://127.0.0.1:<端口>/api；2.1.x 端口动态，失联时启动流程会自动发现）")
@@ -117,6 +126,7 @@ async function main(): Promise<void> {
     shuttingDown = true
     console.log(`[index] 收到 ${signal}，开始退出...`)
     clearInterval(heartbeatTimer)
+    instanceLock?.release()
     linkWatch.stop()
     gateway.stop()
     stopBackgroundTokenRefresh()
@@ -130,5 +140,5 @@ async function main(): Promise<void> {
 main().catch((error) => {
   console.error("[index] 启动失败:", error)
   stopBackgroundTokenRefresh()
-  process.exit(1)
+  process.exit(1) // 锁文件随之成僵尸，30s 后待命实例自动接管
 })

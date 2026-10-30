@@ -39,6 +39,9 @@ export interface C2CMessageEvent {
   attachments?: MessageAttachment[]
   /** 长按回复引用的消息 id（QQ 客户端引用消息） */
   message_reference?: { message_id: string }
+  /** 引用消息的嵌入内容载体（message_type=103 时随事件透传，官方未完全文档化） */
+  message_type?: number
+  msg_elements?: unknown
 }
 
 /**
@@ -78,6 +81,9 @@ export interface GroupMessageEvent {
   attachments?: MessageAttachment[]
   /** 长按回复引用的消息 id（QQ 客户端引用消息） */
   message_reference?: { message_id: string }
+  /** 引用消息的嵌入内容载体（message_type=103 时随事件透传，官方未完全文档化） */
+  message_type?: number
+  msg_elements?: unknown
 }
 
 /**

@@ -166,21 +166,6 @@ export async function apiRequest<T = unknown>(
   const isFileUpload = path.includes("/files")
   const timeout = timeoutMs ?? (isFileUpload ? FILE_UPLOAD_TIMEOUT : DEFAULT_API_TIMEOUT)
 
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => {
-    controller.abort()
-  }, timeout)
-
-  const options: RequestInit = {
-    method,
-    headers,
-    signal: controller.signal,
-  }
-
-  if (body) {
-    options.body = JSON.stringify(body)
-  }
-
   console.log(`[qqbot-api] >>> ${method} ${url} (timeout: ${timeout}ms)`)
   console.log("[qqbot-api] >>> Headers:", JSON.stringify(maskHeaders(headers), null, 2))
   if (body) {
@@ -191,32 +176,62 @@ export async function apiRequest<T = unknown>(
     console.log("[qqbot-api] >>> Body:", JSON.stringify(logBody, null, 2))
   }
 
-  let res: Response
-  try {
-    res = await fetch(url, options)
-  } catch (err) {
-    clearTimeout(timeoutId)
-    if (err instanceof Error && err.name === "AbortError") {
-      console.error(`[qqbot-api] <<< Request timeout after ${timeout}ms`)
-      throw new Error(`Request timeout [${path}]: exceeded ${timeout}ms`)
+  // O 项（2026-10-30，吸收竞品 opencode-qq-v2 postWithRetry）：HTTP 429 限流时
+  // 尊重 Retry-After 退避重试（最多再试 2 次，单次等待封顶 30s）；其余错误不重试。
+  // 429 语义=请求被拒绝未生效，重试无副作用。
+  let res: Response | undefined
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => {
+      controller.abort()
+    }, timeout)
+
+    const options: RequestInit = {
+      method,
+      headers,
+      signal: controller.signal,
     }
-    console.error("[qqbot-api] <<< Network error:", err)
-    throw new Error(`Network error [${path}]: ${err instanceof Error ? err.message : String(err)}`)
-  } finally {
-    clearTimeout(timeoutId)
+
+    if (body) {
+      options.body = JSON.stringify(body)
+    }
+
+    try {
+      res = await fetch(url, options)
+    } catch (err) {
+      clearTimeout(timeoutId)
+      if (err instanceof Error && err.name === "AbortError") {
+        console.error(`[qqbot-api] <<< Request timeout after ${timeout}ms`)
+        throw new Error(`Request timeout [${path}]: exceeded ${timeout}ms`)
+      }
+      console.error("[qqbot-api] <<< Network error:", err)
+      throw new Error(`Network error [${path}]: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      clearTimeout(timeoutId)
+    }
+
+    if (res.status === 429 && attempt < 2) {
+      const retryAfterSec = Number(res.headers.get("Retry-After") ?? "1")
+      const waitMs = Math.min(Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec : 1, 30) * 1000
+      console.warn(`[qqbot-api] 429 限流，${waitMs}ms 后重试（第 ${attempt + 1}/2 次）: ${path}`)
+      await new Promise((r) => setTimeout(r, waitMs))
+      continue
+    }
+    break
   }
+  const response = res as Response
 
   const responseHeaders: Record<string, string> = {}
-  res.headers.forEach((value, key) => {
+  response.headers.forEach((value, key) => {
     responseHeaders[key] = value
   })
-  console.log(`[qqbot-api] <<< Status: ${res.status} ${res.statusText}`)
+  console.log(`[qqbot-api] <<< Status: ${response.status} ${response.statusText}`)
   console.log("[qqbot-api] <<< Headers:", JSON.stringify(maskHeaders(responseHeaders), null, 2))
 
   let data: T
   let rawBody: string
   try {
-    rawBody = await res.text()
+    rawBody = await response.text()
     console.log("[qqbot-api] <<< Body:", rawBody)
     data = JSON.parse(rawBody) as T
   } catch (err) {
@@ -224,7 +239,7 @@ export async function apiRequest<T = unknown>(
     throw new Error(`Failed to parse response [${path}]: ${err instanceof Error ? err.message : String(err)}`)
   }
 
-  if (!res.ok) {
+  if (!response.ok) {
     const error = data as { message?: string; code?: number }
     throw new Error(`API Error [${path}]: ${error.message ?? JSON.stringify(data)}`)
   }

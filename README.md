@@ -50,7 +50,13 @@ cd opencode-qqbot && bun install
 
 ### 配置（`~/.openqq/.env`，单点密钥）
 
-首次运行缺凭据会交互式引导写入；也可手工创建：
+首次运行缺凭据会交互式引导写入；也可用手机 QQ 扫码绑定（需先 `npm i -g @tencent-connect/qqbot-connector`）：
+
+```bash
+openqq-setup     # 终端弹二维码，扫码后凭据自动写入 ~/.openqq/.env
+```
+
+或手工创建：
 
 ```ini
 QQ_APP_ID=你的AppID
@@ -70,6 +76,8 @@ openqq            # npm 全局安装后
 ```
 
 Windows 常驻：`deploy/` 目录内有任务计划（开机自启、看门狗心跳守护）脚本与说明。
+
+> **单实例**：bot 启动时持文件锁（`~/.openqq/openqq-<appId>.lock`，10s 心跳、30s 僵尸判定）——双开时后到实例待命，宿主退出后自动接管，避免同 bot 多实例被 QQ 网关互踢。`QQ_INSTANCE_LOCK=false` 可关闭。
 
 > **跨平台**：bot 本体零 OS 分支（纯 TS/Bun + HTTP/WS，与 QQ 官方 SDK 同形态）。Linux/macOS 常驻用 `systemd --user` 或 `nohup bun run src/index.ts &` 即可；端口自动发现在三个系统都可用（Linux 走 `ss -tln`，macOS 走 `netstat -an -p tcp`，Windows 走 `netstat -ano -p tcp`）。
 

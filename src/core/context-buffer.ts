@@ -46,6 +46,32 @@ export function resolveQuote(scope: string, referencedMsgId: string): string | n
   return entry?.text ?? null
 }
 
+// N 项（2026-10-30，吸收竞品 opencode-qq-v2 util/quote.js）：引用消息双通道——
+// QQ 在 message_type=103 时把被引内容嵌在 msg_elements 里随事件透传（官方未完全
+// 文档化结构，做防御性递归提取）；命中即权威来源，不再依赖本缓存（跨重启/引用
+// 老消息也能解析）。提取为空时调用方回落 resolveQuote 缓存通道。
+export function extractEmbeddedQuote(event: { message_type?: unknown; msg_elements?: unknown } | undefined): string | null {
+  if (!event || Number(event.message_type) !== 103 || !event.msg_elements) return null
+  const out: string[] = []
+  const walk = (node: unknown, depth: number): void => {
+    if (depth > 8 || out.join("\n").length > 4000) return
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, depth + 1)
+      return
+    }
+    if (node && typeof node === "object") {
+      const obj = node as Record<string, unknown>
+      if (typeof obj.content === "string" && obj.content.trim()) out.push(obj.content.trim())
+      for (const key of Object.keys(obj)) {
+        if (key !== "content") walk(obj[key], depth + 1)
+      }
+    }
+  }
+  walk(event.msg_elements, 0)
+  const text = out.join("\n").trim().slice(0, 2000)
+  return text || null
+}
+
 /** 测试/运维用：清空全部缓存 */
 export function resetContextBuffer(): void {
   scopeBuffers.clear()

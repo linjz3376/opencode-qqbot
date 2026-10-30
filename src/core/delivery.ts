@@ -52,6 +52,10 @@ function saveQuotaMap(m: ReadonlyMap<string, { day: string; count: number; warne
   }
 }
 
+// P 项（2026-10-30，吸收竞品 pendingNotice 模式）：发送彻底失败不静默——
+// 记"有未送达消息"，下一次成功投递时前缀贴条告知用户（导出供测试）。
+export const UNDELIVERED_NOTICE = "（此前有未能送达的消息）\n"
+
 // B-msgid 纯函数（导出供测试，2026-10-29）：挑选可"骑"的被动 msg_id——
 // 同一聊天类型、时间戳在窗口内才有效；任何不对齐都返回 undefined（回落真主动）。
 export function selectRideMsgId(
@@ -105,6 +109,8 @@ export function createDelivery(
   })()
 
   const pushQueues = new Map<string, PushQueue>()
+  // P 项：彻底投递失败的用户集合（贴条状态），下次成功投递时消化
+  const undelivered = new Set<string>()
   const activeQuota = new Map<string, { day: string; count: number; warned: boolean }>()
   // B1（2026-10-29，吸收自 openclaw-qqbot reply-limiter）：被动回复限额预判——
   // 单 msgId 4 次/1h 窗口，耗尽/过期直接转主动，省一次注定被拒的 API 往返。
@@ -142,6 +148,7 @@ export function createDelivery(
     try {
       await deliver(ctx, text)
     } catch (error) {
+      undelivered.add(userId) // P 项：观察推送彻底失败 → 贴条待下次消化
       console.error("[bridge] 观察推送失败（被动+主动均失败，丢弃本批）:", error)
     }
   }
@@ -150,7 +157,20 @@ export function createDelivery(
   // 窗口过期/失败降级主动消息（计日配额，超限告警一次）。
   // 观察推送与最终回复共用——超长回合（>被动窗口）的答案靠它送达
   //（2026-10-13 实测教训：回合 >5 分钟时旧路径答案永久丢失）。
+  // P 项贴条包装：deliver 入口消化贴条状态——有待贴条则前缀拼入正文；
+  // 投递失败则把贴条放回（留待下次），成功才算消化。
   async function deliver(ctx: MessageContext, text: string): Promise<void> {
+    const hadNotice = undelivered.delete(ctx.userId)
+    const body = hadNotice ? UNDELIVERED_NOTICE + text : text
+    try {
+      await deliverCore(ctx, body)
+    } catch (error) {
+      if (hadNotice) undelivered.add(ctx.userId)
+      throw error
+    }
+  }
+
+  async function deliverCore(ctx: MessageContext, text: string): Promise<void> {
     // B1：被动尝试前预判额度，耗尽/过期直接走主动（避免注定被拒的被动请求）
     const passive = ctx.msgId ? passiveLimiter.checkLimit(ctx.msgId) : null
     if (passive?.shouldFallbackToProactive) {
@@ -214,6 +234,7 @@ export function createDelivery(
     try {
       await deliver(c, text)
     } catch (error) {
+      undelivered.add(c.userId) // P 项：最终失败 → 贴条待下次消化
       console.error("[bridge] 消息无法送达（被动+主动均失败）:", error)
     }
   }

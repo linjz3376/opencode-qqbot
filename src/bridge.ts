@@ -35,7 +35,7 @@ import { truncate } from "./core/util.js"
 import { createDelivery } from "./core/delivery.js"
 import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approval.js"
 import { createFormBridge, renderFormPrompt } from "./core/form-bridge.js"
-import { recordMessage, resolveQuote, scopeKeyOf } from "./core/context-buffer.js"
+import { recordMessage, resolveQuote, scopeKeyOf, extractEmbeddedQuote } from "./core/context-buffer.js"
 import { extractSendFileMarkers, sendLocalFile } from "./core/send-media.js"
 import type { InteractionEvent } from "./qq/types.js"
 // O7b：解析/格式化保持经 bridge 再导出——单测与既有调用方导入路径不变
@@ -499,10 +499,11 @@ export function createBridge(
 
         // 缺口 1（引用上下文，吸收自官方 quote-ref 中间件）：本条消息的引用解析
         // 先于本条登记（顺序不可反：本条入缓存后才能被后续消息引用）
-        if (ctx.referencedMsgId) {
-          const quoted = resolveQuote(scopeKeyOf(ctx), ctx.referencedMsgId)
-          if (quoted) ctx.quoteText = quoted
-        }
+        // N 项（2026-10-30）：双通道——QQ 事件内嵌被引内容（message_type=103）
+        // 为权威来源优先；缺失才回落本地缓存（跨重启/老消息引用也能解析）。
+        const embeddedQuote = extractEmbeddedQuote(ctx.rawEvent)
+        const quoted = embeddedQuote ?? (ctx.referencedMsgId ? resolveQuote(scopeKeyOf(ctx), ctx.referencedMsgId) : null)
+        if (quoted) ctx.quoteText = quoted
         recordMessage(scopeKeyOf(ctx), ctx.msgId, ctx.content)
         // 新回合取代旧的后台等待（steer 合并运行时只投递一次合并结果）
         bgWaits.get(sessionId)?.cancel()
