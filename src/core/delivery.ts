@@ -96,6 +96,13 @@ export function createDelivery(
     return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 300_000
   })()
 
+  // J-轻（2026-10-30，用户拍板固化）：伪流式错峰——多片回复片间间隔（默认 300ms），
+  // 配合 B3 typing 指示，长答案逐段到达体感近打字机；0=关闭恢复一次性全发。
+  const STREAM_STAGGER_MS = (() => {
+    const n = Number(process.env.QQ_STREAM_STAGGER_MS ?? "300")
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 300
+  })()
+
   const pushQueues = new Map<string, PushQueue>()
   const activeQuota = new Map<string, { day: string; count: number; warned: boolean }>()
   // B1（2026-10-29，吸收自 openclaw-qqbot reply-limiter）：被动回复限额预判——
@@ -227,9 +234,15 @@ export function createDelivery(
 
   async function sendReply(ctx: MessageContext, text: string): Promise<void> {
     const accessToken = await getAccessToken(config.qq.appId, config.qq.clientSecret)
-    await replyToQQ(accessToken, ctx, text, config.maxReplyLength)
-    // B1：被动回复成功才记额度（失败不计，避免虚耗）；bridge 直调与 deliver 共用此出口
-    if (ctx.msgId) passiveLimiter.record(ctx.msgId)
+    // J-轻：伪流式错峰（多片时隔 300ms 逐段到达）；replyToQQ 返回实际片数
+    const chunks = await replyToQQ(accessToken, ctx, text, config.maxReplyLength, {
+      staggerMs: STREAM_STAGGER_MS,
+    })
+    // B1：被动回复成功才记额度（失败不计，避免虚耗）；按片记账——平台限额按"条"计，
+    // 多片回复此前少计 N-1（J-轻顺手修正）；bridge 直调与 deliver 共用此出口
+    if (ctx.msgId) {
+      for (let i = 0; i < chunks; i++) passiveLimiter.record(ctx.msgId)
+    }
   }
 
   return { enqueuePush, deliver, safeDeliver, sendReply }

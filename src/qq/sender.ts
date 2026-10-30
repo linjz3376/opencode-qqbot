@@ -220,6 +220,17 @@ export function splitMessage(text: string, maxBytes: number = MARKDOWN_MAX_BYTES
   return chunks.length > 0 ? chunks : [text]
 }
 
+// J-轻（2026-10-30，伪流式固化）：多片错峰发送的延迟计划——片间各睡 staggerMs，
+// 单片无延迟。纯函数导出供测试。
+export function staggerDelays(chunkCount: number, staggerMs: number): number[] {
+  if (chunkCount <= 1 || staggerMs <= 0) return []
+  return Array.from({ length: chunkCount - 1 }, () => staggerMs)
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 // 发送单个分片: 先尝试 markdown，失败则回退纯文本。
 async function sendChunk(
   accessToken: string,
@@ -249,12 +260,18 @@ async function sendChunk(
   }
 }
 
+export interface ReplyToQQOptions {
+  /** J-轻（2026-10-30）：伪流式错峰——多片发送时片间间隔 ms（默认 0=一次性全发） */
+  staggerMs?: number
+}
+
 export async function replyToQQ(
   accessToken: string,
   ctx: MessageContext,
   text: string,
   _maxLength: number = DEFAULT_MAX_LENGTH,
-): Promise<void> {
+  options?: ReplyToQQOptions,
+): Promise<number> {
   const mdFormatted = formatForQQMarkdown(text)
   const plainFormatted = formatForQQ(text)
 
@@ -263,10 +280,13 @@ export async function replyToQQ(
   const mdChunks = splitMessage(mdFormatted, MARKDOWN_MAX_BYTES)
   const plainChunks = splitMessage(plainFormatted, PLAIN_MAX_BYTES)
 
+  const delays = staggerDelays(mdChunks.length, options?.staggerMs ?? 0)
   for (let i = 0; i < mdChunks.length; i++) {
+    if (i > 0 && delays[i - 1]) await sleep(delays[i - 1])
     const msgSeq = getNextMsgSeq(ctx.msgId)
     // 纯文本分片可能与 markdown 分片数量不一致，按索引兜底取对应/最后一片
     const plainChunk = plainChunks[i] ?? plainChunks[plainChunks.length - 1] ?? mdChunks[i]
     await sendChunk(accessToken, ctx, mdChunks[i], plainChunk, msgSeq)
   }
+  return mdChunks.length
 }
