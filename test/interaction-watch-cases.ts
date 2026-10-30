@@ -95,6 +95,7 @@ const { buildFormKeyboard, decodeFormButton, encodeFormButton } = await import("
 // 6a 键盘构建：单选 string → 有键盘；多字段/布尔/自由文本 → null
 const kbSingle = buildFormKeyboard(SINGLE_FORM, "u1")
 check("单选表单有键盘", kbSingle !== null && kbSingle.content.rows.length === 1 && kbSingle.content.rows[0].buttons.length === 2)
+check("visited_label 回显带 ✓（点击后原生 UI 更新）", kbSingle !== null && kbSingle.content.rows[0].buttons.some((b) => b.render_data.visited_label.startsWith("✓ ")))
 check("键盘按钮 data 可解码且 f/k/v 正确", (() => {
   if (!kbSingle) return false
   const b0 = kbSingle.content.rows[0].buttons[0]
@@ -135,6 +136,7 @@ check("多字段表单无键盘", buildFormKeyboard(MULTI_FIELD, "u1") === null)
   check("错类型按钮 → false", fb.handleButton({ user_openid: "u1", data: { resolved: { button_data: "{bad" } } }) === false)
   check("过期 form id → 消费拒识（true，不提交）", fb.handleButton(evtOf("frm_old", "m", "x")) === true && replies2.length === 0)
   check("匹配按钮 → 提交单值", fb.handleButton(evtOf("frm_s", "m", "y")) === true && replies2.length === 1 && JSON.stringify(replies2[0].answer) === JSON.stringify({ m: "y" }))
+  check("按钮路径静默（无 ✅ 明文回执）", !sent2.some((t) => t.includes("✅ 已提交")))
   check("提交后无挂起", !fb.hasPending("u1"))
 }
 

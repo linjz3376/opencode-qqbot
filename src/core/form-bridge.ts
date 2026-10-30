@@ -173,7 +173,8 @@ export function buildFormKeyboard(form: FormInfo, ownerOpenid: string): InlineKe
   if (field.type !== "string" && field.type !== "multiselect") return null
   const buttons: KeyboardButton[] = opts.slice(0, 20).map((opt) => ({
     id: `form-${form.id}-${opt.value}`.slice(0, 64),
-    render_data: { label: clipButtonLabel(opt.label), visited_label: clipButtonLabel(opt.label), style: 1 },
+    // visited_label：点击后原生回显（按钮变已访问态、其余置灰），不再发明文确认消息
+    render_data: { label: clipButtonLabel(opt.label), visited_label: clipButtonLabel(`✓ ${opt.label}`), style: 1 },
     action: {
       type: 1,
       permission: { type: 2, specify_user_ids: [ownerOpenid] },
@@ -215,13 +216,16 @@ export function createFormBridge(deps: FormBridgeDeps): FormBridge {
     return entry
   }
 
-  function submit(userId: string, form: FormInfo, ctx: MessageContext, answer: Record<string, unknown>, display: string): void {
+  function submit(userId: string, form: FormInfo, ctx: MessageContext, answer: Record<string, unknown>, display: string, silent = false): void {
     clear(userId)
     void (async () => {
       try {
         await deps.client.form.reply({ path: { sessionID: form.sessionID, formID: form.id }, body: { answer } })
-        void deps.safeDeliver(ctx, `✅ 已提交选择：${display}`).catch(() => {})
-        console.log(`[form-bridge] 表单已作答 user=${userId.slice(0, 8)}… form=${form.id}`)
+        // 按钮路径静默（visited_label 原生回显已表达结果）；文字路径保留明文回执
+        if (!silent) {
+          void deps.safeDeliver(ctx, `✅ 已提交选择：${display}`).catch(() => {})
+        }
+        console.log(`[form-bridge] 表单已作答 user=${userId.slice(0, 8)}… form=${form.id} answer=${display}`)
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)
         if (msg.includes("AlreadySettled") || msg.includes("already")) {
@@ -292,7 +296,7 @@ export function createFormBridge(deps: FormBridgeDeps): FormBridge {
       return true // 已消费（拒识），不再下放
     }
     const answer: Record<string, unknown> = { [button.k]: button.v }
-    submit(userId, entry.form, entry.ctx, answer, button.v)
+    submit(userId, entry.form, entry.ctx, answer, button.v, true) // 按钮路径静默（visited_label 原生回显）
     return true
   }
 

@@ -56,9 +56,12 @@ function clipLabel(text: string): string {
 }
 
 function makeButton(label: string, style: number, data: ApprovalButtonData, ownerOpenid: string): KeyboardButton {
+  // visited_label = 点击后的原生回显（QQ 客户端把已点按钮渲染为已访问态、其余置灰——
+  // 这就是"dsh 点一个其余变灰"的平台原生机制，2026-10-30 用户要求抄的效果）
+  const visited = data.d === "once" || data.d === "always" ? `✓ ${label}` : data.d === "reject" ? `✗ ${label}` : label
   return {
     id: `approval-${data.d}-${data.r}`.slice(0, 64),
-    render_data: { label: clipLabel(label), visited_label: clipLabel(label), style },
+    render_data: { label: clipLabel(label), visited_label: clipLabel(visited), style },
     // permission.type=2 + specify_user_ids：仅审批发起人可点（官方 P0 字段，
     // 防止群里其他人代点裁决）
     action: { type: 1, permission: { type: 2, specify_user_ids: [ownerOpenid] }, data: encodeButtonData(data) },
