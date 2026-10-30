@@ -1,5 +1,5 @@
 {
-  "name": "opencode-qq-bot",
+  "name": "opencode-qqbot",
   "version": "0.3.0",
   "type": "module",
   "description": "QQ Bot for OpenCode AI - chat with AI coding assistant via QQ",
