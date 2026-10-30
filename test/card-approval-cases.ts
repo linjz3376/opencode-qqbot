@@ -44,7 +44,13 @@ check(
   all.every((b) => b.action.permission.type === 2 && b.action.permission.specify_user_ids?.[0] === "u_owner_001"),
 )
 check("label 均 ≤10 字符", all.every((b) => b.render_data.label.length <= 10))
-check("visited_label 与 label 一致", all.every((b) => b.render_data.visited_label === b.render_data.label))
+check("visited_label 回显化（允许✓/拒绝✗/忽略原样）", all.every((b) => {
+  const d = decodeButtonData(b.action.data)
+  if (!d) return false
+  if (d.d === "ignore") return b.render_data.visited_label === b.render_data.label
+  if (d.d === "reject") return b.render_data.visited_label.startsWith("✗")
+  return b.render_data.visited_label.startsWith("✓")
+}))
 const dataSet = new Set(all.map((b) => b.action.data))
 check(
   "每键 data 可解码且 r=请求 id",
