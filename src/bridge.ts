@@ -54,6 +54,23 @@ export function evictableIdleSessions(
   return out
 }
 
+// H2 停滞提醒决策（导出供测试，2026-10-30）：bgWait 零进展时提醒用户处置桌面弹窗。
+// 首次：startedAt 后 firstMs；之后：上次进展/提醒后 intervalMs；最多 maxNudges 次。
+export function stallNudgeDecision(
+  startedAt: number,
+  lastProgressAt: number,
+  nudges: number,
+  now: number,
+  firstMs: number,
+  intervalMs: number,
+  maxNudges: number,
+): "nudge" | "wait" {
+  if (nudges >= maxNudges) return "wait"
+  const base = nudges === 0 ? startedAt : lastProgressAt
+  const need = nudges === 0 ? firstMs : intervalMs
+  return now - base >= need ? "nudge" : "wait"
+}
+
 interface Bridge {
   handleMessage: (ctx: MessageContext) => Promise<void>
   // HC2（2026-10-26）：暴露事件流句柄，index 侧链路自愈巡检需对其热换基
@@ -144,9 +161,20 @@ export function createBridge(
   const BG_WAIT_MAX_MS = 24 * 60 * 60 * 1000
   const BG_POLL_MS = 5 * 60 * 1000
 
+  // H2（2026-10-30，昨晚卡死事故复盘）：桌面审批/选择弹窗对 bot 无通道（V2 无
+  // question API，C 项已证伪）——共享会话会被"桌面弹窗挂起"传导性卡死，且静默。
+  // bgWait 期间检测"零进展停滞"，主动提醒用户：去桌面端处理弹窗，或用 /stop 终止。
+  const STALL_FIRST_NUDGE_MS = 30 * 60 * 1000
+  const STALL_NUDGE_INTERVAL_MS = 30 * 60 * 1000
+  const STALL_NUDGE_MAX = 3
+
   function startBackgroundWait(sessionId: string, ctx: MessageContext, baseline: number): void {
     let cancelled = false
     let finished = false
+    const startedAt = Date.now()
+    let lastProgressAt = startedAt
+    let nudges = 0
+    let lastMarker = ""
 
     const cleanup = (): void => {
       cancelled = true
@@ -188,6 +216,30 @@ export function createBridge(
       try {
         const listJson = await client.session.messages({ path: { id: sessionId } })
         const msgs = listJson?.data ?? []
+
+        // H2 停滞检测：消息数或最新 created 变化=有进展；零进展超窗则提醒用户
+        let maxCreated = 0
+        for (const m of msgs) {
+          const created = m.time?.created ?? 0
+          if (created > maxCreated) maxCreated = created
+        }
+        const marker = `${msgs.length}:${maxCreated}`
+        const now = Date.now()
+        if (marker !== lastMarker) {
+          lastMarker = marker
+          lastProgressAt = now
+        } else if (
+          stallNudgeDecision(startedAt, lastProgressAt, nudges, now, STALL_FIRST_NUDGE_MS, STALL_NUDGE_INTERVAL_MS, STALL_NUDGE_MAX) === "nudge"
+        ) {
+          nudges += 1
+          lastProgressAt = now
+          console.log(`[bridge] 后台任务停滞提醒 #${nudges} session=${sessionId}`)
+          void safeDeliver(
+            ctx,
+            "⚠️ 后台任务已停滞超过 30 分钟——很可能在桌面端等待确认（审批/选择弹窗无法同步到 QQ）。请到桌面端查看处理；或回复 /stop 终止该任务后重发。",
+          ).catch(() => {})
+        }
+
         if (msgs.some((x) => x.type === "idle" && (x.time?.created ?? 0) >= baseline)) {
           await finish("done")
         }
