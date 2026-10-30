@@ -1,6 +1,7 @@
 // @input:  (none - raw HTTP to QQ Bot REST API)
 // @output: getAccessToken, apiRequest, sendC2CMessage, sendGroupMessage, getGatewayUrl, startBackgroundTokenRefresh
 // @pos:    qq层 - QQ Bot REST API 鉴权+请求封装 (Token singleflight + 后台刷新)
+import type { MessageContext } from "./types.js"
 
 const API_BASE = "https://api.sgroup.qq.com"
 const TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
@@ -361,6 +362,43 @@ export async function sendGroupMessage(
  */
 export async function acknowledgeInteraction(accessToken: string, interactionId: string, code = 0): Promise<void> {
   await apiRequest(accessToken, "PUT", `/interactions/${interactionId}`, { code })
+}
+
+// ── 媒体发送（生态观察缺口 4：bot→QQ 发图/文件，P0 参照 qqbot-nodejs protocol/api/media.ts）──
+export const MediaFileType = { IMAGE: 1, VIDEO: 2, VOICE: 3, FILE: 4 } as const
+
+/** 上传媒体到 QQ 拿 file_info（单次上限 20MB；base64 体由调用方给） */
+export async function uploadQQMedia(
+  accessToken: string,
+  ctx: MessageContext,
+  opts: { fileType: number; fileData?: string; url?: string; fileName?: string },
+): Promise<{ file_uuid?: string; file_info: string; ttl?: number }> {
+  const isGroup = ctx.type === "group" && ctx.groupId
+  const body: Record<string, unknown> = { file_type: opts.fileType, srv_send_msg: false }
+  if (opts.url) body.url = opts.url
+  else if (opts.fileData) body.file_data = opts.fileData
+  if (opts.fileType === MediaFileType.FILE && opts.fileName) body.file_name = opts.fileName
+  const path = isGroup ? `/v2/groups/${ctx.groupId}/files` : `/v2/users/${ctx.userId}/files`
+  return apiRequest(accessToken, "POST", path, body)
+}
+
+/** 发送媒体消息（msg_type=7，media.file_info 引用上传结果） */
+export async function sendQQMediaMessage(
+  accessToken: string,
+  ctx: MessageContext,
+  fileInfo: string,
+  content?: string,
+): Promise<MessageResponse> {
+  const isGroup = ctx.type === "group" && ctx.groupId
+  const body: Record<string, unknown> = {
+    msg_type: 7,
+    media: { file_info: fileInfo },
+    msg_seq: ctx.msgId ? getNextMsgSeq(ctx.msgId) : 1,
+    ...(content ? { content } : {}),
+    ...(ctx.msgId ? { msg_id: ctx.msgId } : {}),
+  }
+  const path = isGroup ? `/v2/groups/${ctx.groupId}/messages` : `/v2/users/${ctx.userId}/messages`
+  return apiRequest(accessToken, "POST", path, body)
 }
 
 interface BackgroundTokenRefreshOptions {

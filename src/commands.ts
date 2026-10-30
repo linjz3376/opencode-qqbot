@@ -6,6 +6,7 @@ import type { MessageContext } from "./qq/types.js"
 import type { OpencodeClient, SessionMessage } from "./opencode/client.js"
 import { renderHistory } from "./opencode/history.js"
 import { SessionManager } from "./opencode/sessions.js"
+import { sendLocalFile } from "./core/send-media.js"
 
 const SELECTION_TTL_MS = 60_000
 
@@ -91,6 +92,8 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
       return handleHistory(ctx, parsed.args, cmdCtx)
     case "watch":
       return handleWatch(ctx, parsed.args, cmdCtx)
+    case "send":
+      return handleSend(ctx, parsed.args, cmdCtx)
     case "mirror":
       return handleMirror(parsed.args, cmdCtx)
     default:
@@ -160,6 +163,20 @@ async function handleNew(ctx: MessageContext, cmdCtx: CommandContext): Promise<s
     `标题：${session.title ?? "未命名会话"}`,
     `ID：${session.sessionId}`,
   ].join("\n")
+}
+
+// 缺口 4：/send <路径>——把本地文件/图片发到 QQ（路径白名单内）
+async function handleSend(ctx: MessageContext, args: string, cmdCtx: CommandContext): Promise<string> {
+  const path = args.trim()
+  if (!path) {
+    return "用法：/send <本地文件路径>（仅允许白名单目录：QQ 图片缓存与 bot 工作目录）"
+  }
+  try {
+    const done = await sendLocalFile(ctx, path, { getToken: cmdCtx.getAccessToken })
+    return `📎 ${done}`
+  } catch (error) {
+    return `⚠️ 发送失败：${error instanceof Error ? error.message : error}`
+  }
 }
 
 async function handleStop(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
@@ -454,6 +471,7 @@ export function buildHelpText(): string {
     "/agent <name> - 切换 Agent",
     "/rename <name> - 重命名当前会话",
     "/history [N] - 查看当前会话最近 N 轮历史（默认 3，最多 10）",
+    "/send <路径> - 把白名单目录内的文件/图片发到 QQ",
     "/watch - 观察当前会话实时过程（工具调用/完成会推送摘要）",
     "/watch <会话ID> - 观察指定会话",
     "/watch off - 停止观察",

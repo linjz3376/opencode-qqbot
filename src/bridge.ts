@@ -36,6 +36,7 @@ import { createDelivery } from "./core/delivery.js"
 import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approval.js"
 import { createFormBridge, renderFormPrompt } from "./core/form-bridge.js"
 import { recordMessage, resolveQuote, scopeKeyOf } from "./core/context-buffer.js"
+import { extractSendFileMarkers, sendLocalFile } from "./core/send-media.js"
 import type { InteractionEvent } from "./qq/types.js"
 // O7b：解析/格式化保持经 bridge 再导出——单测与既有调用方导入路径不变
 export { parsePermissionDecision, formatPermissionPrompt } from "./core/permission.js"
@@ -531,8 +532,20 @@ export function createBridge(
         })
 
         if (replyText.trim()) {
+          // 缺口 4：AI 主动发文件——QQ_SEND_FILE 标记行拦截发送文件，剩余文本照送
+          const extracted = extractSendFileMarkers(replyText)
+          for (const p of extracted.paths) {
+            try {
+              const done = await sendLocalFile(ctx, p, {
+                getToken: () => getAccessToken(config.qq.appId, config.qq.clientSecret),
+              })
+              await safeDeliver(ctx, `📎 ${done}`)
+            } catch (error) {
+              await safeDeliver(ctx, `⚠️ 发送文件失败（${p}）：${error instanceof Error ? error.message : error}`)
+            }
+          }
           // 超长回合可能已超被动窗口：deliver 被动失败自动降级主动，答案不丢
-          await safeDeliver(ctx, replyText)
+          if (extracted.text) await safeDeliver(ctx, extracted.text)
         }
       } catch (error) {
         if (sessionId && turnStart > 0 && error instanceof Error && error.message.includes("响应超时")) {
