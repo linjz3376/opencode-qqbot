@@ -40,7 +40,7 @@ export function extForImageMime(mime: string): string | null {
 }
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024
-const ALLOWED_HOST_SUFFIXES = [".qpic.cn", ".qq.com"]
+const ALLOWED_HOST_SUFFIXES = [".qpic.cn", ".qq.com", ".qq.com.cn"]
 
 /** 下载域白名单（R2-P1-2）：只信 QQ 自家 CDN 且必须 https——在 fetch 之前
  *  拦截，同时断"access_token 出站"与"SSRF 打内网"两条链；精确匹配或以
