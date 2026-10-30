@@ -37,10 +37,13 @@
 ### 安装
 
 ```bash
-# 方式一：npm 全局安装（推荐）
+# 方式一：从 GitHub 直装（不依赖 npm registry，推荐）
+npm i -g github:linjz3376/opencode-qqbot
+
+# 方式二：npm registry（发布后可用）
 npm install -g opencode-qqbot
 
-# 方式二：源码
+# 方式三：源码
 git clone https://github.com/linjz3376/opencode-qqbot
 cd opencode-qqbot && bun install
 ```
