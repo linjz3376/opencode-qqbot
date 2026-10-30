@@ -8,10 +8,13 @@
 // MVP 边界：单交互字段完整支持（选择/多选/布尔/自由文本）；多字段表单提示回桌面。
 import type { FormInfo, OpencodeClient } from "../opencode/client.js"
 import type { MessageContext } from "../qq/types.js"
+import type { InlineKeyboard, KeyboardButton } from "../qq/api.js"
 import { redactSecrets } from "../opencode/history.js"
 
 export const FORM_PROMPT_TTL_MS = 30 * 60 * 1000
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const BUTTON_LABEL_MAX = 10
+const BUTTONS_PER_ROW = 2
 
 // 宽松字段视图：V2 字段类型可能扩展（external 等），运行时用宽类型读取可选属性，
 // 未知类型走自由文本兜底而不是报错。
@@ -125,15 +128,78 @@ export interface PendingForm {
   timer: ReturnType<typeof setTimeout> | null
 }
 
+// ── 表单按钮（2026-10-30 弹窗验证前置：点选式作答）──
+
+/** button_data：t 判别 + formID + 字段 key + 选项 value（明文 JSON，与审批同款 P0 格式） */
+export interface FormButtonData {
+  t: "form"
+  f: string
+  k: string
+  v: string
+}
+
+export function encodeFormButton(data: FormButtonData): string {
+  return JSON.stringify(data)
+}
+
+export function decodeFormButton(raw: string | undefined): FormButtonData | undefined {
+  if (!raw) return undefined
+  try {
+    const parsed = JSON.parse(raw) as Partial<FormButtonData>
+    if (parsed && typeof parsed === "object" && parsed.t === "form" && typeof parsed.f === "string" && typeof parsed.k === "string" && typeof parsed.v === "string") {
+      return parsed as FormButtonData
+    }
+  } catch {
+    // fall through
+  }
+  return undefined
+}
+
+function clipButtonLabel(text: string): string {
+  const s = text.trim()
+  return s.length > BUTTON_LABEL_MAX ? s.slice(0, BUTTON_LABEL_MAX - 1) + "…" : s
+}
+
+/**
+ * 构建表单选项键盘：单可见字段 + 有 options 时可用（string=单选直点直交；
+ * multiselect=点一个先交单值数组，多值仍走文字）。多字段/无选项 → null（文字作答）。
+ */
+export function buildFormKeyboard(form: FormInfo, ownerOpenid: string): InlineKeyboard | null {
+  const visible = form.fields.filter((f) => !(f as FieldLike).hidden)
+  if (visible.length !== 1) return null
+  const field = visible[0] as FieldLike
+  const opts = field.options
+  if (!opts?.length) return null
+  if (field.type !== "string" && field.type !== "multiselect") return null
+  const buttons: KeyboardButton[] = opts.slice(0, 20).map((opt) => ({
+    id: `form-${form.id}-${opt.value}`.slice(0, 64),
+    render_data: { label: clipButtonLabel(opt.label), visited_label: clipButtonLabel(opt.label), style: 1 },
+    action: {
+      type: 1,
+      permission: { type: 2, specify_user_ids: [ownerOpenid] },
+      data: encodeFormButton({ t: "form", f: form.id, k: field.key, v: opt.value }),
+    },
+  }))
+  const rows: Array<{ buttons: KeyboardButton[] }> = []
+  for (let i = 0; i < buttons.length; i += BUTTONS_PER_ROW) {
+    rows.push({ buttons: buttons.slice(i, i + BUTTONS_PER_ROW) })
+  }
+  return { content: { rows } }
+}
+
 export interface FormBridgeDeps {
   client: OpencodeClient
   sendReply: (ctx: MessageContext, text: string) => Promise<void>
   safeDeliver: (ctx: MessageContext, text: string) => Promise<void>
+  /** 按钮卡片发送（有键盘时优先；返回 false 自动降级文字） */
+  sendFormCard?: (ctx: MessageContext, form: FormInfo, keyboard: InlineKeyboard) => Promise<boolean>
 }
 
 export interface FormBridge {
   pushForm: (userId: string, ctx: MessageContext, form: FormInfo) => void
   tryResolveText: (userId: string, text: string) => boolean
+  /** 按钮互动回调：匹配挂起表单则提交并返回 true；非本域返回 false */
+  handleButton: (event: { user_openid?: string; group_member_openid?: string; data?: { resolved?: { button_data?: string } } }) => boolean
   hasPending: (userId: string) => boolean
   getPending: (userId: string) => PendingForm | undefined
 }
@@ -147,6 +213,24 @@ export function createFormBridge(deps: FormBridgeDeps): FormBridge {
     if (entry.timer) clearTimeout(entry.timer)
     pending.delete(userId)
     return entry
+  }
+
+  function submit(userId: string, form: FormInfo, ctx: MessageContext, answer: Record<string, unknown>, display: string): void {
+    clear(userId)
+    void (async () => {
+      try {
+        await deps.client.form.reply({ path: { sessionID: form.sessionID, formID: form.id }, body: { answer } })
+        void deps.safeDeliver(ctx, `✅ 已提交选择：${display}`).catch(() => {})
+        console.log(`[form-bridge] 表单已作答 user=${userId.slice(0, 8)}… form=${form.id}`)
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        if (msg.includes("AlreadySettled") || msg.includes("already")) {
+          void deps.safeDeliver(ctx, "该选择已在桌面端处理过，任务应已继续").catch(() => {})
+        } else {
+          void deps.safeDeliver(ctx, `⚠️ 提交失败：${msg.slice(0, 120)}`).catch(() => {})
+        }
+      }
+    })()
   }
 
   function pushForm(userId: string, ctx: MessageContext, form: FormInfo): void {
@@ -165,9 +249,16 @@ export function createFormBridge(deps: FormBridgeDeps): FormBridge {
     }, FORM_PROMPT_TTL_MS)
     pending.set(userId, entry)
     console.log(`[form-bridge] 表单已推送 user=${userId.slice(0, 8)}… form=${form.id} title=${form.title.slice(0, 40)}`)
-    void deps.sendReply(ctx, renderFormPrompt(form)).catch((error) => {
-      console.error("[form-bridge] 表单推送失败:", error instanceof Error ? error.message : error)
-    })
+    void (async () => {
+      const keyboard = buildFormKeyboard(form, ctx.userId)
+      if (keyboard && deps.sendFormCard) {
+        const sent = await deps.sendFormCard(ctx, form, keyboard).catch(() => false)
+        if (sent) return
+      }
+      await deps.sendReply(ctx, renderFormPrompt(form)).catch((error) => {
+        console.error("[form-bridge] 表单推送失败:", error instanceof Error ? error.message : error)
+      })
+    })()
   }
 
   /** 有挂起表单则消费本条文本（解析成功→提交；失败→提示），返回 true；无挂起返回 false。 */
@@ -186,24 +277,24 @@ export function createFormBridge(deps: FormBridgeDeps): FormBridge {
       void deps.sendReply(entry.ctx, hint).catch(() => {})
       return true
     }
-    const { form, ctx } = entry
-    clear(userId)
-    void (async () => {
-      try {
-        await deps.client.form.reply({ path: { sessionID: form.sessionID, formID: form.id }, body: { answer } })
-        void deps.safeDeliver(ctx, `✅ 已提交选择：${text.trim()}`).catch(() => {})
-        console.log(`[form-bridge] 表单已作答 user=${userId.slice(0, 8)}… form=${form.id}`)
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error)
-        if (msg.includes("AlreadySettled") || msg.includes("already")) {
-          void deps.safeDeliver(ctx, "该选择已在桌面端处理过，任务应已继续").catch(() => {})
-        } else {
-          void deps.safeDeliver(ctx, `⚠️ 提交失败：${msg.slice(0, 120)}`).catch(() => {})
-        }
-      }
-    })()
+    submit(userId, entry.form, entry.ctx, answer, text.trim())
     return true
   }
 
-  return { pushForm, tryResolveText, hasPending: (u) => pending.has(u), getPending: (u) => pending.get(u) }
+  function handleButton(event: { user_openid?: string; group_member_openid?: string; data?: { resolved?: { button_data?: string } } }): boolean {
+    const userId = event.user_openid ?? event.group_member_openid
+    if (!userId) return false
+    const button = decodeFormButton(event.data?.resolved?.button_data)
+    if (!button) return false
+    const entry = pending.get(userId)
+    if (!entry || entry.form.id !== button.f) {
+      console.log(`[form-bridge] 拒识过期表单按钮 user=${userId.slice(0, 8)}… form=${button.f}`)
+      return true // 已消费（拒识），不再下放
+    }
+    const answer: Record<string, unknown> = { [button.k]: button.v }
+    submit(userId, entry.form, entry.ctx, answer, button.v)
+    return true
+  }
+
+  return { pushForm, tryResolveText, handleButton, hasPending: (u) => pending.has(u), getPending: (u) => pending.get(u) }
 }

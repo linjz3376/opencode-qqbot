@@ -89,6 +89,55 @@ bridge.pushForm("u1", ctx, CHOICE_FORM)
 bridge.pushForm("u1", ctx, SINGLE_FORM)
 check("新表单取代旧槽并提示", sent.some((t) => t.includes("有新的选择请求")) && bridge.getPending("u1")?.form.id === "frm_s")
 
+// —— 6) 按钮化（2026-10-30 弹窗验证前置）——
+const { buildFormKeyboard, decodeFormButton, encodeFormButton } = await import("../src/core/form-bridge.ts")
+
+// 6a 键盘构建：单选 string → 有键盘；多字段/布尔/自由文本 → null
+const kbSingle = buildFormKeyboard(SINGLE_FORM, "u1")
+check("单选表单有键盘", kbSingle !== null && kbSingle.content.rows.length === 1 && kbSingle.content.rows[0].buttons.length === 2)
+check("键盘按钮 data 可解码且 f/k/v 正确", (() => {
+  if (!kbSingle) return false
+  const b0 = kbSingle.content.rows[0].buttons[0]
+  const d = decodeFormButton(b0.action.data)
+  return d !== undefined && d.f === "frm_s" && d.k === "m" && d.v === "x"
+})())
+check("多选表单也给键盘（点一个交单值）", buildFormKeyboard(CHOICE_FORM, "u1") !== null)
+check("布尔表单无键盘（文字作答）", buildFormKeyboard(BOOL_FORM, "u1") === null)
+check("自由文本表单无键盘", buildFormKeyboard(TEXT_FORM, "u1") === null)
+const MULTI_FIELD: FormInfo = { id: "frm_m", sessionID: "s", title: "多字段", fields: [
+  { key: "a", type: "string", title: "A" },
+  { key: "b", type: "string", title: "B" },
+] }
+check("多字段表单无键盘", buildFormKeyboard(MULTI_FIELD, "u1") === null)
+
+// 6b handleButton：挂起匹配 → 提交；无挂起/错类型 → false；过期 form id → 消费拒识
+{
+  const sent2: string[] = []
+  const replies2: Array<{ formID: string; answer: Record<string, unknown> }> = []
+  const fb = createFormBridge({
+    client: {
+      form: {
+        list: async () => ({ data: [] }),
+        reply: async (o: { path: { formID: string }; body: { answer: Record<string, unknown> } }) => {
+          replies2.push({ formID: o.path.formID, answer: o.body.answer })
+        },
+      },
+    } as any,
+    sendReply: async (_c, t) => void sent2.push(t),
+    safeDeliver: async (_c, t) => void sent2.push(t),
+  })
+  const evtOf = (f: string, k: string, v: string) => ({
+    user_openid: "u1",
+    data: { resolved: { button_data: encodeFormButton({ t: "form", f, k, v }) } },
+  })
+  check("无挂起 → 消费拒识（true，不提交）", fb.handleButton(evtOf("frm_s", "m", "x")) === true && replies2.length === 0)
+  fb.pushForm("u1", ctx, SINGLE_FORM)
+  check("错类型按钮 → false", fb.handleButton({ user_openid: "u1", data: { resolved: { button_data: "{bad" } } }) === false)
+  check("过期 form id → 消费拒识（true，不提交）", fb.handleButton(evtOf("frm_old", "m", "x")) === true && replies2.length === 0)
+  check("匹配按钮 → 提交单值", fb.handleButton(evtOf("frm_s", "m", "y")) === true && replies2.length === 1 && JSON.stringify(replies2[0].answer) === JSON.stringify({ m: "y" }))
+  check("提交后无挂起", !fb.hasPending("u1"))
+}
+
 // —— 6) pushExternal 语义（permission 域，假 deps 经 createPermissionGate 不便→直接验接口存在性略）——
 // permission.pushExternal 的行为依赖 createPermissionGate 全量 deps，此处验 form 侧为主；
 // pushExternal 的 404/直连 reply 路径与 restored 相同（既有 O2 语义），由部署后实测验。

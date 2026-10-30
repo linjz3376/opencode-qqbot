@@ -7,7 +7,7 @@ import { join } from "path"
 import { homedir } from "os"
 import type { Config } from "./config.js"
 import type { MessageContext } from "./qq/types.js"
-import { getAccessToken, sendC2CInputNotify } from "./qq/api.js"
+import { getAccessToken, sendC2CInputNotify, sendC2CMessage, sendGroupMessage } from "./qq/api.js"
 import { prepareQQAttachments, augmentPromptWithAttachments, purgeOldQQImages } from "./qq/media.js"
 import type { OpencodeClient } from "./opencode/client.js"
 import { collectReplyText } from "./opencode/client.js"
@@ -34,7 +34,7 @@ import {
 import { truncate } from "./core/util.js"
 import { createDelivery } from "./core/delivery.js"
 import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approval.js"
-import { createFormBridge } from "./core/form-bridge.js"
+import { createFormBridge, renderFormPrompt } from "./core/form-bridge.js"
 import type { InteractionEvent } from "./qq/types.js"
 // O7b：解析/格式化保持经 bridge 再导出——单测与既有调用方导入路径不变
 export { parsePermissionDecision, formatPermissionPrompt } from "./core/permission.js"
@@ -304,7 +304,27 @@ export function createBridge(
 
   // L 项（2026-10-30）：表单桥（选择弹窗 A/B/C/D 的 QQ 同步与作答回传）。
   // 与审批共用"每用户单一交互槽"心智：表单挂起时优先消费用户回复。
-  const formBridge = createFormBridge({ client, sendReply, safeDeliver })
+  // 按钮卡片（弹窗验证前置）：选项直点直交，失败自动降级文字编号作答。
+  const formBridge = createFormBridge({
+    client,
+    sendReply,
+    safeDeliver,
+    sendFormCard: async (ctx, form, keyboard) => {
+      try {
+        const token = await getAccessToken(config.qq.appId, config.qq.clientSecret)
+        const text = renderFormPrompt(form)
+        if (ctx.type === "group" && ctx.groupId) {
+          await sendGroupMessage(token, ctx.groupId, text, ctx.msgId || undefined, undefined, true, keyboard)
+        } else {
+          await sendC2CMessage(token, ctx.userId, text, ctx.msgId || undefined, undefined, true, keyboard)
+        }
+        return true
+      } catch (error) {
+        console.error("[bridge] 表单卡片发送失败，降级文字:", error instanceof Error ? error.message : error)
+        return false
+      }
+    },
+  })
 
   // L 项：常驻交互监听——轮询全局待答权限 + 表单，反查 QQ 用户后推送。
   // 覆盖"桌面端回合发起的交互"（昨晚事故盲区）：bot 空闲时也能把弹窗送到 QQ。
@@ -529,7 +549,14 @@ export function createBridge(
     }
   }
 
-  return { handleMessage, eventStream, handleInteraction: (event) => void handleApprovalInteraction(event, perm) }
+  return {
+    handleMessage,
+    eventStream,
+    handleInteraction: (event) => {
+      if (handleApprovalInteraction(event, perm)) return
+      void formBridge.handleButton(event)
+    },
+  }
 }
 
 async function maybeHandlePendingSelection(
