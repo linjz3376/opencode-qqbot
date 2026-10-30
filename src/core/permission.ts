@@ -209,8 +209,6 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     }
   }
 
-  return { hasPending, getPending, waitForDecision, resolve, restore, pushExternal: pushExternalImpl }
-
   // L 项（2026-10-30）：常驻交互监听器发现外部审批时的注册入口。与 restore() 同款
   // "无活 waiter"槽：用户在 QQ 裁决后 resolve() 走直连 POST reply（restored 路径），
   // 并回执"已从 QQ 批准"。同 request.id 已在挂起则去重。
@@ -258,6 +256,8 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       }
     })()
   }
+
+  return { hasPending, getPending, waitForDecision, resolve, restore, pushExternal: pushExternalImpl }
 }
 
 // 解析用户的审批回复（自然语言或 /allow /always /deny 命令式）。
