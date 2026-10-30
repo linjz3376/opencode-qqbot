@@ -3,6 +3,9 @@
   "version": "0.3.2",
   "type": "module",
   "description": "QQ Bot for OpenCode AI - chat with AI coding assistant via QQ",
+  "exports": {
+    ".": "./src/plugin-entry.ts"
+  },
   "bin": {
     "openqq": "./bin/openqq.js",
     "openqq-setup": "./bin/openqq-setup.mjs"
@@ -11,14 +14,17 @@
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun run test/decision-cases.ts && bun run test/milestone-cases.ts && bun run test/attachment-cases.ts && bun run test/r2-hardening-cases.ts && bun run test/e1-mirror-digest.ts && bun run test/mask-headers-cases.ts && bun run test/perm-mock.ts && bun run test/discovery-cases.ts && bun run test/linkwatch-cases.ts && bun run test/reply-limiter-cases.ts && bun run test/card-approval-cases.ts && bun run test/message-split-cases.ts && bun run test/sync-batch1-cases.ts && bun run test/stream-stagger-cases.ts && bun run test/history-render-cases.ts && bun run test/stall-nudge-cases.ts && bun run test/interaction-watch-cases.ts && bun run test/quote-voice-dedup-cases.ts && bun run test/send-media-cases.ts && bun run test/rival-absorb-cases.ts && bun run test/inflight-recovery-cases.ts",
+    "test": "bun run test/decision-cases.ts && bun run test/milestone-cases.ts && bun run test/attachment-cases.ts && bun run test/r2-hardening-cases.ts && bun run test/e1-mirror-digest.ts && bun run test/mask-headers-cases.ts && bun run test/perm-mock.ts && bun run test/discovery-cases.ts && bun run test/linkwatch-cases.ts && bun run test/reply-limiter-cases.ts && bun run test/card-approval-cases.ts && bun run test/message-split-cases.ts && bun run test/sync-batch1-cases.ts && bun run test/stream-stagger-cases.ts && bun run test/history-render-cases.ts && bun run test/stall-nudge-cases.ts && bun run test/interaction-watch-cases.ts && bun run test/quote-voice-dedup-cases.ts && bun run test/send-media-cases.ts && bun run test/rival-absorb-cases.ts && bun run test/inflight-recovery-cases.ts && bun run test/plugin-launcher-cases.ts",
     "test:e2e": "bun run test/watch-history-e2e.ts && bun run test/d1-subagent-ask-e2e.ts && bun run test/d2-conflict-e2e.ts && bun run test/perm-e2e.ts && bun run test/perm-real-e2e.ts",
     "verify": "bun run typecheck && bun run test",
-    "verify:full": "bun run verify && bun run test:e2e"
+    "verify:full": "bun run verify && bun run test:e2e",
+    "build:bundle": "bun build src/index.ts --outfile=dist/openqq-bot.js --target=node",
+    "prepublishOnly": "bun run build:bundle"
   },
   "files": [
     "bin",
     "src",
+    "dist",
     "tsconfig.json"
   ],
   "keywords": [
@@ -37,9 +43,15 @@
     "@opencode-ai/sdk": "^1.2.20",
     "ws": "^8.18.0"
   },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.0.0",
+    "effect": "^4.0.0"
+  },
   "devDependencies": {
+    "@opencode/plugin": "^2.0.0",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
+    "effect": "^4.0.0",
     "typescript": "^5.9.0"
   }
 }

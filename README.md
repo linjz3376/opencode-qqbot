@@ -37,10 +37,16 @@
 ### 安装
 
 ```bash
-# 方式一：从 GitHub 直装（不依赖 npm registry，推荐）
+# 方式零：opencode 插件形态（最省事）——在 opencode.json(c) 的 plugins 数组加入：
+#   "@linjz/opencode-qqbot"
+# serve 服务自动加载；插件每 5 分钟巡检 bot 存活，不在就以独立进程拉起（bot 不受
+# serve 重载/重启影响）。凭据缺失时插件只在 opencode 日志里提示，不会乱拉。
+# 注意：此形态要求 PATH 里有 bun 或 node；bot 的开机自启依赖 serve 服务自启。
+
+# 方式一：从 GitHub 直装（不依赖 npm registry，推荐独立部署）
 npm i -g github:linjz3376/opencode-qqbot
 
-# 方式二：npm registry（发布后可用）
+# 方式二：npm registry
 npm install -g @linjz/opencode-qqbot
 
 # 方式三：源码

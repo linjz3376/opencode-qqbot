@@ -13,7 +13,7 @@ import { SessionManager } from "./opencode/sessions.js"
 import { startGateway } from "./qq/gateway.js"
 import { startBackgroundTokenRefresh, stopBackgroundTokenRefresh } from "./qq/api.js"
 import { createBridge } from "./bridge.js"
-import { waitInstanceLock, INSTANCE_LOCK_DISABLED_ENV, type InstanceLock } from "./core/instance-lock.js"
+import { waitInstanceLock, acquireInstanceLock, INSTANCE_LOCK_DISABLED_ENV, type InstanceLock } from "./core/instance-lock.js"
 
 // O1（2026-10-15）：开机竞态退避等待——桌面服务未就绪时 20s 重试、15 分钟
 // 上限。今晨实证（09:04–09:31）：fail-fast 秒退 → 看门狗 10 分钟粒度空转 4 次；
@@ -59,9 +59,17 @@ async function main(): Promise<void> {
 
   // M 项（2026-10-30，吸收竞品 proper-lockfile 方案零依赖手写）：单实例锁防多开——
   // 双实例同 bot 会被 QQ 网关互踢。后到实例待命轮询，宿主退出/暴毙（30s 僵尸判定）
-  // 后自动接管。QQ_INSTANCE_LOCK=false 可关闭（如部署层已有单实例语义）。
+  // 后自动接管。QQ_INSTANCE_LOCK=false 关闭；=try 则抢不到即退出（插件引导器拉起
+  // 场景：多 location 并发拉起时防待命实例堆积）。
   let instanceLock: InstanceLock | null = null
-  if (process.env[INSTANCE_LOCK_DISABLED_ENV] !== "false") {
+  const lockMode = process.env[INSTANCE_LOCK_DISABLED_ENV] ?? ""
+  if (lockMode === "try") {
+    instanceLock = acquireInstanceLock(config.qq.appId)
+    if (!instanceLock) {
+      console.log("[index] 已有实例在运行（try 模式），本实例退出")
+      process.exit(0)
+    }
+  } else if (lockMode !== "false") {
     instanceLock = await waitInstanceLock(config.qq.appId)
   }
 

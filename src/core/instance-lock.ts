@@ -86,6 +86,20 @@ export function acquireInstanceLock(appId: string): InstanceLock | null {
   return acquireInstanceLockAt(lockPathOf(appId))
 }
 
+/** 观测锁活性（不抢锁）：锁文件存在且心跳新鲜 = bot 活着。插件引导器用。 */
+export function isInstanceAlive(appId: string, staleMs: number = LOCK_STALE_MS): boolean {
+  return isInstanceAliveAt(lockPathOf(appId), staleMs)
+}
+
+/** 显式路径版存活观测（导出供测试） */
+export function isInstanceAliveAt(path: string, staleMs: number = LOCK_STALE_MS): boolean {
+  try {
+    return Date.now() - statSync(path).mtimeMs <= staleMs
+  } catch {
+    return false
+  }
+}
+
 /**
  * 阻塞式抢锁：抢不到就每 5s 重试，直到成为宿主。
  * 用于启动入口——双开时后到实例待命，宿主退出后自动接管。
