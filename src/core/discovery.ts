@@ -40,31 +40,49 @@ export function isOpencodeInfo(body: unknown): boolean {
   )
 }
 
-// netstat 输出 → 本机监听口列表（去重，保持首次出现序）。
-// 兼容 IPv4（127.0.0.1:P / 0.0.0.0:P）、IPv6（[::1]:P / [::]:P）与 TCPv6 行；
-// 非监听态（ESTABLISHED/TIME_WAIT/…）与表头噪声一律忽略。
+// netstat/ss 输出 → 本机监听口列表（去重，保持首次出现序）。
+// 跨平台兼容三形态（QQ 官方插件纯 TS 零 OS 分支为参照——我们也要不挑系统）：
+//   Windows:  TCP    127.0.0.1:28894   0.0.0.0:0   LISTENING   44152
+//   Linux ss: LISTEN 0 128 127.0.0.1:28894 0.0.0.0:*
+//   macOS:    tcp4  0  0  127.0.0.1.28894  *.*  LISTEN（注意 macOS 是点分隔）
+// 规则：LISTEN(ING) 行内，取含 : 或 . 分隔的地址列，末段数字即端口；
+// 裸 IP 末段可能误当端口（如 127.0.0.1 → 1），无害——探测时签名不符即跳过。
 export function parseListenPorts(output: string): number[] {
   const ports = new Set<number>()
   for (const raw of output.split(/\r?\n/)) {
     const line = raw.trim()
-    if (!/^(TCP|TCPv6)\s/i.test(line) || !/LISTENING/i.test(line)) continue
-    const cols = line.split(/\s+/)
-    if (cols.length < 4) continue
-    const local = cols[1] ?? ""
-    const port = Number(local.slice(local.lastIndexOf(":") + 1))
-    if (Number.isInteger(port) && port > 0 && port < 65536) ports.add(port)
+    if (!/\bLISTEN(?:ING)?\b/i.test(line)) continue
+    for (const col of line.split(/\s+/)) {
+      const m = /^[\w.[\]:%*]*[:.](\d+)$/.exec(col)
+      if (!m) continue
+      const port = Number(m[1])
+      if (Number.isInteger(port) && port > 0 && port < 65536) ports.add(port)
+    }
   }
   return [...ports]
 }
 
+// 跨平台监听口枚举：Windows=netstat -ano -p tcp；Linux=ss -tln（兜底 netstat -tln）；
+// macOS=netstat -an -p tcp（兜底 ss）。命令失败→换备选→全灭则记日志返回空。
 async function listListenPorts(): Promise<number[]> {
-  try {
-    const { stdout } = await execAsync("netstat -ano -p tcp", { maxBuffer: 10 * 1024 * 1024, timeout: 10_000 })
-    return parseListenPorts(stdout)
-  } catch (error) {
-    console.log(`[discovery] netstat 不可用，跳过端口扫描: ${error instanceof Error ? error.message : error}`)
-    return []
+  const platform = process.platform
+  const candidates: string[] =
+    platform === "win32"
+      ? ["netstat -ano -p tcp"]
+      : platform === "darwin"
+        ? ["netstat -an -p tcp", "ss -tln"]
+        : ["ss -tln", "netstat -tln"]
+  for (const cmd of candidates) {
+    try {
+      const { stdout } = await execAsync(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: 10_000 })
+      const ports = parseListenPorts(stdout)
+      if (ports.length > 0) return ports
+    } catch (error) {
+      console.log(`[discovery] ${cmd.split(" ")[0]} 不可用: ${error instanceof Error ? error.message : error}`)
+    }
   }
+  console.log("[discovery] 监听口枚举工具全部不可用，跳过端口扫描")
+  return []
 }
 
 // 探测单个 /api/info URL；命中签名返回版本号，否则 null

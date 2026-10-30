@@ -71,6 +71,8 @@ openqq            # npm 全局安装后
 
 Windows 常驻：`deploy/` 目录内有任务计划（开机自启、看门狗心跳守护）脚本与说明。
 
+> **跨平台**：bot 本体零 OS 分支（纯 TS/Bun + HTTP/WS，与 QQ 官方 SDK 同形态）。Linux/macOS 常驻用 `systemd --user` 或 `nohup bun run src/index.ts &` 即可；端口自动发现在三个系统都可用（Linux 走 `ss -tln`，macOS 走 `netstat -an -p tcp`，Windows 走 `netstat -ano -p tcp`）。
+
 ## 指令一览
 
 | 指令 | 说明 |
