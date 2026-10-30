@@ -106,6 +106,10 @@ async function main(): Promise<void> {
 
   console.log("[index] OpenCode QQ Bot 已启动")
 
+  // R 项（2026-10-30）：启动对账——恢复重启窗口内"已派发未回答"的在途回合
+  //（补投答案/重挂后台等待/重派丢失消息）。异步执行不阻塞心跳建立。
+  void bridge.recoverInflightRounds()
+
   // E4 心跳：每 60 秒写一次时间戳 = 事件循环存活证明。
   // 看门狗据此识别"进程在但僵死"的静默僵尸（2-day silent zombie 教训）。
   const heartbeatFile = join(homedir(), ".openqq", "heartbeat")

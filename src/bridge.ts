@@ -36,6 +36,14 @@ import { createDelivery } from "./core/delivery.js"
 import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approval.js"
 import { createFormBridge, renderFormPrompt } from "./core/form-bridge.js"
 import { recordMessage, resolveQuote, scopeKeyOf, extractEmbeddedQuote } from "./core/context-buffer.js"
+import {
+  recordInflight,
+  settleInflight,
+  pendingInflight,
+  classifyInflight,
+  INFLIGHT_MAX_AGE_MS,
+  REDISPATCH_MAX_AGE_MS,
+} from "./core/inflight-journal.js"
 import { extractSendFileMarkers, sendLocalFile } from "./core/send-media.js"
 import type { InteractionEvent } from "./qq/types.js"
 // O7b：解析/格式化保持经 bridge 再导出——单测与既有调用方导入路径不变
@@ -80,6 +88,8 @@ interface Bridge {
   eventStream: ReturnType<typeof createEventStream>
   // A 项（2026-10-29）：卡片按钮互动回调（index 侧挂到 QQ 网关 onInteraction）
   handleInteraction: (event: InteractionEvent) => void
+  // R 项（2026-10-30 重启丢消息事故修复）：启动对账——补投/重挂/重派在途回合
+  recoverInflightRounds: () => Promise<void>
 }
 
 export function createBridge(
@@ -171,7 +181,7 @@ export function createBridge(
   const STALL_NUDGE_INTERVAL_MS = 30 * 60 * 1000
   const STALL_NUDGE_MAX = 3
 
-  function startBackgroundWait(sessionId: string, ctx: MessageContext, baseline: number): void {
+  function startBackgroundWait(sessionId: string, ctx: MessageContext, baseline: number, trackId?: string): void {
     let cancelled = false
     let finished = false
     const startedAt = Date.now()
@@ -193,6 +203,8 @@ export function createBridge(
       if (cancelled || finished) return
       finished = true
       cleanup()
+      // R 项：后台等待到达终态（完成投递/放弃告知）即销账
+      if (trackId) settleInflight(trackId)
       if (kind === "giveup") {
         await safeDeliver(ctx, "⚠️ 后台任务 24 小时仍未完成，停止自动跟进；结果可随时用 /history 查询")
         return
@@ -289,7 +301,7 @@ export function createBridge(
   }
 
   // O7c：投递域门面（统一投递/降级/配额/节流队列/被动回复全在 core/delivery.ts）
-  const { enqueuePush, safeDeliver, sendReply } = createDelivery(config, lastCtx)
+  const { enqueuePush, safeDeliver, sendReply, deliver } = createDelivery(config, lastCtx)
 
   // O7b：审批域门面（挂起槽/等待/裁决/跨重启恢复全在 core/permission.ts）
   const perm = createPermissionGate({
@@ -484,7 +496,8 @@ export function createBridge(
 
       // B3（2026-10-29 同步升级）：C2C typing 指示——长回合处理中给用户
       // "对方正在输入"体感（官方 input_notify，仅 C2C；失败静默不阻塞主流程）
-      if (ctx.type === "c2c") {
+      // R 项：重派回合无真实 msgId（空串），跳过 typing 防无效请求
+      if (ctx.type === "c2c" && ctx.msgId) {
         void getAccessToken(config.qq.appId, config.qq.clientSecret)
           .then((token) => sendC2CInputNotify(token, ctx.userId, ctx.msgId, 60))
           .catch(() => {})
@@ -492,6 +505,7 @@ export function createBridge(
 
       let sessionId = ""
       let turnStart = 0
+      let trackId = "" // R 项：在途台账跟踪键（try/catch 跨块可见）
       try {
         const session = await sessions.getOrCreate(ctx.userId)
         sessionId = session.sessionId
@@ -521,6 +535,10 @@ export function createBridge(
         const { text: promptBody, files } = augmentPromptWithAttachments(content, prepared)
         // 缺口 1：引用上文注入——让 AI 明确知道用户引用了哪条消息
         const promptText = ctx.quoteText ? `> 引用上文：${ctx.quoteText}\n\n${promptBody}` : promptBody
+        // R 项（2026-10-30）：在途台账落账——派发前记录，送达才销账；
+        // 进程中途死亡时启动对账据此恢复。重派回合无真实 msgId，用合成键跟踪。
+        trackId = ctx.msgId || `redispatch-${sessionId}-${turnStart}`
+        recordInflight({ msgId: trackId, userId: ctx.userId, sessionId, text: content.slice(0, 300), at: Date.now() })
         const replyText = await client.promptAndWait(sessionId, promptText, {
           files: files.length ? files : undefined,
           onPermission: (req) => perm.waitForDecision(ctx, req, sessionId),
@@ -548,17 +566,20 @@ export function createBridge(
           // 超长回合可能已超被动窗口：deliver 被动失败自动降级主动，答案不丢
           if (extracted.text) await safeDeliver(ctx, extracted.text)
         }
+        settleInflight(trackId) // R 项：回合处理到终态（答案已投递尝试），销账
       } catch (error) {
         if (sessionId && turnStart > 0 && error instanceof Error && error.message.includes("响应超时")) {
           // 前台时限到 ≠ 放弃：任务继续跑，转入后台等待（SSE + 5 分钟轮询兜底，
           // 最长 24 小时），完成时经 deliver 被动/主动回传 —— 12 小时长任务的答案也不丢。
+          // R 项：不销账——bgWait 完成投递时才销（完成前死亡由启动对账接管）。
           await safeDeliver(
             ctx,
             "⏳ 回合超过前台时限，已转后台等待：任务继续执行，完成即回传结果（最长 24 小时）。期间可用 /history 查看进展。",
           )
-          startBackgroundWait(sessionId, ctx, turnStart)
+          startBackgroundWait(sessionId, ctx, turnStart, trackId)
         } else {
           await safeDeliver(ctx, `处理失败：${toErrorMessage(error)}`)
+          settleInflight(trackId) // R 项：失败反馈已送达 = 终态，销账
         }
       } finally {
         if (sessionId) unsubscribeSession(sessionId, ctx.userId) // /watch 若仍挂着则保留订阅
@@ -576,9 +597,52 @@ export function createBridge(
     }
   }
 
+  // R 项（2026-10-30 重启丢消息事故修复）：启动对账——查在途台账里"已派发未销账"
+  // 的回合，按会话历史分类处置：已有答案→补投；仍在执行→重挂后台等待；
+  // 从未到达 opencode→30 分钟内自动重派（超期通知请用户重发）。
+  async function recoverInflightRounds(): Promise<void> {
+    const pending = pendingInflight()
+    if (pending.length === 0) return
+    console.log(`[bridge] 启动对账：${pending.length} 条在途消息待恢复`)
+    for (const entry of pending) {
+      const ageMs = Date.now() - entry.at
+      if (ageMs > INFLIGHT_MAX_AGE_MS) {
+        settleInflight(entry.msgId) // 超 24h：清账不追溯
+        continue
+      }
+      // 恢复投递走主动通道（原 msgId 的被动窗口早已过期）
+      const ctx: MessageContext = { type: "c2c", userId: entry.userId, msgId: "", content: entry.text }
+      try {
+        const listJson = await client.session.messages({ path: { id: entry.sessionId } })
+        const cls = classifyInflight(entry, listJson?.data ?? [])
+        if (cls.kind === "answered") {
+          await deliver(ctx, `🔄 重启补投：你之前的消息已有答案\n\n${cls.answer}`)
+          settleInflight(entry.msgId)
+          console.log(`[bridge] 启动对账：已补投答案 msgId=${entry.msgId}`)
+        } else if (cls.kind === "running") {
+          await deliver(ctx, "🔄 重启恢复：你之前的任务仍在执行，完成即回传结果")
+          startBackgroundWait(entry.sessionId, ctx, Date.now(), entry.msgId)
+          console.log(`[bridge] 启动对账：在途任务已重挂后台等待 msgId=${entry.msgId}`)
+        } else if (ageMs <= REDISPATCH_MAX_AGE_MS) {
+          settleInflight(entry.msgId) // 旧账结清，重派回合走新账（合成 trackId）
+          await deliver(ctx, `🔄 重启恢复：重新处理你之前的消息「${entry.text.slice(0, 50)}」`)
+          void handleMessage(ctx)
+          console.log(`[bridge] 启动对账：丢失消息已重派 msgId=${entry.msgId}`)
+        } else {
+          await deliver(ctx, `⚠️ 此前重启期间丢失一条你的消息「${entry.text.slice(0, 50)}」（超 30 分钟未自动重发），需要的话请重发一次`)
+          settleInflight(entry.msgId)
+          console.log(`[bridge] 启动对账：超期消息仅通知 msgId=${entry.msgId}`)
+        }
+      } catch (error) {
+        console.error(`[bridge] 启动对账单条失败 msgId=${entry.msgId}:`, error)
+      }
+    }
+  }
+
   return {
     handleMessage,
     eventStream,
+    recoverInflightRounds,
     handleInteraction: (event) => {
       if (handleApprovalInteraction(event, perm)) return
       void formBridge.handleButton(event)

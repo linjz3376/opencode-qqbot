@@ -254,12 +254,18 @@ async function handleDispatchEvent(
     case "READY": {
       const readyData = payload.d as GatewayReadyData
       state.sessionId = readyData.session_id
+      // R 项诊断增强（2026-10-30）：首连/重连分界可见——重连后的 READY 打日志，
+      // 下次"消息静默丢失"类事故可直接从日志定位断链窗口
+      if (state.reconnectAttempt > 0) {
+        console.log(`[gateway] 重连已就绪（READY，第 ${state.reconnectAttempt} 次尝试）session=${state.sessionId}`)
+      }
       state.reconnectAttempt = 0
       options.onReady?.()
       return
     }
 
     case "RESUMED": {
+      console.log("[gateway] 会话已恢复（RESUMED，断线期间事件已回补）")
       state.reconnectAttempt = 0
       return
     }
