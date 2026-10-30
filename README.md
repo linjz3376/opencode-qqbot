@@ -116,6 +116,7 @@ Windows 常驻：`deploy/` 目录内有任务计划（开机自启、看门狗�
 | `QQ_SESSION_IDLE_HOURS` | 6 | 闲置会话回收阈值 |
 | `QQ_INTERACTION_WATCH_SECONDS` | 12 | 常驻交互监听轮询间隔（0=关闭） |
 | `QQ_REDISPATCH_MAX_AGE_MS` | 7200000 | 启动对账时丢失消息的自动重派窗口（0=关闭自动重派只通知；受台账 24h 清账线封顶） |
+| `QQ_EVENT_PROBE` | 关 | 插件侧事件探针（`true` 时全量事件类型落 `~/.openqq/opencode-events.jsonl`，诊断用） |
 | `OPENCODE_TURN_TIMEOUT_MINUTES` | 30 | 前台回合时限（超时转后台等待） |
 | `QQ_DIGEST_ANSWER_MAX_CHARS` | 0（全文） | 摘要卡答案截断上限 |
 | `QQ_HISTORY_USER_CLIP` / `QQ_HISTORY_TEXT_CLIP` | 500 / 1200 | /history 用户/AI 行截断 |

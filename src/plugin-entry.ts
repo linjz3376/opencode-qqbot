@@ -10,12 +10,31 @@
 import { Plugin } from "@opencode/plugin"
 import { join } from "path"
 import { homedir } from "os"
+import { appendFileSync, existsSync, renameSync, statSync } from "fs"
 import { fileURLToPath } from "url"
 import { isInstanceAlive } from "./core/instance-lock.js"
 import { resolveRuntime, buildLaunchPlan, spawnBotDetached, resolveBotEntry, readDotEnvField } from "./core/bot-launcher.js"
 
 const ENV_FILE = join(homedir(), ".openqq", ".env")
 const CHECK_INTERVAL_MS = 5 * 60 * 1000 // 看门狗巡检间隔（插件重载会重置，兜底是每小时 reload）
+
+// —— 事件探针（2026-10-30 自 qqbot-event-probe.ts 并入，默认关）——
+// 原独立探针已完成 spike 取证使命（form/permission 事件流实证）；保留为可选诊断：
+// ~/.openqq/.env 里 QQ_EVENT_PROBE=true 开启，全量事件 {ts,type,sessionID} 落
+// ~/.openqq/opencode-events.jsonl（5MB 轮转，不记正文=零泄密面）。
+const PROBE_FILE = join(homedir(), ".openqq", "opencode-events.jsonl")
+const PROBE_ROTATE_BYTES = 5 * 1024 * 1024
+
+function probeAppend(line: string): void {
+  try {
+    if (existsSync(PROBE_FILE) && statSync(PROBE_FILE).size > PROBE_ROTATE_BYTES) {
+      renameSync(PROBE_FILE, PROBE_FILE + ".1")
+    }
+    appendFileSync(PROBE_FILE, line + "\n")
+  } catch {
+    // 探针永不阻断宿主
+  }
+}
 
 export default Plugin.define({
   id: "opencode-qqbot",
@@ -49,7 +68,32 @@ export default Plugin.define({
     }
     ensure()
     const timer = setInterval(ensure, CHECK_INTERVAL_MS)
-    // 卸载只停巡检——bot 是独立进程，继续存活（D 路径核心语义）
-    return () => clearInterval(timer)
+
+    // 事件探针（可选，默认关）：QQ_EVENT_PROBE=true 时订阅全量事件流落盘
+    let probeAbort: AbortController | null = null
+    if (readDotEnvField(ENV_FILE, "QQ_EVENT_PROBE") === "true") {
+      probeAbort = new AbortController()
+      const signal = probeAbort.signal
+      void (async () => {
+        probeAppend(JSON.stringify({ ts: new Date().toISOString(), type: "probe.started", sessionID: null }))
+        try {
+          for await (const event of _ctx.event.subscribe({ signal })) {
+            const ev = event as { type: string; data?: { sessionID?: string } }
+            probeAppend(
+              JSON.stringify({ ts: new Date().toISOString(), type: ev.type, sessionID: ev.data?.sessionID ?? null }),
+            )
+          }
+        } catch {
+          // abort 即退出（插件卸载路径）
+        }
+      })()
+      console.log("[opencode-qqbot] 事件探针已开启（QQ_EVENT_PROBE=true）")
+    }
+
+    // 卸载只停巡检与探针——bot 是独立进程，继续存活（D 路径核心语义）
+    return () => {
+      clearInterval(timer)
+      probeAbort?.abort()
+    }
   },
 })
