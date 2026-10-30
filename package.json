@@ -19,7 +19,9 @@
     "verify": "bun run typecheck && bun run test",
     "verify:full": "bun run verify && bun run test:e2e",
     "build:bundle": "bun build src/index.ts --outfile=dist/openqq-bot.js --target=node",
-    "prepublishOnly": "bun run build:bundle"
+    "build:plugin": "bun build src/plugin-entry.ts --outfile=dist/opencode-qqbot-plugin.js --target=bun --external @opencode/plugin --external effect",
+    "deploy:plugin": "bun run build:plugin && bun -e \"const{copyFileSync,mkdirSync}=await import('fs');const{join}=await import('path');const{homedir}=await import('os');const d=join(homedir(),'.config','opencode','plugins');mkdirSync(d,{recursive:true});copyFileSync('dist/opencode-qqbot-plugin.js',join(d,'opencode-qqbot.js'));console.log('已部署到',join(d,'opencode-qqbot.js'))\"",
+    "prepublishOnly": "bun run build:bundle && bun run build:plugin"
   },
   "files": [
     "bin",
