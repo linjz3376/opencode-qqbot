@@ -1,6 +1,6 @@
 {
   "name": "@linjz/opencode-qqbot",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "description": "QQ Bot for OpenCode AI - chat with AI coding assistant via QQ",
   "exports": {
