@@ -10,6 +10,7 @@ import type { MessageContext } from "../qq/types.js"
 import { getAccessToken, sendC2CMessage, sendGroupMessage, getNextMsgSeq } from "../qq/api.js"
 import { replyToQQ } from "../qq/sender.js"
 import { ReplyLimiter } from "./reply-limiter.js"
+import { recordMessage, scopeKeyOf } from "./context-buffer.js"
 
 // 用户级推送队列：节流合并（主动消息配额记账已移至 activeQuota 共享）
 interface PushQueue {
@@ -174,8 +175,9 @@ export function createDelivery(
     const rideMsgId = selectRideMsgId(lastCtx.get(ctx.userId), ctx, Date.now(), RIDE_WINDOW_MS)
     if (rideMsgId) {
       try {
-        await sendActive(ctx, text, rideMsgId)
+        const rideIds = await sendActive(ctx, text, rideMsgId)
         passiveLimiter.record(rideMsgId)
+        for (const id of rideIds) recordMessage(scopeKeyOf(ctx), id, text)
         console.log(`[bridge] 主动降级已骑被动窗口 msgId=${rideMsgId}，省一次主动配额`)
         return
       } catch {
@@ -202,7 +204,8 @@ export function createDelivery(
       }
       throw new Error("主动消息配额已用尽，本条无法送达")
     }
-    await sendActive(ctx, text)
+    const activeIds = await sendActive(ctx, text)
+    for (const id of activeIds) recordMessage(scopeKeyOf(ctx), id, text)
     q.count++
     saveQuotaMap(activeQuota) // O5：计数落盘，跨重启不归零
   }
@@ -217,32 +220,43 @@ export function createDelivery(
 
   // 主动消息（不带 msg_id）：markdown 优先，失败回退纯文本。
   // passiveMsgId（B-msgid 2026-10-29）："骑"被动窗口时传入，平台接受则按被动计。
-  async function sendActive(ctx: MessageContext, text: string, passiveMsgId?: string): Promise<void> {
+  // 返回服务端回执消息 id 列表（引用解析缓存登记用）。
+  async function sendActive(ctx: MessageContext, text: string, passiveMsgId?: string): Promise<string[]> {
     const token = await getAccessToken(config.qq.appId, config.qq.clientSecret)
     const seq = getNextMsgSeq(passiveMsgId ?? "")
     const isGroup = ctx.type === "group" && ctx.groupId
     try {
-      if (isGroup) await sendGroupMessage(token, ctx.groupId!, text, passiveMsgId, seq, true)
-      else await sendC2CMessage(token, ctx.userId, text, passiveMsgId, seq, true)
-      return
+      if (isGroup) {
+        const r = await sendGroupMessage(token, ctx.groupId!, text, passiveMsgId, seq, true)
+        return r?.id ? [r.id] : []
+      }
+      const r = await sendC2CMessage(token, ctx.userId, text, passiveMsgId, seq, true)
+      return r?.id ? [r.id] : []
     } catch (error) {
       console.error("[bridge] 主动 markdown 发送失败，回退纯文本:", error)
     }
-    if (isGroup) await sendGroupMessage(token, ctx.groupId!, text, passiveMsgId, seq, false)
-    else await sendC2CMessage(token, ctx.userId, text, passiveMsgId, seq, false)
+    if (isGroup) {
+      const r = await sendGroupMessage(token, ctx.groupId!, text, passiveMsgId, seq, false)
+      return r?.id ? [r.id] : []
+    }
+    const r = await sendC2CMessage(token, ctx.userId, text, passiveMsgId, seq, false)
+    return r?.id ? [r.id] : []
   }
 
   async function sendReply(ctx: MessageContext, text: string): Promise<void> {
     const accessToken = await getAccessToken(config.qq.appId, config.qq.clientSecret)
-    // J-轻：伪流式错峰（多片时隔 300ms 逐段到达）；replyToQQ 返回实际片数
-    const chunks = await replyToQQ(accessToken, ctx, text, config.maxReplyLength, {
+    // J-轻：伪流式错峰（多片时隔 300ms 逐段到达）；replyToQQ 返回片数与服务端消息 id
+    const result = await replyToQQ(accessToken, ctx, text, config.maxReplyLength, {
       staggerMs: STREAM_STAGGER_MS,
     })
     // B1：被动回复成功才记额度（失败不计，避免虚耗）；按片记账——平台限额按"条"计，
     // 多片回复此前少计 N-1（J-轻顺手修正）；bridge 直调与 deliver 共用此出口
     if (ctx.msgId) {
-      for (let i = 0; i < chunks; i++) passiveLimiter.record(ctx.msgId)
+      for (let i = 0; i < result.chunks; i++) passiveLimiter.record(ctx.msgId)
     }
+    // 缺口 1：我方出站回复登记进上下文缓存（引用解析可命中 AI 答案）
+    const scope = scopeKeyOf(ctx)
+    for (const id of result.ids) recordMessage(scope, id, text)
   }
 
   return { enqueuePush, deliver, safeDeliver, sendReply }

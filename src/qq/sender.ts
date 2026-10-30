@@ -5,7 +5,7 @@
 // QQ 机器人自定义 Markdown（msg_type=2）已对单聊/群聊全量开放，无需模板。
 // QQ markdown 能完整渲染标准语法: 表格、行内代码/代码块、加粗、标题、列表、链接、引用等。
 // 因此主路径直接透传 AI 的 markdown 原文，交给 QQ 渲染；仅在发送失败时回退纯文本。
-import { sendC2CMessage, sendGroupMessage, getNextMsgSeq } from "./api.js"
+import { sendC2CMessage, sendGroupMessage, getNextMsgSeq, type MessageResponse } from "./api.js"
 import type { MessageContext } from "./types.js"
 
 const DEFAULT_MAX_LENGTH = 3000
@@ -231,32 +231,32 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-// 发送单个分片: 先尝试 markdown，失败则回退纯文本。
+// 发送单个分片: 先尝试 markdown，失败则回退纯文本。返回服务端消息回执（含 id，
+// 供上下文缓存登记——引用解析用）。
 async function sendChunk(
   accessToken: string,
   ctx: MessageContext,
   mdText: string,
   plainText: string,
   msgSeq: number,
-): Promise<void> {
+): Promise<MessageResponse | null> {
   const isGroup = ctx.type === "group" && ctx.groupId
 
   try {
     if (isGroup) {
-      await sendGroupMessage(accessToken, ctx.groupId!, mdText, ctx.msgId, msgSeq, true)
+      return await sendGroupMessage(accessToken, ctx.groupId!, mdText, ctx.msgId, msgSeq, true)
     } else {
-      await sendC2CMessage(accessToken, ctx.userId, mdText, ctx.msgId, msgSeq, true)
+      return await sendC2CMessage(accessToken, ctx.userId, mdText, ctx.msgId, msgSeq, true)
     }
-    return
   } catch (error) {
     // markdown 发送失败（如语法不被接受/内容违规）-> 回退纯文本
     console.error("[qq-sender] markdown 发送失败，回退纯文本:", error)
   }
 
   if (isGroup) {
-    await sendGroupMessage(accessToken, ctx.groupId!, plainText, ctx.msgId, msgSeq, false)
+    return await sendGroupMessage(accessToken, ctx.groupId!, plainText, ctx.msgId, msgSeq, false)
   } else {
-    await sendC2CMessage(accessToken, ctx.userId, plainText, ctx.msgId, msgSeq, false)
+    return await sendC2CMessage(accessToken, ctx.userId, plainText, ctx.msgId, msgSeq, false)
   }
 }
 
@@ -265,13 +265,19 @@ export interface ReplyToQQOptions {
   staggerMs?: number
 }
 
+export interface ReplyResult {
+  chunks: number
+  /** 服务端回执的消息 id（引用解析缓存登记用） */
+  ids: string[]
+}
+
 export async function replyToQQ(
   accessToken: string,
   ctx: MessageContext,
   text: string,
   _maxLength: number = DEFAULT_MAX_LENGTH,
   options?: ReplyToQQOptions,
-): Promise<number> {
+): Promise<ReplyResult> {
   const mdFormatted = formatForQQMarkdown(text)
   const plainFormatted = formatForQQ(text)
 
@@ -281,12 +287,14 @@ export async function replyToQQ(
   const plainChunks = splitMessage(plainFormatted, PLAIN_MAX_BYTES)
 
   const delays = staggerDelays(mdChunks.length, options?.staggerMs ?? 0)
+  const ids: string[] = []
   for (let i = 0; i < mdChunks.length; i++) {
     if (i > 0 && delays[i - 1]) await sleep(delays[i - 1])
     const msgSeq = getNextMsgSeq(ctx.msgId)
     // 纯文本分片可能与 markdown 分片数量不一致，按索引兜底取对应/最后一片
     const plainChunk = plainChunks[i] ?? plainChunks[plainChunks.length - 1] ?? mdChunks[i]
-    await sendChunk(accessToken, ctx, mdChunks[i], plainChunk, msgSeq)
+    const res = await sendChunk(accessToken, ctx, mdChunks[i], plainChunk, msgSeq)
+    if (res?.id) ids.push(res.id)
   }
-  return mdChunks.length
+  return { chunks: mdChunks.length, ids }
 }

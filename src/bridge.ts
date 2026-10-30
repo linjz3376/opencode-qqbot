@@ -35,6 +35,7 @@ import { truncate } from "./core/util.js"
 import { createDelivery } from "./core/delivery.js"
 import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approval.js"
 import { createFormBridge, renderFormPrompt } from "./core/form-bridge.js"
+import { recordMessage, resolveQuote, scopeKeyOf } from "./core/context-buffer.js"
 import type { InteractionEvent } from "./qq/types.js"
 // O7b：解析/格式化保持经 bridge 再导出——单测与既有调用方导入路径不变
 export { parsePermissionDecision, formatPermissionPrompt } from "./core/permission.js"
@@ -494,6 +495,14 @@ export function createBridge(
         const session = await sessions.getOrCreate(ctx.userId)
         sessionId = session.sessionId
         sessionLastActivity.set(sessionId, Date.now())
+
+        // 缺口 1（引用上下文，吸收自官方 quote-ref 中间件）：本条消息的引用解析
+        // 先于本条登记（顺序不可反：本条入缓存后才能被后续消息引用）
+        if (ctx.referencedMsgId) {
+          const quoted = resolveQuote(scopeKeyOf(ctx), ctx.referencedMsgId)
+          if (quoted) ctx.quoteText = quoted
+        }
+        recordMessage(scopeKeyOf(ctx), ctx.msgId, ctx.content)
         // 新回合取代旧的后台等待（steer 合并运行时只投递一次合并结果）
         bgWaits.get(sessionId)?.cancel()
         // 会话订阅通道（SSE 活性 + 同会话同用户 Set 去重不双发）；里程碑投递
@@ -507,7 +516,9 @@ export function createBridge(
         const prepared = await prepareQQAttachments(ctx.attachments, () =>
           getAccessToken(config.qq.appId, config.qq.clientSecret),
         )
-        const { text: promptText, files } = augmentPromptWithAttachments(content, prepared)
+        const { text: promptBody, files } = augmentPromptWithAttachments(content, prepared)
+        // 缺口 1：引用上文注入——让 AI 明确知道用户引用了哪条消息
+        const promptText = ctx.quoteText ? `> 引用上文：${ctx.quoteText}\n\n${promptBody}` : promptBody
         const replyText = await client.promptAndWait(sessionId, promptText, {
           files: files.length ? files : undefined,
           onPermission: (req) => perm.waitForDecision(ctx, req, sessionId),

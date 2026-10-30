@@ -49,6 +49,8 @@ interface GatewayState {
   sessionId: string | null
   seq: number | null
   heartbeatAcked: boolean
+  /** 去重（缺口 3）：resume/重连后平台可能重投同一消息，msgId LRU 防重复触发回合 */
+  seenMsgIds: Set<string>
 }
 
 interface GatewayControl {
@@ -67,7 +69,20 @@ function createInitialState(): GatewayState {
     sessionId: null,
     seq: null,
     heartbeatAcked: true,
+    seenMsgIds: new Set(),
   }
+}
+
+// 缺口 3：msgId 去重（平台 resume/重投防御）。LRU 上限 500。
+const SEEN_MSGIDS_MAX = 500
+export function markSeenAndFilter(seen: Set<string>, msgId: string): boolean {
+  if (seen.has(msgId)) return false
+  if (seen.size >= SEEN_MSGIDS_MAX) {
+    const first = seen.values().next().value
+    if (first !== undefined) seen.delete(first)
+  }
+  seen.add(msgId)
+  return true
 }
 
 function cleanupSocket(state: GatewayState): void {
@@ -162,6 +177,7 @@ function toC2CMessageContext(event: C2CMessageEvent): MessageContext {
     userId: event.author.user_openid,
     msgId: event.id,
     content: normalizeMessageContent(event.content),
+    referencedMsgId: event.message_reference?.message_id,
     attachments: event.attachments,
     timestamp: event.timestamp,
     rawEvent: event,
@@ -175,6 +191,7 @@ function toGroupMessageContext(event: GroupMessageEvent): MessageContext {
     groupId: event.group_openid,
     msgId: event.id,
     content: stripGroupAtPrefix(event.content),
+    referencedMsgId: event.message_reference?.message_id,
     attachments: event.attachments,
     timestamp: event.timestamp,
     rawEvent: event,
@@ -248,7 +265,10 @@ async function handleDispatchEvent(
     }
 
     case "C2C_MESSAGE_CREATE": {
-      const message = toC2CMessageContext(payload.d as C2CMessageEvent)
+      const event = payload.d as C2CMessageEvent
+      // 缺口 3：重投去重（resume 后同 id 再来不重复触发）
+      if (!markSeenAndFilter(state.seenMsgIds, event.id)) return
+      const message = toC2CMessageContext(event)
       if (message.attachments?.length) {
         // R2-P2-1：打码载荷（签名 URL 不入日志），host/类型/大小够 B7 校准
         console.log("[gateway] 附件载荷:", JSON.stringify(briefAttachments(message.attachments)))
@@ -261,7 +281,9 @@ async function handleDispatchEvent(
     }
 
     case "GROUP_AT_MESSAGE_CREATE": {
-      const message = toGroupMessageContext(payload.d as GroupMessageEvent)
+      const event = payload.d as GroupMessageEvent
+      if (!markSeenAndFilter(state.seenMsgIds, event.id)) return
+      const message = toGroupMessageContext(event)
       if (message.attachments?.length) {
         // R2-P2-1：打码载荷（签名 URL 不入日志）
         console.log("[gateway] 附件载荷:", JSON.stringify(briefAttachments(message.attachments)))

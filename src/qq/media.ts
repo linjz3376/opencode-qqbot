@@ -29,6 +29,8 @@ export type AttachmentOutcome =
   | { path: string; name: string }
   | { failed: string }
   | { unsupported: string }
+  /** 语音消息：QQ 内置 ASR 免费给 asr_refer_text，零下载零 STT 调用直接转文字（生态观察缺口 2） */
+  | { voice: string }
 
 export function extForImageMime(mime: string): string | null {
   const m = (mime || "").toLowerCase().split(";")[0].trim()
@@ -81,6 +83,11 @@ export async function downloadQQAttachment(
   att: MessageAttachment,
   getAuth?: () => Promise<string>,
 ): Promise<AttachmentOutcome> {
+  // 语音消息：优先用 QQ 内置 ASR 的 asr_refer_text（免费、零下载）；无转写才按附件流程走
+  const ctype = (att.content_type || "").toLowerCase()
+  if (ctype.startsWith("audio/") && att.asr_refer_text?.trim()) {
+    return { voice: att.asr_refer_text.trim() }
+  }
   const ext = extForImageMime(att.content_type || "")
   if (!ext) return { unsupported: att.content_type || att.filename || "未知类型" }
   if (!isAllowedDownloadHost(att.url)) return { failed: "下载域不在白名单" }
@@ -148,6 +155,8 @@ export function groupOutcomes(outcomes: AttachmentOutcome[]): PreparedAttachment
   for (const o of outcomes) {
     if ("path" in o) {
       files.push({ uri: `file:///${o.path.replace(/\\/g, "/")}`, name: o.name })
+    } else if ("voice" in o) {
+      notes.push(`（语音转写：${o.voice}）`)
     } else if ("failed" in o) {
       notes.push(`（图片下载失败：${o.failed}）`)
     } else {

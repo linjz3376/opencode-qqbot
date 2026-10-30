@@ -17,6 +17,8 @@ export interface MessageAttachment {
   size?: number
   url: string
   voice_wav_url?: string
+  /** 语音消息的 QQ 内置 ASR 转写文本（免费，省下载省 STT 调用） */
+  asr_refer_text?: string
 }
 
 /**
@@ -35,6 +37,8 @@ export interface C2CMessageEvent {
     source: string
   }
   attachments?: MessageAttachment[]
+  /** 长按回复引用的消息 id（QQ 客户端引用消息） */
+  message_reference?: { message_id: string }
 }
 
 /**
@@ -72,6 +76,8 @@ export interface GroupMessageEvent {
   group_id: string
   group_openid: string
   attachments?: MessageAttachment[]
+  /** 长按回复引用的消息 id（QQ 客户端引用消息） */
+  message_reference?: { message_id: string }
 }
 
 /**
@@ -129,6 +135,10 @@ export interface MessageContext {
   groupId?: string
   msgId: string
   content: string
+  /** 长按回复引用的消息 id（经 message_reference 透传） */
+  referencedMsgId?: string
+  /** 解析后的引用上文（bridge 从 context-buffer 解析得到，注入 prompt 前缀） */
+  quoteText?: string
   /** 图片等富媒体附件（原生附件接入 2026-10-14；此前在网关被静默丢弃） */
   attachments?: MessageAttachment[]
   timestamp?: string
