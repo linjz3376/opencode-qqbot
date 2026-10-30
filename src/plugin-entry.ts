@@ -10,8 +10,9 @@
 import { Plugin } from "@opencode/plugin"
 import { join } from "path"
 import { homedir } from "os"
+import { fileURLToPath } from "url"
 import { isInstanceAlive } from "./core/instance-lock.js"
-import { resolveRuntime, buildLaunchPlan, spawnBotDetached, packageRootOf, readDotEnvField } from "./core/bot-launcher.js"
+import { resolveRuntime, buildLaunchPlan, spawnBotDetached, resolveBotEntry, readDotEnvField } from "./core/bot-launcher.js"
 
 const ENV_FILE = join(homedir(), ".openqq", ".env")
 const CHECK_INTERVAL_MS = 5 * 60 * 1000 // 看门狗巡检间隔（插件重载会重置，兜底是每小时 reload）
@@ -29,13 +30,18 @@ export default Plugin.define({
           return
         }
         if (isInstanceAlive(appId)) return // 活着，不动
+        const entry = resolveBotEntry(fileURLToPath(import.meta.url))
+        if (!entry) {
+          console.warn("[opencode-qqbot] 未找到 bot 入口（bot.js / dist/openqq-bot.js / src/index.ts 全缺）——插件安装不完整")
+          return
+        }
         const runtime = resolveRuntime()
         if (!runtime) {
           console.warn("[opencode-qqbot] 未找到 bun/node 运行时，无法拉起 bot——请安装其中之一（https://bun.sh）")
           return
         }
-        const pid = spawnBotDetached(buildLaunchPlan(runtime, packageRootOf(import.meta.url)))
-        console.log(`[opencode-qqbot] bot 已拉起（pid=${pid}，runtime=${runtime}）`)
+        const pid = spawnBotDetached(buildLaunchPlan(runtime, entry))
+        console.log(`[opencode-qqbot] bot 已拉起（pid=${pid}，runtime=${runtime}，entry=${entry}）`)
       } catch (error) {
         // 引导器永不阻断宿主
         console.error("[opencode-qqbot] 拉起失败:", error instanceof Error ? error.message : error)

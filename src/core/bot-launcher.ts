@@ -9,7 +9,6 @@ import { spawn, spawnSync } from "child_process"
 import { existsSync, mkdirSync, openSync, readFileSync } from "fs"
 import { join, dirname } from "path"
 import { homedir } from "os"
-import { fileURLToPath } from "url"
 
 export type Runtime = "bun" | "node"
 
@@ -37,23 +36,32 @@ export interface LaunchPlan {
 }
 
 /**
- * 构造拉起计划（纯函数供测试）。
- * @param runtime 已解析的运行时
- * @param packageRoot 本包根目录（dist/bundle 优先 node 兼容；bun 可直跑 src/index.ts）
+ * 解析 bot 入口文件（按安装形态探测，纯函数供测试）：
+ * 1. 插件同目录 bot.js（plugins 目录自包含安装形态——官方规范的一键安装）
+ * 2. 包根 dist/openqq-bot.js（npm 包形态，prepublish 预打）
+ * 3. 包根 src/index.ts（dev 形态，需 bun 直跑 TS）
+ * 全缺 → null（调用方给指引）
  */
-export function buildLaunchPlan(runtime: Runtime, packageRoot: string): LaunchPlan {
-  const bundle = join(packageRoot, "dist", "openqq-bot.js")
-  const entry = runtime === "node" || !existsSync(join(packageRoot, "src", "index.ts"))
-    ? bundle // node 只能跑 bundle；bun 下源码缺失（npm 裁剪）也回落 bundle
-    : join(packageRoot, "src", "index.ts")
+export function resolveBotEntry(
+  pluginFilePath: string,
+  exists: (p: string) => boolean = existsSync,
+): string | null {
+  const dir = dirname(pluginFilePath)
+  const candidates = [
+    join(dir, "bot.js"),                        // 形态 1：自包含插件目录（bot.js 是同目录兄弟）
+    join(homedir(), ".openqq", "plugin-payload", "bot.js"), // 形态 1b：单文件形态的有效载荷位
+    join(dir, "..", "dist", "openqq-bot.js"),   // 形态 2：npm 包（plugin-entry 在 src/ 下）
+    join(dir, "..", "src", "index.ts"),         // 形态 3：dev 源码
+  ]
+  for (const c of candidates) if (exists(c)) return c
+  return null
+}
+
+/** 构造拉起计划（纯函数供测试）。entry 由 resolveBotEntry 解析。 */
+export function buildLaunchPlan(runtime: Runtime, entry: string): LaunchPlan {
   const env = { ...process.env, QQ_INSTANCE_LOCK: "try" } // 拉起即抢锁，抢不到自动退出
   if (runtime === "bun") return { command: "bun", args: ["run", entry], env }
   return { command: "node", args: [entry], env }
-}
-
-/** 插件入口文件的包根推导（src/plugin-entry.ts → 包根） */
-export function packageRootOf(importMetaUrl: string): string {
-  return join(dirname(fileURLToPath(importMetaUrl)), "..")
 }
 
 /** bot 输出日志（detached 后 stdout/stderr 的唯一去向） */
