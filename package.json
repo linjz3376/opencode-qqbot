@@ -1,6 +1,6 @@
 {
   "name": "@linjz/opencode-qqbot",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "QQ Bot for OpenCode AI - chat with AI coding assistant via QQ",
   "bin": {
@@ -20,7 +20,13 @@
     "src",
     "tsconfig.json"
   ],
-  "keywords": ["qq", "bot", "opencode", "ai", "coding-assistant"],
+  "keywords": [
+    "qq",
+    "bot",
+    "opencode",
+    "ai",
+    "coding-assistant"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
