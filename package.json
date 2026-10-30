@@ -24,7 +24,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/gbwssve/opencode-qq-bot"
+    "url": "https://github.com/linjz3376/opencode-qqbot"
   },
   "dependencies": {
     "@opencode-ai/sdk": "^1.2.20",
