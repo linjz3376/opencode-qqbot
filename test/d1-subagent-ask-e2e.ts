@@ -5,7 +5,9 @@ import { createClient } from "../src/opencode/client.ts"
 import { formatPermissionPrompt } from "../src/bridge.ts"
 import "./load-env.ts" // 从 ~/.openqq/.env 载入 OPENCODE_PASSWORD 等（与 bot 同源单点）
 
-const base = "http://localhost:49374/api"
+import "./load-env.ts"
+// 10-30 深度自测修复：端口从硬编码 49374 改为 .env 单点
+const base = process.env.OPENCODE_BASE_URL || "http://localhost:49374/api"
 const auth = "Basic " + Buffer.from("opencode:" + process.env.OPENCODE_PASSWORD).toString("base64")
 const H = { Authorization: auth, "Content-Type": "application/json" }
 
@@ -16,6 +18,8 @@ const client = createClient(base)
 const s = await (await fetch(`${base}/session`, { method: "POST", headers: H, body: JSON.stringify({ title: "d1-e2e" }) })).json()
 const sid: string = s.data.id
 console.log("main session:", sid)
+// 10-30 自测修复：测试会话显式用工作模型（Go 系免费默认模型会拒绝带训练条款外调用）
+await fetch(`${base}/session/${sid}/model`, { method: "POST", headers: H, body: JSON.stringify({ model: { providerID: "kimi-code-plan-cn", id: "kimi-for-coding" } }) })
 
 const fired: any[] = []
 const conflictCalls: string[] = []
@@ -23,7 +27,7 @@ const replied: string[] = []
 
 const promptP = client.promptAndWait(
   sid,
-  "请调用 task 工具启动一个子代理（agent: general），子代理只做一件事：在 shell 中执行命令 `rm D:\\OpenCode\\new-snmp\\.tmp\\d1-e2e-nonexistent.txt`（文件不存在，删除会报错没关系，关键是执行这条命令），然后返回。你本人不要直接执行这条 rm 命令，等子代理返回后简单汇报即可。",
+  "请调用 task 工具启动一个子代理（agent: general），子代理只做一件事：在 shell 中执行命令 `rm C:\\Users\\linjz\\AppData\\Local\\Temp\\opencode\\d1-e2e-nonexistent.txt`（文件不存在，删除会报错没关系，关键是执行这条命令），然后返回。你本人不要直接执行这条 rm 命令，等子代理返回后简单汇报即可。",
   {
     onPermission: async (req) => {
       fired.push(req)

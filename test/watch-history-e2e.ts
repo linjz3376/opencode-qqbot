@@ -5,7 +5,9 @@ import { createClient } from "../src/opencode/client.ts"
 import { formatMilestone } from "../src/bridge.ts"
 import "./load-env.ts" // 从 ~/.openqq/.env 载入 OPENCODE_PASSWORD 等（与 bot 同源单点）
 
-const base = "http://localhost:49374/api"
+import "./load-env.ts"
+// 10-30 深度自测修复：端口从硬编码 49374 改为 .env 单点（服务端口动态，HC1 已有自动发现）
+const base = process.env.OPENCODE_BASE_URL || "http://localhost:49374/api"
 const auth = "Basic " + Buffer.from("opencode:" + process.env.OPENCODE_PASSWORD).toString("base64")
 const H = { Authorization: auth, "Content-Type": "application/json" }
 let failures = 0
@@ -19,13 +21,16 @@ const client = createClient(base)
 const es = createEventStream(base)
 const s = await client.session.create({})
 const sid = s.data!.id!
+// 10-30 自测修复：测试会话显式用工作模型——全局默认 space-bunny-free 为 Go 系免费模型，
+// 拒绝带训练条款外的调用（AI.Error: trains on request data），e2e 因此执行失败
+await client.session.setModel({ path: { id: sid }, body: { model: { providerID: "kimi-code-plan-cn", id: "kimi-for-coding" } } })
 const seen: string[] = []
 const unsub = es.subscribe(sid, (ev) => seen.push(ev.type))
 assert(es.activeSessions === 1, "订阅后 activeSessions=1")
 
 await fetch(`${base}/session/${sid}/prompt`, {
   method: "POST", headers: H,
-  body: JSON.stringify({ text: "执行 shell 命令 echo stream-test-999，然后告诉我输出" }),
+  body: JSON.stringify({ text: "你必须调用 shell 工具真实执行命令 `echo stream-test-999`（禁止凭记忆编造输出，必须用工具实际执行），然后把工具的真实输出告诉我" }),
 })
 // 自适应等待轮次终态（2026-10-14 修：①写死 14s 慢模型下漏终态；②首版 startsWith("session.execution.")
 // 误把 .started 当终态 → 窗口 1s 自关。终态仅 succeeded/failed 两种）
@@ -77,7 +82,7 @@ assert(rendered.includes("🧑"), "含用户发言")
 assert(rendered.includes("🤖"), "含 AI 回复")
 assert(rendered.includes("🔧"), "含工具调用行")
 assert(rendered.includes("✓") || rendered.includes("✗"), "含工具状态标记")
-assert(renderHistory([], 3) === "", "空历史返回空串")
+assert(renderHistory([], 3) === null, "空历史返回 null（H1 契约）")
 assert(renderHistory(msgs.data ?? [], 0) === "" || true, "turns=0 不崩溃")
 
 await fetch(`${base}/session/${sid}`, { method: "DELETE", headers: H })

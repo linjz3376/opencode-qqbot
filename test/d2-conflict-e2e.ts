@@ -3,7 +3,9 @@
 import { createClient } from "../src/opencode/client.ts"
 import "./load-env.ts" // 从 ~/.openqq/.env 载入 OPENCODE_PASSWORD 等（与 bot 同源单点）
 
-const base = "http://localhost:49374/api"
+import "./load-env.ts"
+// 10-30 深度自测修复：端口从硬编码 49374 改为 .env 单点
+const base = process.env.OPENCODE_BASE_URL || "http://localhost:49374/api"
 const auth = "Basic " + Buffer.from("opencode:" + process.env.OPENCODE_PASSWORD).toString("base64")
 const H = { Authorization: auth, "Content-Type": "application/json" }
 
@@ -14,13 +16,15 @@ const client = createClient(base)
 const s = await (await fetch(`${base}/session`, { method: "POST", headers: H, body: JSON.stringify({ title: "d2-e2e" }) })).json()
 const sid: string = s.data.id
 console.log("main session:", sid)
+// 10-30 自测修复：测试会话显式用工作模型（Go 系免费默认模型会拒绝带训练条款外调用）
+await fetch(`${base}/session/${sid}/model`, { method: "POST", headers: H, body: JSON.stringify({ model: { providerID: "kimi-code-plan-cn", id: "kimi-for-coding" } }) })
 
 const replied: string[] = []
 const conflicts: number[] = []
 
 const promptP = client.promptAndWait(
   sid,
-  "执行 shell 命令：`rm D:\\OpenCode\\new-snmp\\.tmp\\d2-e2e-nonexistent.txt`（文件不存在，直接执行即可，不要问我）。执行完简单汇报。",
+  "你必须调用 shell 工具真实执行命令 `rm C:\\Users\\linjz\\AppData\\Local\\Temp\\opencode\\d2-e2e-nonexistent.txt`（禁止凭记忆编造输出，必须用工具实际执行；文件不存在报错没关系），执行完把真实结果告诉我。",
   {
     onPermission: async (req) => {
       console.log("[E2E] ask 出现:", req.id, "→ 模拟桌面端先批准…")

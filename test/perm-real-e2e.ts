@@ -1,12 +1,15 @@
 // 真实 E2E：ask 规则热加载验证 + 审批链路真实触发（rm 命中 → ask → auto once）
 import { createClient } from "../src/opencode/client.ts"
 import "./load-env.ts" // 从 ~/.openqq/.env 载入 OPENCODE_PASSWORD 等（与 bot 同源单点）
-
-const client = createClient("http://localhost:49374/api")
+// 10-30 自测修复：端口从硬编码 49374 改为 .env 单点
+const base = process.env.OPENCODE_BASE_URL || "http://localhost:49374/api"
+const client = createClient(base)
 const log = (...a: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...a)
 
 const s = await client.session.create({})
 const sid = s.data!.id!
+// 10-30 自测修复：测试会话显式用工作模型（Go 系免费默认模型会拒绝带训练条款外调用）
+await client.session.setModel({ path: { id: sid }, body: { model: { providerID: "kimi-code-plan-cn", id: "kimi-for-coding" } } })
 log("session:", sid)
 
 let seen: any = null
