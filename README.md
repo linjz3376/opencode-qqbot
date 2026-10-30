@@ -2,7 +2,7 @@
 
 通过 QQ 机器人与 [OpenCode](https://opencode.ai) AI 编程助手对话——双向监控桌面会话、远程发起任务、权限审批与选择弹窗直达 QQ、图片语音双向、长任务不丢答案。
 
-[![npm version](https://img.shields.io/npm/v/opencode-qqbot)](https://www.npmjs.com/package/opencode-qqbot)
+[![npm version](https://img.shields.io/npm/v/@linjz/opencode-qqbot)](https://www.npmjs.com/package/@linjz/opencode-qqbot)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![QQ Bot](https://img.shields.io/badge/QQ_Bot-API_v2-red)](https://bot.q.qq.com/wiki/)
 [![Bun](https://img.shields.io/badge/Bun->=1.0-fbf0df)](https://bun.sh)
@@ -41,7 +41,7 @@
 npm i -g github:linjz3376/opencode-qqbot
 
 # 方式二：npm registry（发布后可用）
-npm install -g opencode-qqbot
+npm install -g @linjz/opencode-qqbot
 
 # 方式三：源码
 git clone https://github.com/linjz3376/opencode-qqbot
