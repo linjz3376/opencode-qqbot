@@ -30,44 +30,28 @@
 
 ### 前置条件
 
-1. **QQ 机器人凭据**：到 [QQ 开放平台](https://q.qq.com) 创建机器人，拿到 **AppID** 与 **AppSecret**（正式环境需在管理端配置服务器公网 IP 白名单；沙箱可先调试）。
-2. **OpenCode V2 桌面端**在本机运行（bot 连接其后台服务 API）。
-3. [Bun](https://bun.sh) >= 1.0。
+1. **QQ 机器人凭据**：到 [QQ 开放平台](https://q.qq.com) 创建机器人，拿到 **AppID** 与 **AppSecret**（沙箱调试先在管理端配沙箱账号；正式环境需配服务器公网 IP 白名单）。
+2. **OpenCode V2** 在本机运行（bot 连接其后台服务 API）。
+3. **运行时**：bun 或 node 任一（推荐 bun；node ≥ 20 亦可，自动改用内置运行包）。
 
-### 安装
+### 选形态（二选一）
 
-```bash
-# 方式零：opencode 插件形态（最省事）——官方 CLI 一条命令：
-#   opencode plugin add @linjz/opencode-qqbot
-# 或手工在 opencode.json(c) 的 plugins 数组加入：
-#   "@linjz/opencode-qqbot"
-# 或本机直装（全量包安装，用户拍板形态 2026-11-02）：
-#   bun run deploy:plugin
-# → ~/.config/opencode/plugins/opencode-qqbot/ = npm 发布包的完整解包
-#   （package.json+bin/+src/+dist/+README+LICENSE+tsconfig，另含根 index.js shim）
-# 整个安装物就是一个插件目录；独立服务由插件从包内 dist/openqq-bot.js 拉起，
-# 全部文件自足，不引用任何外部路径。
-# 注意：2.2.1 全局插件目录扫描器只认根级 exports 目标（子路径如 ./dist/x.js 会跳过，
-#   deploy 已做 loader 友好化处理）；要求 PATH 里有 bun 或 node；
-#   bot 的开机自启依赖 serve 服务自启。
+| | 插件形态（推荐） | 独立部署形态 |
+|---|---|---|
+| 适合 | 本机已有 opencode，想装完即用 | 服务器/自定义常驻方式 |
+| 安装 | `opencode plugin add @linjz/opencode-qqbot`（或 plugins 数组加 `"@linjz/opencode-qqbot"`） | `npm i -g @linjz/opencode-qqbot`（或 `github:linjz3376/opencode-qqbot`） |
+| 常驻 | 插件自动拉起 bot，serve 重启自动恢复 | 自管：`openqq` 前台 / systemd / 任务计划 |
+| 配置入口 | `npx @linjz/opencode-qqbot setup`（扫码）或手写 `~/.openqq/.env` | 同上（装完全局命令也可用 `openqq-setup`） |
 
-# 方式一：从 GitHub 直装（不依赖 npm registry，推荐独立部署）
-npm i -g github:linjz3376/opencode-qqbot
-
-# 方式二：npm registry
-npm install -g @linjz/opencode-qqbot
-
-# 方式三：源码
-git clone https://github.com/linjz3376/opencode-qqbot
-cd opencode-qqbot && bun install
-```
+开发者从源码直装插件形态：`bun run deploy:plugin`（全量包解到全局插件目录，与应用者拿到的发布物一致）。
 
 ### 配置（`~/.openqq/.env`，单点密钥）
 
-首次运行缺凭据会交互式引导写入；也可用手机 QQ 扫码绑定（需先 `npm i -g @tencent-connect/qqbot-connector`）：
+手机 QQ 扫码绑定（自动写凭据；connector 按需临时安装）：
 
 ```bash
-openqq-setup     # 终端弹二维码，扫码后凭据自动写入 ~/.openqq/.env
+npx @linjz/opencode-qqbot setup
+# 独立部署形态装过 -g 的话也可直接：openqq-setup
 ```
 
 或手工创建：
@@ -84,16 +68,12 @@ MAX_REPLY_LENGTH=3000
 
 ### 启动
 
-```bash
-openqq            # npm 全局安装后
-# 或源码：bun run src/index.ts
-```
-
-Windows 常驻：`deploy/` 目录内有任务计划（开机自启、看门狗心跳守护）脚本与说明。
+- **插件形态**：无需手动启动——装好插件 + 配好凭据后，插件巡检自动拉起 bot；opencode 服务重启也会自动恢复。
+- **独立部署形态**：`openqq` 前台运行；常驻按 OS 自选（Windows 用 `deploy/` 任务计划脚本；Linux `systemd --user`；macOS launchd 或 `nohup`）。
 
 > **单实例**：bot 启动时持文件锁（`~/.openqq/openqq-<appId>.lock`，10s 心跳、30s 僵尸判定）——双开时后到实例待命，宿主退出后自动接管，避免同 bot 多实例被 QQ 网关互踢。`QQ_INSTANCE_LOCK=false` 可关闭。
 
-> **跨平台**：bot 本体零 OS 分支（纯 TS/Bun + HTTP/WS，与 QQ 官方 SDK 同形态）。Linux/macOS 常驻用 `systemd --user` 或 `nohup bun run src/index.ts &` 即可；端口自动发现在三个系统都可用（Linux 走 `ss -tln`，macOS 走 `netstat -an -p tcp`，Windows 走 `netstat -ano -p tcp`）。
+> **跨平台**：bot 本体零 OS 分支（纯 TS，与 QQ 官方 SDK 同形态）；运行时 bun 优先、node ≥20 自动兜底（跑内置运行包）。Linux/macOS 常驻用 `systemd --user` 或 `nohup` 即可；端口自动发现在三个系统都可用（Linux 走 `ss -tln`，macOS 走 `netstat -an -p tcp`，Windows 走 `netstat -ano -p tcp`）。
 
 ## 指令一览
 
