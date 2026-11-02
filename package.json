@@ -4,7 +4,7 @@
   "type": "module",
   "description": "QQ Bot for OpenCode AI - chat with AI coding assistant via QQ",
   "exports": {
-    ".": "./src/plugin-entry.ts"
+    ".": "./dist/opencode-qqbot-plugin.js"
   },
   "bin": {
     "openqq": "./bin/openqq.js",

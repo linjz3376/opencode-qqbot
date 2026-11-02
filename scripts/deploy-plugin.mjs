@@ -1,20 +1,47 @@
-// 一键安装到全局插件目录（自包含目录形态，官方插件规范）：
-//   ~/.config/opencode/plugins/opencode-qqbot/
-//   ├─ package.json   （name + exports "." → index.js，目录形态插件的标识）
-//   ├─ index.js       （插件引导器 bundle）
-//   └─ bot.js         （bot 本体 bundle，拉起时跑同目录文件，不依赖任何外部地址）
-// 跨平台：纯 node/bun fs API，无 shell 命令。
-import { copyFileSync, mkdirSync, writeFileSync, rmSync } from "fs"
+// 一键安装到全局插件目录（2026-11-02 改版：全量包安装，用户拍板形态）：
+//   ~/.config/opencode/plugins/opencode-qqbot/ = npm 发布包的完整解包
+//   （package.json + bin/ + src/ + dist/ + README + tsconfig）
+// 即"模拟插件形态"：整个安装物就是一个官方插件目录；插件加载走 exports "."，
+// 独立服务由插件从包内 dist/openqq-bot.js 拉起，全部文件自足，不引用任何外部路径。
+// 手段：npm pack（触发 prepublishOnly 构建 dist）+ tar 解包（与应用者收到的内容逐字节一致）。
+import { rmSync, mkdirSync, readdirSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
+import { spawnSync } from "child_process"
 
 const targetDir = join(homedir(), ".config", "opencode", "plugins", "opencode-qqbot")
+const repo = process.cwd()
+
+// 1. 打包（prepublishOnly 自动构建 dist 双产物）
+const pack = spawnSync("npm", ["pack"], { cwd: repo, encoding: "utf-8" })
+if (pack.status !== 0) {
+  console.error("npm pack 失败：", pack.stderr || pack.stdout)
+  process.exit(1)
+}
+const tgz = pack.stdout.trim().split("\n").pop()
+console.log(`打包完成：${tgz}`)
+
+// 2. 清空目标目录（含旧单文件/双 bundle 形态残留）并重建
+rmSync(targetDir, { recursive: true, force: true })
 mkdirSync(targetDir, { recursive: true })
 
-// 清掉旧版单文件形态（若存在），避免双插件并存
-const legacySingleFile = join(homedir(), ".config", "opencode", "plugins", "opencode-qqbot.js")
-rmSync(legacySingleFile, { force: true })
+// 3. 解包（-C 目标目录本身 + strip package/ 前缀；tar=系统 bsdtar，Win10+ 自带）
+const tar = spawnSync("tar", ["-xzf", join(repo, tgz), "-C", targetDir, "--strip-components=1"], {
+  encoding: "utf-8",
+})
+rmSync(join(repo, tgz), { force: true })
+if (tar.status !== 0) {
+  console.error("解包失败：", tar.stderr)
+  process.exit(1)
+}
 
+const installed = readdirSync(targetDir)
+
+// 4. loader 友好化覆盖（2026-11-02 实证定案）：2.2.1 全局插件目录扫描器对目录
+//    插件的 exports 解析有洞——只认根级目标（./index.js 命中，./dist/xxx.js 跳过）。
+//    因此安装态 package.json 用最小形态指根 index.js（npm 包内的 exports→dist 不受影响，
+//    走 plugins 数组解析的 npm 用户照常用 dist bundle）。
+import { writeFileSync } from "fs"
 writeFileSync(
   join(targetDir, "package.json"),
   JSON.stringify(
@@ -27,6 +54,11 @@ writeFileSync(
     2,
   ) + "\n",
 )
-copyFileSync("dist/opencode-qqbot-plugin.js", join(targetDir, "index.js"))
-copyFileSync("dist/openqq-bot.js", join(targetDir, "bot.js"))
-console.log(`已安装到 ${targetDir}（index.js + bot.js + package.json）`)
+// 根 shim：扫描器命中的入口，转发到包内 dist bundle
+writeFileSync(
+  join(targetDir, "index.js"),
+  '// 自动扫描 shim（2.2.1 全局目录扫描器只认根级 exports 目标，实证见复盘档）\nexport { default } from "./dist/opencode-qqbot-plugin.js"\n',
+)
+
+console.log(`已安装到 ${targetDir}`)
+console.log(`内容：${installed.concat("package.json(loader 友好形态)", "index.js(shim)").join(", ")}`)

@@ -39,12 +39,15 @@
 ```bash
 # 方式零：opencode 插件形态（最省事）——在 opencode.json(c) 的 plugins 数组加入：
 #   "@linjz/opencode-qqbot"
-# 或本机直装（自包含目录，官方插件规范）：
-#   bun run deploy:plugin   →  ~/.config/opencode/plugins/opencode-qqbot/（index.js+bot.js+package.json）
-# serve 服务自动加载；插件每 5 分钟巡检 bot 存活，不在就以独立进程拉起（bot 不受
-# serve 重载/重启影响，拉起的是插件同目录的 bot.js，不依赖任何外部路径）。
-# 凭据缺失时插件只在 opencode 日志里提示，不会乱拉。
-# 注意：此形态要求 PATH 里有 bun 或 node；bot 的开机自启依赖 serve 服务自启。
+# 或本机直装（全量包安装，用户拍板形态 2026-11-02）：
+#   bun run deploy:plugin
+# → ~/.config/opencode/plugins/opencode-qqbot/ = npm 发布包的完整解包
+#   （package.json+bin/+src/+dist/+README+LICENSE+tsconfig，另含根 index.js shim）
+# 整个安装物就是一个插件目录；独立服务由插件从包内 dist/openqq-bot.js 拉起，
+# 全部文件自足，不引用任何外部路径。
+# 注意：2.2.1 全局插件目录扫描器只认根级 exports 目标（子路径如 ./dist/x.js 会跳过，
+#   deploy 已做 loader 友好化处理）；要求 PATH 里有 bun 或 node；
+#   bot 的开机自启依赖 serve 服务自启。
 
 # 方式一：从 GitHub 直装（不依赖 npm registry，推荐独立部署）
 npm i -g github:linjz3376/opencode-qqbot

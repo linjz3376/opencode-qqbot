@@ -48,8 +48,9 @@ export function resolveBotEntry(
 ): string | null {
   const dir = dirname(pluginFilePath)
   const candidates = [
-    join(dir, "bot.js"),                        // 形态 1：自包含插件目录（bot.js 是同目录兄弟）
-    join(homedir(), ".openqq", "plugin-payload", "bot.js"), // 形态 1b：单文件形态的有效载荷位
+    join(dir, "bot.js"),                        // 旧双 bundle 形态（兼容已装实例）
+    join(dir, "dist", "openqq-bot.js"),         // 形态 1：全量包安装（插件目录=完整 npm 包）
+    join(homedir(), ".openqq", "plugin-payload", "bot.js"), // 单文件形态的有效载荷位
     join(dir, "..", "dist", "openqq-bot.js"),   // 形态 2：npm 包（plugin-entry 在 src/ 下）
     join(dir, "..", "src", "index.ts"),         // 形态 3：dev 源码
   ]
