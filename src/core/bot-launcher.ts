@@ -14,8 +14,27 @@ export type Runtime = "bun" | "node"
 
 /** 探测命令可用性（跨平台：spawnSync  ENOENT=不存在） */
 export function resolveRuntime(probe: (cmd: string) => boolean = defaultProbe): Runtime | null {
-  if (probe("bun")) return "bun"
+  if (resolveBunCommand(probe)) return "bun"
   if (probe("node")) return "node"
+  return null
+}
+
+function bunCandidates(): string[] {
+  const candidates = ["bun", "bun.exe", "bun.cmd", "bun.bat"]
+  if (process.platform === "win32") {
+    const appdata = process.env.APPDATA || join(homedir(), "AppData", "Roaming")
+    candidates.push(join(appdata, "npm", "node_modules", "bun", "bin", "bun.exe"))
+  } else {
+    candidates.push("/usr/local/bin/bun", "/opt/homebrew/bin/bun", join(homedir(), ".bun", "bin", "bun"))
+  }
+  return candidates
+}
+
+/** 解析可用 bun 命令（覆盖 npm 安装形态：PATH 上只有 bun.ps1，可执行体在包内） */
+export function resolveBunCommand(probe: (cmd: string) => boolean = defaultProbe): string | null {
+  for (const c of bunCandidates()) {
+    if (probe(c)) return c
+  }
   return null
 }
 
@@ -67,7 +86,10 @@ export function buildLaunchPlan(runtime: Runtime, entry: string, logPath?: strin
     QQ_INSTANCE_LOCK: "try",
     ...(logPath ? { QQ_LOG_FILE: logPath } : {}),
   }
-  if (runtime === "bun") return { command: "bun", args: ["run", entry], env }
+  if (runtime === "bun") {
+    const bunCmd = resolveBunCommand() ?? "bun"
+    return { command: bunCmd, args: ["run", entry], env }
+  }
   return { command: "node", args: [entry], env }
 }
 
