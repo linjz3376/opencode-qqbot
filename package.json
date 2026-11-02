@@ -30,9 +30,11 @@
     "tsconfig.json"
   ],
   "keywords": [
-    "qq",
-    "bot",
+    "opencode-plugin",
     "opencode",
+    "qq",
+    "qqbot",
+    "bot",
     "ai",
     "coding-assistant"
   ],
