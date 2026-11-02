@@ -445,7 +445,9 @@ export function createBridge(
       // 记录最近消息上下文：观察/过程推送的通道选择（被动优先）
       lastCtx.set(ctx.userId, ctx)
 
-      if (!greeted.has(ctx.userId)) {
+      // 首条消息问候：跳过命令消息——/help 与问候语同源（buildHelpText），
+      // 不跳过会双发相同内容（2026-11-02 用户实证：首次 /help 回复两次）。
+      if (!greeted.has(ctx.userId) && !isCommand(content)) {
         greeted.add(ctx.userId)
         saveGreetedSet(greeted)
         await sendReply(ctx, buildHelpText())
