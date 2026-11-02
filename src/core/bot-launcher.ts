@@ -79,10 +79,22 @@ export function resolveBotEntry(
 
 /** 构造拉起计划（纯函数供测试）。entry 由 resolveBotEntry 解析。 */
 export function buildLaunchPlan(runtime: Runtime, entry: string, logPath?: string): LaunchPlan {
+  // T 项（2026-11-02 沙箱时序深度自检）：插件拉起通道剥离我方配置命名空间——
+  // 继承的宿主（serve）环境可能残留 QQ_*/OPENCODE_*（沙箱开关尤甚），而 bot 侧
+  // .env 加载规则是"继承环境优先于文件"，不剥离会让宿主环境静默覆盖单点配置
+  // （反向时序坑：宿主设了沙箱，.env 改回正式反而不生效）。独立部署形态
+  // （用户显式跑 openqq）不受影响——那边环境覆盖是合理诉求。
+  const CONFIG_KEY = [/^QQ_/, /^OPENCODE_/, /^ALLOWED_USERS$/, /^MAX_REPLY_LENGTH$/]
+  const inherited: NodeJS.ProcessEnv = {}
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined) continue
+    if (CONFIG_KEY.some((r) => r.test(k))) continue
+    inherited[k] = v
+  }
   // QQ_INSTANCE_LOCK=try：拉起即抢锁，抢不到自动退出（多 location 并发拉起防堆积）
   // QQ_LOG_FILE：bot 进程内文件日志双写（detached 后无控制台，fd 重定向不可靠）
   const env = {
-    ...process.env,
+    ...inherited,
     QQ_INSTANCE_LOCK: "try",
     ...(logPath ? { QQ_LOG_FILE: logPath } : {}),
   }
