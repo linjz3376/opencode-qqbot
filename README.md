@@ -37,7 +37,9 @@
 ### 安装
 
 ```bash
-# 方式零：opencode 插件形态（最省事）——在 opencode.json(c) 的 plugins 数组加入：
+# 方式零：opencode 插件形态（最省事）——官方 CLI 一条命令：
+#   opencode plugin add @linjz/opencode-qqbot
+# 或手工在 opencode.json(c) 的 plugins 数组加入：
 #   "@linjz/opencode-qqbot"
 # 或本机直装（全量包安装，用户拍板形态 2026-11-02）：
 #   bun run deploy:plugin
