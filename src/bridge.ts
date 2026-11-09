@@ -9,6 +9,7 @@ import type { Config } from "./config.js"
 import type { MessageContext } from "./qq/types.js"
 import { getAccessToken, sendC2CInputNotify, sendC2CMessage, sendGroupMessage } from "./qq/api.js"
 import { prepareQQAttachments, augmentPromptWithAttachments, purgeOldQQImages } from "./qq/media.js"
+import { normalizeForCommandGate } from "./qq/gateway.js"
 import type { OpencodeClient, SessionMessage, PermissionRequest } from "./opencode/client.js"
 import { collectReplyText, SupersededError, turnStateOf } from "./opencode/client.js"
 import { createEventStream, type V2Event } from "./opencode/eventstream.js"
@@ -1148,8 +1149,12 @@ export function createBridge(
         return
       }
 
-      if (isCommand(content)) {
-        const reply = await handleCommand(ctx, commandContext)
+      // 2026-11-10 夜间 UAT 实证修复（135 实测「😀/status」落入聊天分支）：命令门判定
+      // 前先经表情规范化——faceType 实体 + emoji 字符都剥，剥后形似命令则以命令受理。
+      const gateContent = normalizeForCommandGate(content)
+      if (isCommand(gateContent)) {
+        const gateCtx = gateContent === content ? ctx : { ...ctx, content: gateContent }
+        const reply = await handleCommand(gateCtx, commandContext)
         await notifyUser(ctx, reply)
         releaseClaimed("dropped")
         return
@@ -1392,9 +1397,25 @@ export function createBridge(
           // runner 接管语义下本回合已被打断且不会有正文。给用户可见交代并按
           // superseded 销账：不转后台（任务已死，「继续执行」是谎言）、不占位符、
           // 不挂 30 分钟超时。账本结清后 finally 正常 drain 队列。
-          console.log(`[bridge] 回合被同会话新输入接管（superseded）msg=${shortId(trackId)} sid=${shortId(sessionId)}`)
-          await safeDeliver(ctx, "⚠️ 上一条任务被同会话的新输入打断，未产出结果；如需结果请重新发送")
-          settleInflight(trackId, undefined, "superseded")
+          // P0-1 补修（与 bgWait rescueThenSettle 同族）：前台被接管同样先核实
+          // 「已完成未投递」——完成于竞态窗口的答案先补投，不得谎称未产出。
+          let rescuedText = ""
+          try {
+            const probe = await client.session.messages({ path: { id: sessionId } })
+            const turn = turnStateOf(probe?.data ?? [], promptId, 0)
+            if (turn.text) rescuedText = turn.text
+          } catch {
+            /* 探测失败落到原 superseded 交代 */
+          }
+          if (rescuedText) {
+            console.log(`[bridge] 前台接管前抢救：回合已完成未投递，先补投 msg=${shortId(trackId)}`)
+            await safeDeliver(ctx, `📤 你发来新消息前，上一回合已完成，结果如下：\n\n${rescuedText}`).catch(() => {})
+            settleInflight(trackId, undefined, "answered")
+          } else {
+            console.log(`[bridge] 回合被同会话新输入接管（superseded）msg=${shortId(trackId)} sid=${shortId(sessionId)}`)
+            await safeDeliver(ctx, "⚠️ 上一条任务被同会话的新输入打断，未产出结果；如需结果请重新发送")
+            settleInflight(trackId, undefined, "superseded")
+          }
         } else if (sessionId && turnStart > 0 && error instanceof Error && error.message.includes("响应超时")) {
           // 前台时限到 ≠ 放弃：任务继续跑，转入后台等待（SSE + 5 分钟轮询兜底，
           // 最长 24 小时），完成时经 deliver 被动/主动回传 —— 12 小时长任务的答案也不丢。

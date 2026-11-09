@@ -170,12 +170,26 @@ function resetResumeState(state: GatewayState): void {
 // QQ 表情实体剥离（2026-11-06 UAT 实证 DEF-P1）：`<faceType=1,faceId="0",ext="…">`
 // 形式的内嵌表情若不去除，会让「[表情]/model …」整体落入聊天分支（命令失效），
 // 且原始实体标签进入 prompt/台账。剥离后纯表情消息为空文本，按空白消息规则吞掉。
+// 2026-11-10 夜间 UAT 实证补充：PC 端真实表情以 emoji 字符形态（非 faceType 实体）
+// 到达（135 实测「😀/status」原样进聊天分支）——命令门判定前需剥扩展象形字符，
+// 否则 P1 修复对真实链路无效。仅作用于「含斜杠命令」的消息，普通聊天表情不受影响。
+const EMOJI_GLYPH_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/gu
+
 function stripFaceEntities(content: string): string {
   return content.replace(/<faceType=\d+,[^>]*>/g, "")
 }
 
-function normalizeMessageContent(content: string): string {
-  return stripFaceEntities(content.replace(/\r\n/g, "\n")).trim()
+/** 命令门判定时使用的规范化文本：实体+emoji 字符都剥，剥后若形似命令则以命令受理 */
+export function normalizeForCommandGate(content: string): string {
+  const base = stripFaceEntities(content.replace(/\r\n/g, "\n"))
+  return base.includes("/") ? base.replace(EMOJI_GLYPH_RE, "").trim() : base.trim()
+}
+
+export function normalizeMessageContent(content: string): string {
+  const stripped = stripFaceEntities(content.replace(/\r\n/g, "\n")).trim()
+  // 纯 emoji（无文字无斜杠）视为空白消息吞掉——DEF-P1 意图的字符形态补全
+  if (stripped && !stripped.includes("/") && stripped.replace(EMOJI_GLYPH_RE, "").trim() === "") return ""
+  return stripped
 }
 
 function stripGroupAtPrefix(content: string): string {
