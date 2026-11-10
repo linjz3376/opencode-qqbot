@@ -37,6 +37,7 @@ const QUEUE_MAX = 20 // Q1：忙碌队列上限（学习 pi-qqbot queue.max 默�
 const QUEUE_RECEIPTS_ENABLED = /^(1|true|on)$/i.test(process.env.QQ_QUEUE_RECEIPTS ?? "")
 import {
   createPermissionGate,
+  createPushGate,
   parsePermissionDecision,
   formatPermissionPrompt,
   formatPermissionConflictNotice,
@@ -278,7 +279,14 @@ export function createBridge(
   // 单条 SSE 连接按 sessionID 分流，多订阅者共享（同会话同 userId Set 去重不双发）。
   // 里程碑投递 = /watch 专属（2026-10-14 拍板）；sessionSubs 只管 SSE 活性与去重。
   const eventStream = createEventStream(client.baseUrl)
-  const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
+// 弹卡延迟窗（owner 2026-11-10 拍板，QQ_PERM_DEFER_MS 可调）：桌面端 autoApprove 实测
+// 20~500ms 内秒回 once——asked 后延迟判定，窗口内被处置的 ask 不推 QQ 卡（与桌面静默放行一致）。
+const PERM_DEFER_MS = (() => {
+  const raw = Number(process.env.QQ_PERM_DEFER_MS ?? "")
+  return Number.isFinite(raw) && raw >= 0 && raw <= 10_000 ? raw : 500
+})()
+const permPushGate = createPushGate(PERM_DEFER_MS)
+const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   const sessionUnsubs = new Map<string, () => void>()  // sessionID -> SSE 退订
   const activeWatches = new Map<string, string>()      // userId -> sessionID（/watch 显式订阅）
   const lastCtx = new Map<string, MessageContext>()    // userId -> 最近消息 ctx（推送通道选择依据）
@@ -733,7 +741,11 @@ export function createBridge(
       // 联动清槽（2026-11-09）：源头（桌面端/引擎/账号规则）已解决该请求 →
       // 同步撤销 QQ 挂起槽并回执，消除「桌面板了 QQ 卡悬空/TTL 误杀」的双通道孤岛。
       const d = (ev.data ?? {}) as { sessionID?: string; requestID?: string; reply?: unknown }
-      if (d?.requestID) perm.clearIfResolved(d.sessionID, d.requestID, d.reply)
+      if (d?.requestID) {
+        // 弹卡延迟闸：asked 后 defer 窗口内被处置 → 撤定时器不推卡（与桌面静默放行一致）
+        permPushGate.cancel(d.requestID)
+        perm.clearIfResolved(d.sessionID, d.requestID, d.reply)
+      }
       return
     }
     if (ev.type !== "permission.asked") return
@@ -741,15 +753,33 @@ export function createBridge(
     if (!req?.id || !req.sessionID) return
     for (const uid of usersOfSession(req.sessionID)) {
       if (perm.hasPending(uid)) continue
-      // DEF-qqbot-20261110-4（实战实证）：来源标注按回合归属判定——该会话正有 bot
-      // 前台回合在跑（QQ 发起）时不得标「桌面端回合」（此前一律 external，回执
-      // 「已由桌面端处理」与事实不符）；真·桌面回合（busyUsers 未命中）才标 external。
-      const bound = sessions.getSession(uid)
-      const origin: PermOrigin = bound?.sessionId === req.sessionID && busyUsers.has(uid) ? "bot" : "external"
-      console.log(`[perm-event] permission.asked 即时推送 user=${uid.slice(0, 8)}… request=${req.id} origin=${origin}`)
-      perm.pushExternal(uid, ctxForUser(uid), req, req.sessionID, origin)
+      console.log(
+        `[perm-event] permission.asked 即时推送（延迟 ${PERM_DEFER_MS}ms 判定）user=${uid.slice(0, 8)}… request=${req.id}`,
+      )
+      permPushGate.schedule(uid, req.id, () => void flushPermPush(uid, req))
     }
   })
+
+  // 延迟闸到点：确认请求仍悬置才推卡。双保险=REST 查待审列表（防 SSE 漏事件）；
+  // 查询失败按悬置处理继续推（展示面 fail-open，不吞真人裁决入口）。
+  async function flushPermPush(uid: string, req: PermissionRequest): Promise<void> {
+    try {
+      const res = await client.permission.list()
+      const still = (res?.data ?? []).some((r) => r.id === req.id)
+      if (!still) {
+        console.log(`[perm-event] 延迟判定：请求已被处置，弃推 user=${uid.slice(0, 8)}… request=${req.id}`)
+        return
+      }
+    } catch {
+      /* 查询失败不阻断推卡 */
+    }
+    // DEF-qqbot-20261110-4（实战实证）：来源标注按回合归属判定——该会话正有 bot
+    // 前台回合在跑（QQ 发起）时不得标「桌面端回合」（此前一律 external，回执
+    // 「已由桌面端处理」与事实不符）；真·桌面回合（busyUsers 未命中）才标 external。
+    const bound = sessions.getSession(uid)
+    const origin: PermOrigin = bound?.sessionId === req.sessionID && busyUsers.has(uid) ? "bot" : "external"
+    perm.pushExternal(uid, ctxForUser(uid), req, req.sessionID, origin)
+  }
 
   const mirrorApi: MirrorApi = mirror.api
 

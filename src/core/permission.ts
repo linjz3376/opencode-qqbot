@@ -1,6 +1,7 @@
 // @input:  ../opencode/client, ../qq/types, fs/path/os
 // @output: createPermissionGate, parsePermissionDecision, formatPermissionPrompt, DECISION_LABELS,
-//          PERM_PROMPT_TTL_MS, PERM_NUDGE_MS, classifyApprovalReplyError, formatPermissionConflictNotice（纯函数供测试）, ApprovalReplyFailure
+//          PERM_PROMPT_TTL_MS, PERM_NUDGE_MS, createPushGate（弹卡延迟闸）,
+//          classifyApprovalReplyError, formatPermissionConflictNotice（纯函数供测试）, ApprovalReplyFailure
 // @pos:    根层/core - 审批域（O7b 2026-10-15 自 bridge.ts 拆出：挂起槽、等待/
 //          裁决、跨重启恢复、自然语言决策解析、菜单格式化、中断态落盘）
 import { existsSync, readFileSync, writeFileSync } from "fs"
@@ -36,6 +37,48 @@ export const PERM_PROMPT_TTL_MS = 30 * 60 * 1000
 
 /** design §3.6 权限保险网：挂起 10 分钟仍无裁决则告警提醒（TTL 30min 自动拒前的兜底） */
 export const PERM_NUDGE_MS = 10 * 60 * 1000
+
+/**
+ * 弹卡延迟闸（owner 2026-11-10 拍板）：SSE permission.asked 到达后不立即推 QQ 卡，
+ * 延迟 deferMs 判定——桌面端 autoApprove 实测 20~500ms 内秒回 once，窗口内被处置的
+ * ask 不再推卡（与桌面「静默放行不打扰」表现一致）；超时仍悬置才推。
+ * cancel 按 requestID 撤定时器（replied 事件到达即弃推）；schedule 同键去重。
+ */
+export interface PushGate {
+  schedule: (userId: string, requestID: string, run: () => void) => void
+  /** 按 requestID 撤掉所有待决 schedule（不关心 uid） */
+  cancel: (requestID: string) => void
+  dispose: () => void
+}
+
+export function createPushGate(deferMs: number): PushGate {
+  const timers = new Map<string, ReturnType<typeof setTimeout>>()
+
+  return {
+    schedule(userId, requestID, run) {
+      const key = `${userId}\u0000${requestID}`
+      if (timers.has(key)) return
+      const timer = setTimeout(() => {
+        timers.delete(key)
+        run()
+      }, deferMs)
+      timer.unref?.()
+      timers.set(key, timer)
+    },
+    cancel(requestID) {
+      for (const [key, timer] of timers) {
+        if (key.endsWith(`\u0000${requestID}`)) {
+          clearTimeout(timer)
+          timers.delete(key)
+        }
+      }
+    },
+    dispose() {
+      for (const timer of timers.values()) clearTimeout(timer)
+      timers.clear()
+    },
+  }
+}
 
 export const DECISION_LABELS: Record<PermissionDecision, string> = {
   once: "允许（本次）",
