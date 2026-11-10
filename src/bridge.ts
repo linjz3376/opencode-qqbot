@@ -44,7 +44,7 @@ import {
   DECISION_LABELS,
 } from "./core/permission.js"
 import { truncate } from "./core/util.js"
-import { createDelivery } from "./core/delivery.js"
+import { createDelivery, QQ_LIST_FORMAT_HINT } from "./core/delivery.js"
 import { createNotifySink } from "./core/notify-sink.js"
 import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approval.js"
 import { createFormBridge, renderFormPrompt } from "./core/form-bridge.js"
@@ -1423,7 +1423,8 @@ export function createBridge(
         // 缺口 1：引用上文注入——让 AI 明确知道用户引用了哪条消息
         // Q4 回退（用户评审三连否）：远程备注注入会渲染成独立用户消息、造成"一事两交互"，
         // 画蛇添足。不再注入任何前缀；场景上下文如需要改走 opencode 隐式 instructions 通道。
-        const promptText = ctx.quoteText ? `> 引用上文：${ctx.quoteText}\n\n${promptBody}` : promptBody
+        const promptText =
+          (ctx.quoteText ? `> 引用上文：${ctx.quoteText}\n\n${promptBody}` : promptBody) + QQ_LIST_FORMAT_HINT
         // R 项（2026-10-30）：在途台账落账——派发前记录，送达才销账；
         // 进程中途死亡时启动对账据此恢复。重派回合无真实 msgId，用合成键跟踪。
         trackId = ctx.msgId || `redispatch-${sessionId}-${turnStart}`

@@ -67,6 +67,12 @@ export const UNDELIVERED_NOTICE = "（此前有未能送达的消息）\n"
 // 「N.」却被整条消息全局续编（连行内点号数字都会渗染起始值）。所以平面化目标
 // 从 N) 升级为 N、——与原生顿号列表视觉一致，编号所见即原文。
 // 变换幂等（N、 再进来不匹配行首 N. 模式，原样通过）。
+// design §3.7 三层对策之第 3 层「提示词约束」：在 prompt 侧引导模型少用 QQ
+// 渲染不稳的 markdown 有序列表/表格（第 1 层=出站平面化 qqListNormalize，第 2 层=
+// markdown 发送失败回落纯文本，见下方 sendMarkdown 回退）。随每条用户消息注入。
+export const QQ_LIST_FORMAT_HINT =
+  "\n\n（输出格式约定：本对话经 QQ 渲染，请用「1、2、3、」顿号或「-」无序列表代替 markdown 有序列表，避免表格；代码块不受影响可正常使用。）"
+
 export function qqListNormalize(text: string): string {
   const lines = text.split("\n")
   let fence = false
