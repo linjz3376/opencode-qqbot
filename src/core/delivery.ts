@@ -247,7 +247,7 @@ export function createDelivery(
   // 余量，可用 env QQ_ACTIVE_DAILY_LIMIT 覆盖。
   const ACTIVE_DAILY_LIMIT = Number(process.env.QQ_ACTIVE_DAILY_LIMIT ?? 100)
 
-  // B-msgid（2026-10-29，吸收 dsh transport/msgid-cache）：主动降级前尝试让发送
+  // B-msgid（2026-10-29，吸收自 dsh-qqbot 的 msgid 缓存机制）：主动降级前尝试让发送
   // "骑"该用户最近的被动 msg_id——平台窗口内接受则按被动计（不耗主动配额）。
   // 窗口口径保守取 5 分钟（社区亦有 60 分钟说法；骑失败无副作用自动回落真主动，
   // 故从保守值起步，可用 QQ_PASSIVE_RIDE_WINDOW_MS 调整）。

@@ -94,7 +94,7 @@ function utf8Bytes(s: string): number {
   return encoder.encode(s).length
 }
 
-// —— 结构化分条（2026-10-29 固化：设计吸收自 dsh-qqbot transport/chunker.ts，P0）——
+// —— 结构化分条（2026-10-29 固化：设计吸收自 dsh-qqbot 分条器 chunker，P0）——
 // dsh 语义：GFM 表格聚成原子单元不跨片拆散 + 按行边界打包；
 // 我方在 dsh 之上补两件事：① 字节预算（QQ 按 UTF-8 字节限长，dsh 按字符数会
 // 踩中文 3 字节坑）② 围栏修补——在代码块中间切断时给前片补闭合 ```、后片补
