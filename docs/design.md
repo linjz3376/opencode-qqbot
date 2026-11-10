@@ -285,9 +285,12 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 `inflight.json`（在途台账）、`forms.json`、`gateway-state.json`、`supervisor.json`（重启强度账）、
 `heartbeat`、`*.lock`、`watchdog.log`、`bot.out.log`（+ 进程内双写；detached 拉起默认 `~/.openqq/openqq.log`，`QQ_LOG_FILE` 可覆盖）、`outbox.json`、`last-discovered.json`。
 
-`.env` 主要键：`QQ_APP_ID/QQ_APP_SECRET`、`OPENCODE_BASE_URL/OPENCODE_PASSWORD`、`ALLOWED_USERS`、
-`QQBOT_DEFAULT_CWD`、`QQ_WATCHDOG_INTERVAL_MS`、`QQ_ORPHAN_MS`、`QQ_ACK_RECEIPT`、
-`QQ_LOG_FILE`、`QQ_ACTIVE_DAILY_LIMIT`、`QQ_EVENT_PROBE`。
+`.env` 主要键（等号后=缺省口径；完整调优表见 README「环境变量（可选调优）」）：
+
+- 凭据/接入：`QQ_APP_ID` / `QQ_APP_SECRET`、`OPENCODE_BASE_URL`（缺省自动发现）/ `OPENCODE_PASSWORD`、`ALLOWED_USERS`、`QQ_SANDBOX=false`
+- 工作区：`QQBOT_DEFAULT_CWD`（缺省=bot 进程 cwd）
+- 可调阈值：`QQ_WATCHDOG_INTERVAL_MS=300000`、`QQ_ORPHAN_MS=90000`（合法 5s~60min）、`QQ_REDISPATCH_MAX_AGE_MS=7200000`（0=关）、`OPENCODE_TURN_TIMEOUT_MINUTES=30`、`QQ_PERM_DEFER_MS=500`（0~10s）、`QQ_ACTIVE_DAILY_LIMIT=100`、`QQ_PASSIVE_RIDE_WINDOW_MS=300000`、`QQ_STREAM_STAGGER_MS=300`
+- 开关/路径：`QQ_ACK_RECEIPT`（默认关）、`QQ_QUEUE_RECEIPTS`（默认关）、`QQ_EVENT_PROBE`（默认关）、`QQ_LOG_FILE`（默认 openqq.log）、`QQ_INSTANCE_LOCK`（默认开）
 
 ## 6. 部署与验证
 
