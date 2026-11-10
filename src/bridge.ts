@@ -13,8 +13,7 @@ import { normalizeForCommandGate } from "./qq/gateway.js"
 import type { OpencodeClient, SessionMessage, PermissionRequest } from "./opencode/client.js"
 import { SupersededError, turnStateOf } from "./opencode/client.js"
 import { createEventStream, type V2Event } from "./opencode/eventstream.js"
-import { createAcpSessionRunner, isAcpPromptBusy, isAcpPromptTimeout } from "./opencode/acp-session.js"
-import { readTransportSetting } from "./core/transport-setting.js"
+
 import { summarizeInput, redactSecrets } from "./opencode/history.js"
 import { SessionManager } from "./opencode/sessions.js"
 import {
@@ -48,7 +47,6 @@ import { createDelivery, QQ_LIST_FORMAT_HINT } from "./core/delivery.js"
 import { createNotifySink } from "./core/notify-sink.js"
 import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approval.js"
 import { createFormBridge, renderFormPrompt } from "./core/form-bridge.js"
-import { parseQuestionForm, renderQuestion, parseAnswer, toFormContent, timeoutOutcome, type QuestionItem } from "./core/question-form.js"
 import { recordMessage, resolveQuote, scopeKeyOf, extractEmbeddedQuote } from "./core/context-buffer.js"
 import {
   claimInflightDetailed,
@@ -83,9 +81,10 @@ import type { InteractionEvent } from "./qq/types.js"
 // O7b：解析/格式化保持经 bridge 再导出——单测与既有调用方导入路径不变
 export { parsePermissionDecision, formatPermissionPrompt, formatPermissionConflictNotice } from "./core/permission.js"
 
-/** 传输选择（纯函数，灰度开关）：仅显式 acp 才走 ACP，其余一律 rest。 */
-export function parseTransport(value: string | undefined): "acp" | "rest" {
-  return /^acp$/i.test((value ?? "").trim()) ? "acp" : "rest"
+/** 会话正有 active prompt（-32603，他端/桌面端并发占用）判定（纯函数，导出供测试）。 */
+export function isSessionBusyError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /active prompt|[-−]32603/.test(message)
 }
 
 // E 闲置回收纯函数（导出供测试，2026-10-29）：返回应回收的闲置会话 id——
@@ -690,200 +689,10 @@ export function createBridge(
     )
   }
 
-  // ACP 迁移（P2）：QQ 侧 turn 的传输选择。默认 rest；灰度验证后切 acp。
-  // acp 模式下：turn 走 session/prompt，审批走 session/request_permission（引擎阻塞），
-  // 常驻权限轮询停用（表单轮询保留到 P3）。
-  const TRANSPORT: "acp" | "rest" = parseTransport(process.env.QQBOT_TRANSPORT ?? readTransportSetting())
-  const acpRunner =
-    TRANSPORT === "acp"
-      ? createAcpSessionRunner({
-          cwd: process.env.QQBOT_ACP_CWD ?? process.cwd(),
-          sessions,
-          // 会话归属目录解析（对齐官方 ACP getSession 校验）：load 前从服务端详情取
-          // location.directory，缓存缺失/目录漂移时按真实目录重试，避免 -32602 后误新建
-          resolveDirectory: async (sessionId) => {
-            try {
-              const detail = await client.session.get({ path: { id: sessionId } })
-              return detail?.data?.location?.directory ?? undefined
-            } catch {
-              return undefined
-            }
-          },
-          handlers: {
-            onPermission: async (userId, view) => {
-              const pctx = ctxForUser(userId)
-              const request = {
-                id: view.id,
-                sessionID: view.sessionID,
-                action: view.action,
-                resources: view.resources,
-              }
-              const decision = await perm.waitForDecision(pctx, request, view.sessionID)
-              const text =
-                decision === "reject"
-                  ? "已拒绝，该操作不会执行；AI 将继续其余步骤"
-                  : `已${DECISION_LABELS[decision]}，AI 将继续执行…`
-              void safeDeliver(pctx, text)
-              return decision
-            },
-            onElicitation: (userId, params) => handleElicitation(userId, params),
-            // 会话没有超时限（2026-11-08 用户口径）：满 30 分钟只通知「转后台继续」，
-            // 回合继续跑、完成即回传；串行链保持占用，队列不会提前推进。
-            onPromptNotice: (userId, sessionId) => {
-              console.log(`[bridge] 回合前台等待满 30 分钟，转后台继续 sid=${shortId(sessionId)} user=${userId.slice(0, 8)}…`)
-              const ctx = lastCtx.get(userId) ?? ctxForUser(userId)
-              void safeDeliver(
-                ctx,
-                "⏳ 本轮已执行满 30 分钟，仍在继续（前台等待结束，已转后台），完成即回传；可 /stop 中止。",
-              )
-            },
-          },
-        })
-      : null
-  if (acpRunner) console.log("[bridge] transport=acp（ACP 传输启用；权限由 session/request_permission 阻塞）")
-
-  // P5 健康自检（看门狗）：60s 一次，只检查 ACP 传输存活/握手，不查权限等业务接口。
-  // 失败时尝试进程内自愈（修传输不动进程）；连续 3 次自愈失败 → 退出码 42 把处置权
-  // 交还外部监督者（systemd WATCHDOG=trigger 同款语义：内部修不好就上报换进程）。
-  if (acpRunner) {
-    let acpRestartFails = 0
-    const timer = setInterval(() => {
-      if (acpRunner.running) {
-        acpRestartFails = 0
-        return
-      }
-      console.warn("[watchdog] ACP 传输不存活，尝试重启")
-      void acpRunner.start().then(
-        () => {
-          acpRestartFails = 0
-        },
-        (error) => {
-          acpRestartFails++
-          console.error(`[watchdog] ACP 重启失败（${acpRestartFails}/3）:`, error instanceof Error ? error.message : error)
-          if (acpRestartFails >= 3) {
-            console.error("[watchdog] ACP 连续自愈失败 3 次，进程以退出码 42 移交外部监督者")
-            process.exit(42)
-          }
-        },
-      )
-    }, 60_000)
-    timer.unref?.()
-  }
-
-  // P3 表单/提问（ACP elicitation）：question 工具的一道题在 schema 里会拆成
-  // q0 + q0_custom 两个属性，必须合并回一道题；多题按顺序逐条问，全部答完后一次性 accept。
-  // 2026-11-08 修复：此前「字段>1 就 decline（回退桌面）」，而 question 永远带 custom 伴生字段，
-  // 导致 question 工具在 QQ 侧 100% 不可用（用户只看到 "The question couldn't be shown…"）。
-  interface PendingAcpElicitation {
-    questions: QuestionItem[]
-    answers: Array<{ item: QuestionItem; value: string | string[]; custom: boolean }>
-    index: number
-    resolve: (value: unknown) => void
-    timer: ReturnType<typeof setTimeout>
-  }
-  const pendingElicitations = new Map<string, PendingAcpElicitation>()
-  // 时限统一表（2026-11-08 用户拍板「统一三十分钟」）：
-  //   提问/表单 30 分钟 → 未答按「跳过」（无必填）或「中止」（有必填）
-  //   审批       30 分钟 → 自动拒绝（fail-closed，见 core/permission.ts）
-  //   prompt 回合 30 分钟 → cancel 释放会话（见 opencode/acp.ts）
-  const ELICITATION_TTL_MS = 30 * 60_000
-
-  function askCurrentQuestion(userId: string, pending: PendingAcpElicitation): void {
-    const item = pending.questions[pending.index]
-    if (!item) return
-    void safeDeliver(ctxForUser(userId), renderQuestion(item, pending.index, pending.questions.length))
-  }
-
-  async function handleElicitation(userId: string, params: Record<string, unknown>): Promise<unknown> {
-    const pctx = ctxForUser(userId)
-    if (params.mode === "url") {
-      // URL 模式需要浏览器打开授权链接，QQ 侧无法承接；且我们未声明 url 能力
-      void safeDeliver(pctx, "（该请求需要在浏览器里完成授权，请在桌面端处理）")
-      return { action: "decline" }
-    }
-    const questions = parseQuestionForm(params.requestedSchema)
-    if (!questions) {
-      void safeDeliver(pctx, "（表单没有可填字段，已取消）")
-      return { action: "cancel" }
-    }
-    // 同一用户已有挂起提问：旧的作废，避免答案串线
-    const stale = pendingElicitations.get(userId)
-    if (stale) {
-      clearTimeout(stale.timer)
-      pendingElicitations.delete(userId)
-      stale.resolve({ action: "cancel" })
-    }
-    console.log(
-      `[elicitation] 推送提问 user=${userId.slice(0, 8)}… 题数=${questions.length} 首题=${questions[0]?.title ?? ""}`,
-    )
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        pendingElicitations.delete(userId)
-        // 2026-11-08 语义修正：沉默 ≠ 用户拒绝。无必填时按「未答」继续（工具会写成
-        // Unanswered，模型自行推进），只有必填题未答才中止——与上游 question 工具
-        // 的 cancelled=「用户拒绝」语义严格区分。
-        const outcome = timeoutOutcome(pending.questions, pending.answers)
-        if (outcome.action === "accept") {
-          console.log(`[elicitation] 超时跳过 user=${userId.slice(0, 8)}… 已答 ${pending.answers.length}/${pending.questions.length}`)
-          void safeDeliver(pctx, "⏰ 30 分钟未作答，已按「未答」继续（AI 按默认推进；/history 可查看）")
-        } else {
-          console.log(`[elicitation] 超时中止 user=${userId.slice(0, 8)}… 存在未答必填题`)
-          void safeDeliver(pctx, "⏰ 30 分钟未作答，且该题为必填，已中止本次提问")
-        }
-        resolve(outcome)
-      }, ELICITATION_TTL_MS)
-      const pending: PendingAcpElicitation = { questions, answers: [], index: 0, resolve, timer }
-      pendingElicitations.set(userId, pending)
-      askCurrentQuestion(userId, pending)
-    })
-  }
-
-  /** 处理用户对提问的回复；返回 true=已消费（不再进 agent）。 */
-  function tryResolveElicitation(userId: string, content: string): boolean {
-    const pending = pendingElicitations.get(userId)
-    if (!pending) return false
-    const text = content.trim()
-    const pctx = ctxForUser(userId)
-    if (/^(取消|cancel|退出|算了|放弃)$/i.test(text)) {
-      clearTimeout(pending.timer)
-      pendingElicitations.delete(userId)
-      pending.resolve({ action: "cancel" })
-      void safeDeliver(pctx, "已取消")
-      return true
-    }
-    const item = pending.questions[pending.index]
-    if (!item) {
-      clearTimeout(pending.timer)
-      pendingElicitations.delete(userId)
-      pending.resolve({ action: "cancel" })
-      return true
-    }
-    const parsed = parseAnswer(item, text)
-    if (!parsed.ok) {
-      void safeDeliver(pctx, "没看懂，请按提示回复（或回复「取消」）")
-      return true
-    }
-    pending.answers.push({ item, value: parsed.value, custom: parsed.custom })
-    pending.index += 1
-    if (pending.index < pending.questions.length) {
-      askCurrentQuestion(userId, pending)
-      return true
-    }
-    clearTimeout(pending.timer)
-    pendingElicitations.delete(userId)
-    pending.resolve({ action: "accept", content: toFormContent(pending.answers) })
-    const summary = pending.answers
-      .map((a) => `${a.item.title}=${Array.isArray(a.value) ? a.value.join("/") : a.value}`)
-      .join("；")
-    console.log(`[elicitation] 已作答 user=${userId.slice(0, 8)}… ${summary}`)
-    void safeDeliver(pctx, pending.questions.length > 1 ? "已提交全部回答" : "已提交")
-    return true
-  }
-
   async function interactionTick(): Promise<void> {
     try {
-      // ACP 模式下权限由 session/request_permission 实时承接，轮询只留表单（P3 再移除）。
-      if (TRANSPORT !== "acp") {
+      // 权限轮询兜底（SSE permission.asked 即时推送为主，轮询为断线兜底，双防线）
+      {
         const [permRes] = await Promise.all([client.permission.list()])
         for (const req of permRes?.data ?? []) {
           for (const uid of usersOfSession(req.sessionID)) {
@@ -892,8 +701,8 @@ export function createBridge(
           }
         }
       }
-      // ACP 模式下表单由 elicitation/create 实时承接；轮询只留 REST 兼容路径。
-      if (TRANSPORT !== "acp") {
+      // 表单轮询兜底（REST 表单通道，form-bridge 承接渲染/回执）
+      {
         for (const entry of sessions.all()) {
           const forms = (await client.form.list({ sessionID: entry.sessionId }).catch(() => undefined))?.data ?? []
           for (const form of forms) {
@@ -909,7 +718,7 @@ export function createBridge(
     }
   }
 
-  if (INTERACTION_WATCH_MS > 0 && TRANSPORT !== "acp") {
+  if (INTERACTION_WATCH_MS > 0) {
     setInterval(() => void interactionTick(), INTERACTION_WATCH_MS)
     console.log(`[interaction-watch] 常驻交互监听已启动（每 ${INTERACTION_WATCH_MS / 1000}s 轮询权限+表单）`)
   }
@@ -1162,16 +971,6 @@ export function createBridge(
     ledger: ledgerApi,
     progress: progressApi,
     stopAll: stopAllForUser,
-    ...(acpRunner
-      ? {
-          acp: {
-            newSession: (userId: string) => acpRunner.newSession(userId),
-            setModel: (userId: string, providerId: string, modelId: string) => acpRunner.setModel(userId, providerId, modelId),
-            setAgent: (userId: string, agentId: string) => acpRunner.setAgent(userId, agentId),
-            cancel: (userId: string) => acpRunner.cancel(userId),
-          },
-        }
-      : {}),
   }
 
   // R2 修复批次启动项（2026-10-14）
@@ -1254,10 +1053,6 @@ export function createBridge(
       // pending 曾把全部命令当答案消费，统一回「没看懂」且会话失能数分钟）。
       // 文字"允许"与表单答案的歧义：parsePermissionDecision 先行且要求存在
       // 待审权限才会消费；表单槽只消费非命令输入，互不串线。
-      // ACP 表单（elicitation）优先消费：用户回复不得再进 agent
-      if (!isCommand(content) && tryResolveElicitation(ctx.userId, content)) {
-        return
-      }
       if (!isCommand(content) && formBridge.tryResolveText(ctx.userId, content)) {
         releaseClaimed("answered")
         return
@@ -1390,10 +1185,7 @@ export function createBridge(
       let trackId = "" // R 项：在途台账跟踪键（try/catch 跨块可见）
       let promptId = "" // 修复⑧：本回合 user 消息 id（直答归属锚点）
       try {
-        const session =
-          TRANSPORT === "acp" && acpRunner
-            ? { sessionId: await acpRunner.getOrCreate(ctx.userId) }
-            : await sessions.getOrCreate(ctx.userId)
+        const session = await sessions.getOrCreate(ctx.userId)
         sessionId = session.sessionId
         sessionLastActivity.set(sessionId, Date.now())
 
@@ -1432,13 +1224,7 @@ export function createBridge(
         markInflightStage(trackId, "dispatched", { sessionId })
         console.log(`[journal] dispatch user=${ctx.userId.slice(0, 8)}… msg=${shortId(trackId)} sid=${shortId(sessionId)}`)
         let replyText: string
-        if (TRANSPORT === "acp" && acpRunner && files.length === 0) {
-          // ACP 主路径：session/prompt 驱动；权限由 request_permission 在回合内阻塞。
-          markInflightStage(trackId, "running", { sessionId })
-          const run = await acpRunner.run(ctx.userId, promptText)
-          replyText = run.text.trim() || (run.stopReason === "cancelled" ? "（操作已取消）" : "(AI 未返回内容)")
-        } else {
-          if (TRANSPORT === "acp") console.log("[bridge] acp 附件回合回退 REST（P2.5 再接 ACP 附件）")
+        {
           replyText = await client.promptAndWait(sessionId, promptText, {
           files: files.length ? files : undefined,
           // 修复⑧：受领即落台账锚点 + 本地闭合变量（前台超时转后台等待要带上）
@@ -1540,18 +1326,14 @@ export function createBridge(
             "⏳ 回合超过前台时限，已转后台等待：任务继续执行，完成即回传结果（最长 24 小时）。期间可用 /history 查看进展。",
           )
           startBackgroundWait(sessionId, ctx, turnStart, trackId, promptId, turnStart)
-        } else if (isAcpPromptBusy(error)) {
-          // 2026-11-08：会话被占用（-32603）。不再把 Internal error 原样甩给用户，
-          // 给可操作路径；acp-session 的同会话串行链已挡掉我方自撞，这条只兜他端占用。
+        } else if (isSessionBusyError(error)) {
+          // 会话被占用（-32603，可能来自桌面端/他端并发）。不再把 Internal error 原样
+          // 甩给用户，给可操作路径；每用户串行队列已挡掉我方自撞，这条只兜他端占用。
           console.error(`[bridge] 会话被占用（active prompt）sid=${shortId(sessionId)}: ${toErrorMessage(error)}`)
           await safeDeliver(
             ctx,
             "⏳ 该会话正有回合在执行（可能是桌面端在跑，或上一轮尚未结束），本轮未重复发起。\n发 /stop 可中止当前回合后重试。",
           )
-          settleInflight(trackId, undefined, "error")
-        } else if (isAcpPromptTimeout(error)) {
-          // 仅硬上限（6 小时）会走到这里；30 分钟只是通知，不终止回合。
-          await safeDeliver(ctx, "⏱ 回合已达硬上限（6 小时），已停止并释放会话；请重新发起（长任务可拆步，或用 /stop 提前结束）。")
           settleInflight(trackId, undefined, "error")
         } else {
           // Q3：额度/鉴权错误给救援话术（报类别+原文+恢复路径），不死胡同报错

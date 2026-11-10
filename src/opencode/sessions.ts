@@ -102,7 +102,7 @@ export class SessionManager {
     return session
   }
 
-  // 2026-11-09 对齐官方 ACP 语义（opencode cli/src/acp/service.ts getSession）：
+  // 2026-11-09 对齐官方会话归属校验（引擎 session/load 语义）：
   // 会话与 location.directory 强绑定，load 必须携带会话自己的目录，否则 -32602。
   // 因此切换会话时必须显式携带目标会话的 directory（来自 /sessions 列表的 location）。
   switchSession(userId: string, sessionId: string, title?: string, directory?: string): void {
@@ -113,7 +113,7 @@ export class SessionManager {
       sessionId,
       title,
       // 显式传入的 directory（切换场景，可能跨项目）；undefined=未知，
-      // 由 acp-session 加载时经 resolveDirectory 从服务端回填，绝不沿用旧会话目录
+      // 加载时经 resolveDirectory 从服务端回填，绝不沿用旧会话目录
       directory,
     })
     this.saveSessions()
@@ -159,17 +159,17 @@ export class SessionManager {
   // 根因：此前 session.create({}) 空体创建 → location.directory 为空 → desktop 端
   // 会话不归任何项目（location 是 desktop 会话列表与配置链、服务加载的单位）。
   // 取值：① 继承当前绑定会话的 location.directory ② 无绑定/继承失败 → 部署默认
-  //（QQBOT_ACP_CWD 约定 → bot 进程 cwd），与 bridge 的 ACP runner 同一约定。
+  //（QQBOT_DEFAULT_CWD 约定 → bot 进程 cwd）。
 
   /** 新建会话应继承的项目目录（同步取值：当前绑定详情内缓存优先，缺则默认）。 */
   peekInheritDirectory(userId: string): string {
     const current = this.sessions.get(userId)
     const cached = current?.directory
     if (cached) return cached
-    return process.env.QQBOT_ACP_CWD ?? process.cwd()
+    return process.env.QQBOT_DEFAULT_CWD ?? process.cwd()
   }
 
-  /** 创建/接管后强制项目归属（REST 与 ACP 双路径共用）：
+  /** 创建/接管后强制项目归属（REST 路径共用）：
    *  服务端已带 location 则不动；为空用 move 端点补写 desired（缺省=继承链）。
    *  补写失败只记日志——不阻断会话，但桌面端可见性缺失要在日志可见。 */
   async enforceLocation(userId: string, sessionId: string, desired?: string): Promise<void> {
@@ -198,20 +198,13 @@ export class SessionManager {
     }
   }
 
-  /** 从服务端详情回填目录缓存（ACP 加载路径用：load 前解析/重试成功后落盘）。 */
+  /** 从服务端详情回填目录缓存：目录解析/重试成功后落盘。 */
   cacheDirectory(userId: string, sessionId: string, directory: string): void {
     const s = this.sessions.get(userId)
     if (s && s.sessionId === sessionId && s.directory !== directory) {
       s.directory = directory
       this.saveSessions()
     }
-  }
-
-  /** 仅登记映射（不创建远端会话）：ACP 迁移用——会话由 ACP session/new 创建。 */
-  adopt(userId: string, sessionId: string, title?: string): void {
-    const prev = this.sessions.get(userId)
-    this.sessions.set(userId, { ...prev, sessionId, ...(title !== undefined ? { title } : {}) })
-    this.saveSessions()
   }
 
   // 枚举全部映射（摘要镜像订阅、会话→用户反查用）

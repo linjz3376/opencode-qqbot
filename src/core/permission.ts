@@ -21,7 +21,7 @@ export interface PendingPermission {
   ctx: MessageContext // O2：落盘快照，跨重启直答用
   createdAt: number // O2：TTL 基准（落盘与恢复共用）
   restored?: boolean // O2：启动恢复条目（无活 waiter，走直连 reply）
-  origin?: PermOrigin // 2026-11-09：回合归属标注——bot=机器人 ACP 回合，external=桌面端发起（镜像推送）
+  origin?: PermOrigin // 2026-11-09：回合归属标注——bot=机器人回合，external=桌面端发起（镜像推送）
 }
 
 /** 审批发起来源（卡片/文字菜单标注 + 联动清槽决策用） */
@@ -213,7 +213,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         alertTimer,
         ctx,
         createdAt,
-        origin: "bot", // ACP 自有回合的权限（bridge onPermission 直答路径）
+        origin: "bot", // 机器人自己回合的权限（bridge onPermission 直答路径）
       })
       savePendingPermMap(pendingPermissions) // O2：落盘，重启不丢
       // A 项（2026-10-29）：卡片按钮优先，发送失败降级文字菜单；两者都失败

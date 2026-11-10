@@ -1,10 +1,10 @@
-// @input:  requestSchema（ACP elicitation.create 的 requestedSchema）
+// @input:  requestSchema（elicitation.create 的 requestedSchema）
 // @output: QuestionItem, parseQuestionForm, renderQuestion, parseAnswer, toFormContent,
 //          timeoutOutcome, TimeoutOutcome
 // @pos:    core层 - 表单/提问的纯逻辑：把 elicitation 的 JSON-Schema 归一成「逐题问答」，
 //          并把用户文字回复映射回表单答案。不做 IO，供 bridge 与单测共用。
 //          背景（2026-11-08）：question 工具的字段是 options + custom，
-//          ACP 落地时会拆成 q0 与 q0_custom 两个属性，必须合并成一道题。
+//          elicitation 落地时会拆成 q0 与 q0_custom 两个属性，必须合并成一道题。
 
 export interface QuestionOption {
   value: string
@@ -18,7 +18,7 @@ export interface QuestionItem {
   title: string
   description?: string
   options: QuestionOption[]
-  /** 多选（schema type=array，或 ACP multiselect） */
+  /** 多选（schema type=array，或 multiselect） */
   multiple: boolean
   /** 自定义答案属性名，如 q0_custom；无则为 undefined */
   customKey?: string
@@ -198,7 +198,7 @@ export function parseAnswer(item: QuestionItem, content: string): ParsedAnswer {
   return { ok: true, value: text, custom: false }
 }
 
-/** 组装写回 ACP 的 content：自定义答案同时写主属性与 custom 属性（服务端优先取 custom）。 */
+/** 组装写回的 content：自定义答案同时写主属性与 custom 属性（服务端优先取 custom）。 */
 export function toFormContent(answers: Array<{ item: QuestionItem; value: string | string[]; custom: boolean }>): Record<string, unknown> {
   const content: Record<string, unknown> = {}
   for (const { item, value, custom } of answers) {
