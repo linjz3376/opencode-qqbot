@@ -383,7 +383,7 @@ export function formatQueueReply(view: QueueView, opts: QueueReplyOptions = {}):
     const slice = all ? view.queued.slice(start, start + pageSize) : view.queued.slice(0, pageSize)
     for (const e of slice) {
       lines.push(
-        `  #${e.queueId ?? "-"} · 第${e.position ?? "-"}位 · ${agoLabel(e.enqueuedAt ?? e.at, view.now)} · ${previewText(e.text, PREVIEW)} · ${stageLabel(e.stage)}`,
+        `  #${e.queueId ?? "-"} · 第${e.position ?? "-"}位 · ${agoLabel(e.enqueuedAt ?? e.at, view.now)} · ${previewText(e.text, PREVIEW)} · ${stageLabel(e.stage)}${all ? ` · msg ${shortId(e.msgId)} · att ${shortId(e.attemptId)}` : ""}`,
       )
     }
     const remain = view.counts.queued - (start + slice.length)
