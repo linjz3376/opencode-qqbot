@@ -1,9 +1,13 @@
-// @input:  ~/.openqq/.env、实例锁、在途台账、core/bot-launcher（运行时解析与 detached 拉起）
-// @output: resolveInstalledBotEntry, readAppId, countInflight, waitUntilIdle, stopBotPid, startBot, restartBot
+// @input:  ~/.openqq/.env、实例锁、在途台账、core/bot-launcher（运行时解析与 detached 拉起）、
+//          core/watchdog（superviseOnce 杀/拉唯一权威）
+// @output:  resolveInstalledBotEntry, readAppId, countInflight, waitUntilIdle, startBot, restartBot
 // @pos:    core - bot 生命周期控制（跨平台；替代 safe-restart.ps1 / start-openqq.ps1）
 //
 // 2026-11-09 架构红线：重启是运维代码，必须随插件包分发且跨平台。
 // 单实例真相=锁文件 pid（不再按命令行正则枚举进程，避免 OS 命令与误杀）。
+// 2026-11-10 design §3.9.1 归一：杀/拉唯一权威 = superviseOnce。restartBot 只是它的
+// 调用方（等空闲 → 同一 grace-kill+spawn 原语 + supervisor.json 强度账 + 审计分家 +
+// 认领互斥），本文件不再实现任何独立杀逻辑（原 stopLockedBot 已删除）。
 import { existsSync, readFileSync } from "fs"
 import { dirname, join } from "path"
 import { homedir } from "os"
@@ -14,7 +18,7 @@ import {
   resolveRuntime,
   spawnBotDetached,
 } from "./bot-launcher.js"
-import { botWatchdogPaths, readBotHealth, isPidAlive } from "./watchdog.js"
+import { botWatchdogPaths, superviseOnce } from "./watchdog.js"
 
 /** 从任意入口文件定位同包内的 bot 产物：dist 同目录 → 包根 dist → dev 源码 */
 export function resolveInstalledBotEntry(fromUrl: string, exists: (p: string) => boolean = existsSync): string | null {
@@ -76,25 +80,6 @@ export async function waitUntilIdle(opts?: {
   }
 }
 
-/** 停掉锁文件里的 bot（单实例真相）；返回被停的 pid 或 null */
-export function stopLockedBot(appId: string, opts?: { waitMs?: number }): number | null {
-  const health = readBotHealth(botWatchdogPaths(appId))
-  if (health.lockPid === null || health.pidAlive === false) return null
-  const pid = health.lockPid
-  try {
-    process.kill(pid)
-  } catch {
-    return null
-  }
-  const deadline = Date.now() + (opts?.waitMs ?? 5_000)
-  while (Date.now() < deadline) {
-    if (!isPidAlive(pid)) return pid
-    // 同步等待：重启命令是短命 CLI，阻塞轮询即可
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100)
-  }
-  return pid
-}
-
 /** 按安装形态拉起 bot（detached，日志走 QQ_LOG_FILE） */
 export function startBot(fromUrl: string, log: (line: string) => void = () => {}): number {
   const entry = resolveInstalledBotEntry(fromUrl)
@@ -121,7 +106,13 @@ export interface RestartResult {
   reason: string
 }
 
-/** 安全重启：默认等空闲；-Force 跳过等待。跨平台，等价于旧 safe-restart.ps1。 */
+/**
+ * 安全重启：默认等空闲；-Force 跳过等待。跨平台，等价于旧 safe-restart.ps1。
+ * design §3.9.1 归一：杀/拉唯一权威 = superviseOnce（request=manual-restart）。
+ * 复用同一 grace-kill（TERM→宽限→KILL→确认死亡才拉）+ spawn 原语，
+ * 受 supervisor.json 强度账（15min/3 次 give-up、2min 冷却）与认领互斥约束，
+ * 审计分家（主动杀/验尸拉新）落 watchdog.log——restart 不再有独立杀逻辑。
+ */
 export async function restartBot(opts: RestartOptions): Promise<RestartResult> {
   const log = opts.log ?? (() => {})
   const appId = readAppId()
@@ -136,8 +127,22 @@ export async function restartBot(opts: RestartOptions): Promise<RestartResult> {
       return { action: "skipped", killedPid: null, spawnedPid: null, reason: "等待空闲超时" }
     }
   }
-  const killed = stopLockedBot(appId, { waitMs: 5_000 })
-  if (killed !== null) log(`[bot-control] 已停止 pid=${killed}`)
-  const spawned = startBot(opts.spawnFromUrl, log)
-  return { action: "restarted", killedPid: killed, spawnedPid: spawned, reason: opts.force ? "force" : "idle" }
+  const r = await superviseOnce({
+    paths: botWatchdogPaths(appId),
+    request: "manual-restart",
+    spawn: () => startBot(opts.spawnFromUrl, log),
+    log,
+  })
+  switch (r.action) {
+    case "restart":
+      return { action: "restarted", killedPid: r.killedPid, spawnedPid: r.spawnedPid, reason: opts.force ? "force（经监督矩阵）" : "idle（经监督矩阵）" }
+    case "cooldown":
+      return { action: "skipped", killedPid: null, spawnedPid: null, reason: `监督矩阵冷却跳过：${r.detail}` }
+    case "give-up":
+      return { action: "skipped", killedPid: null, spawnedPid: null, reason: `监督矩阵 give-up：${r.detail}` }
+    case "yield":
+      return { action: "skipped", killedPid: null, spawnedPid: null, reason: `认领互斥：${r.detail}` }
+    default:
+      return { action: "skipped", killedPid: null, spawnedPid: null, reason: `无需动作：${r.detail}` }
+  }
 }

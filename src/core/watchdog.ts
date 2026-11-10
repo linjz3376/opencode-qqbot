@@ -269,6 +269,13 @@ export interface SuperviseDeps {
   paths: BotWatchdogPaths
   spawn: () => number
   policy?: SupervisorPolicy
+  /**
+   * 触发形态：health-check=周期巡检（默认）；manual-restart=openqq restart
+   * 人工请求（design §3.9.1：restart 是 superviseOnce 的调用方而非独立实现）。
+   * manual-restart 下健康实例也会被优雅杀后拉起，并跳过「杀前复核」（人工意图
+   * 即权威，复核只防监督者误杀）；强度账/冷却/认领互斥/审计分家全部照旧。
+   */
+  request?: "health-check" | "manual-restart"
   now?: () => number
   kill?: (pid: number, signal?: "SIGTERM" | "SIGKILL") => void
   isAlive?: (pid: number) => boolean
@@ -352,7 +359,33 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
   try {
     const health = readBotHealth(deps.paths, now)
     const state = readJson<SupervisorState>(statePath, { restartLog: [] })
-    const action = decideSupervise(health, state, now, policy)
+    let action = decideSupervise(health, state, now, policy)
+
+    // 人工请求重启（design §3.9.1 入口 3）：健康实例也要优雅杀后拉起；
+    // bot 未运行/已死则只拉起。强度与冷却约束在 decideSupervise 内已经生效
+    //（needsRestart 为 false 时同样先查 give-up/cooldown，再走到这里覆盖动作）。
+    if (deps.request === "manual-restart" && action.kind === "ok") {
+      // 强度/冷却约束对人工入口同样生效（design §3.9.1「复用…强度约束」）：
+      // decideSupervise 的 ok 分支不查强度账，这里补齐同口径检查。
+      const windowStart = now - policy.windowMs
+      const recentRestarts = state.restartLog.filter((t) => t > windowStart).length
+      if (recentRestarts >= policy.maxRestarts) {
+        return {
+          action: "give-up",
+          detail: `15 分钟内已重启 ${recentRestarts} 次（监督强度上限），人工重启亦被拦截，请排查根因`,
+          killedPid: null,
+          spawnedPid: null,
+        }
+      }
+      const last = state.restartLog[state.restartLog.length - 1] ?? null
+      if (last !== null && now - last < policy.cooldownMs) {
+        return { action: "cooldown", detail: `距上次重启不足 ${Math.round(policy.cooldownMs / 1000)}s（冷却期），人工重启跳过`, killedPid: null, spawnedPid: null }
+      }
+      action =
+        health.lockPid !== null && health.pidAlive !== false
+          ? { kind: "grace-kill-spawn", killPid: health.lockPid, reason: "人工请求重启（openqq restart）" }
+          : { kind: "spawn", reason: "人工请求重启（bot 未运行，直接拉起）" }
+    }
 
     if (action.kind === "ok") return { action: "ok", detail: "健康", killedPid: null, spawnedPid: null }
     if (action.kind === "cooldown") {
@@ -389,15 +422,18 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
       // 复核前先给 bot 的心跳写入一个短暂到达窗口（300ms）：读健康度与动刀之间
       // 若有心跳落盘必须被看见；随后重读一次，转新鲜即改判 ok、放弃本轮，全程审计留痕。
       // 心跳「缺失」不豁免（语义同 decide：缺失视为未恢复，维持原判）。——
-      await sleep(300)
-      const recheck = readBotHealth(deps.paths, Date.now())
-      const recheckFresh =
-        recheck.heartbeatAgeMs !== null && recheck.heartbeatAgeMs <= HEARTBEAT_STALE_MS
-      if (recheck.pidAlive !== false && recheckFresh) {
-        const ageSec = Math.round((recheck.heartbeatAgeMs ?? 0) / 1000)
-        audit(`杀前复核改判 ok：pid=${pid} 心跳已恢复（年龄 ${ageSec}s），放弃误杀`)
-        log(`[supervisor] 杀前复核改判 ok：心跳已恢复（${ageSec}s），放弃杀 pid=${pid}`)
-        return { action: "ok", detail: `杀前复核：心跳已恢复，放弃误杀 pid=${pid}`, killedPid: null, spawnedPid: null }
+      // 例外：manual-restart（人工意图即权威，不存在"误杀"）。——
+      if (deps.request !== "manual-restart") {
+        await sleep(300)
+        const recheck = readBotHealth(deps.paths, Date.now())
+        const recheckFresh =
+          recheck.heartbeatAgeMs !== null && recheck.heartbeatAgeMs <= HEARTBEAT_STALE_MS
+        if (recheck.pidAlive !== false && recheckFresh) {
+          const ageSec = Math.round((recheck.heartbeatAgeMs ?? 0) / 1000)
+          audit(`杀前复核改判 ok：pid=${pid} 心跳已恢复（年龄 ${ageSec}s），放弃误杀`)
+          log(`[supervisor] 杀前复核改判 ok：心跳已恢复（${ageSec}s），放弃杀 pid=${pid}`)
+          return { action: "ok", detail: `杀前复核：心跳已恢复，放弃误杀 pid=${pid}`, killedPid: null, spawnedPid: null }
+        }
       }
       // 升级杀（fleet-guard）：TERM → 宽限轮询 → KILL。
       // Windows 上 Node 的 SIGTERM≈立即终止（无 handler 语义），宽限主要服务 posix；
