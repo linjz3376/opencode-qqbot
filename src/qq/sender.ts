@@ -7,10 +7,12 @@
 // 因此主路径直接透传 AI 的 markdown 原文，交给 QQ 渲染；仅在发送失败时回退纯文本。
 import { sendC2CMessage, sendGroupMessage, getNextMsgSeq, type MessageResponse } from "./api.js"
 import type { MessageContext } from "./types.js"
+import { balanceFences, matchFence, type FenceToken } from "../core/markdown.js"
 
-// Markdown 主路径: QQ 原生渲染标准 markdown（含表格/代码），故基本透传，仅做首尾清理。
+// Markdown 主路径: QQ 原生渲染标准 markdown（含表格/代码），故基本透传，仅做首尾清理
+// 与围栏配对兜底——未闭合围栏会被 QQ 吞成一张空代码卡（2026-11-10 截图实证）。
 export function formatForQQMarkdown(text: string): string {
-  return text.trim()
+  return balanceFences(text.trim())
 }
 
 // 纯文本兜底: 去除所有 markdown 标记（当 markdown 发送失败时使用）
@@ -97,17 +99,17 @@ function utf8Bytes(s: string): number {
 // —— 结构化分条（2026-10-29 固化：设计吸收自 dsh-qqbot 分条器 chunker，P0）——
 // dsh 语义：GFM 表格聚成原子单元不跨片拆散 + 按行边界打包；
 // 我方在 dsh 之上补两件事：① 字节预算（QQ 按 UTF-8 字节限长，dsh 按字符数会
-// 踩中文 3 字节坑）② 围栏修补——在代码块中间切断时给前片补闭合 ```、后片补
-// 开围栏（带语言），保证每片 markdown 独立可渲染。
+// 踩中文 3 字节坑）② 围栏修补——在代码块中间切断时给前片补闭合、后片补开围栏
+// （带语言），保证每片 markdown 独立可渲染。围栏识别与出站兜底共用 core/markdown
+// （2026-11-10：补 ~~~ 与 4+ 标记长度，避免波浪围栏被当正文切碎）。
 const GFM_TABLE_LINE = /^\s*\|.*\|\s*$/
-const CODE_FENCE_OPEN = /^\s*```(\S*)/
 
 interface LineUnit {
   /** 行原文（含结尾 \n，全文末行除外） */
   text: string
   bytes: number
-  /** 本行是围栏行时记录语言，否则 null */
-  fenceLang: string | null
+  /** 本行是围栏行时记录标记，否则 null */
+  fence: FenceToken | null
 }
 
 function toLineUnits(text: string): LineUnit[] {
@@ -117,7 +119,7 @@ function toLineUnits(text: string): LineUnit[] {
   const flushTable = (isLast: boolean): void => {
     if (tableBuf.length === 0) return
     const body = tableBuf.join("\n") + (isLast ? "" : "\n")
-    units.push({ text: body, bytes: utf8Bytes(body), fenceLang: null })
+    units.push({ text: body, bytes: utf8Bytes(body), fence: null })
     tableBuf = []
   }
 
@@ -129,9 +131,8 @@ function toLineUnits(text: string): LineUnit[] {
       return
     }
     flushTable(isLast)
-    const fence = CODE_FENCE_OPEN.exec(line)
     const body = line + (isLast ? "" : "\n")
-    units.push({ text: body, bytes: utf8Bytes(body), fenceLang: fence ? fence[1] : null })
+    units.push({ text: body, bytes: utf8Bytes(body), fence: matchFence(line) })
   })
   return units
 }
@@ -187,17 +188,26 @@ export function splitMessage(text: string, maxBytes: number = MARKDOWN_MAX_BYTES
   let cur = ""
   let curBytes = 0
   let prefix = "" // 围栏内切断时，下一片需补的开围栏（带语言）
-  let openLang: string | null = null // 原文全局围栏状态（跨片跟踪）
+  let open: FenceToken | null = null // 原文全局围栏状态（跨片跟踪）
 
   const flush = (): void => {
     const body = cur
     cur = ""
     curBytes = 0
-    const inside = openLang !== null
-    const out = prefix + body + (inside ? (body.endsWith("\n") ? "```\n" : "\n```\n") : "")
-    prefix = inside ? `\`\`\`${openLang}\n` : ""
+    const f = open
+    const inside = f !== null
+    const closer = f ? f.ch.repeat(f.len) : ""
+    const out = prefix + body + (inside ? (body.endsWith("\n") ? `${closer}\n` : `\n${closer}\n`) : "")
+    prefix = f ? `${f.ch.repeat(f.len)}${f.info}\n` : ""
     if (out.trim()) chunks.push(out)
   }
+
+  const closesOpen = (u: LineUnit): boolean =>
+    open !== null &&
+    u.fence !== null &&
+    u.fence.ch === open.ch &&
+    u.fence.len >= open.len &&
+    u.fence.info === ""
 
   for (const u of units) {
     if (u.bytes > maxBytes) {
@@ -210,13 +220,15 @@ export function splitMessage(text: string, maxBytes: number = MARKDOWN_MAX_BYTES
       continue
     }
     const prefixBytes = prefix ? utf8Bytes(prefix) : 0
-    if (cur && curBytes + prefixBytes + u.bytes > maxBytes) {
+    // 闭栏行优先并入当前片：若在它之前切断，下一片会补出「开栏紧跟闭栏」的空代码块。
+    if (cur && !closesOpen(u) && curBytes + prefixBytes + u.bytes > maxBytes) {
       flush()
     }
     cur += u.text
     curBytes += u.bytes
-    if (u.fenceLang !== null) {
-      openLang = openLang === null ? u.fenceLang : null
+    if (u.fence) {
+      if (!open) open = u.fence
+      else if (u.fence.ch === open.ch && u.fence.len >= open.len && u.fence.info === "") open = null
     }
   }
   flush()

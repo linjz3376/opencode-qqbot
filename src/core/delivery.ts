@@ -10,6 +10,7 @@ import type { Config } from "../config.js"
 import type { MessageContext } from "../qq/types.js"
 import { getAccessToken, sendC2CMessage, sendGroupMessage, getNextMsgSeq } from "../qq/api.js"
 import { replyToQQ } from "../qq/sender.js"
+import { balanceFences, matchFence } from "./markdown.js"
 import { ReplyLimiter } from "./reply-limiter.js"
 import { recordMessage, scopeKeyOf } from "./context-buffer.js"
 
@@ -75,18 +76,13 @@ export const QQ_LIST_FORMAT_HINT =
 
 export function qqListNormalize(text: string): string {
   const lines = text.split("\n")
-  let fence = false
-  let fenceMarker = ""
+  let fence: { ch: string; len: number } | null = null
   for (let i = 0; i < lines.length; i++) {
-    const fm = lines[i].trim().match(/^(```|~~~)/)
+    // 围栏识别与出站兜底同源（core/markdown）：支持 ``` 与 ~~~、4+ 标记长度。
+    const fm = matchFence(lines[i])
     if (fm) {
-      if (!fence) {
-        fence = true
-        fenceMarker = fm[1]
-      } else if (fm[1] === fenceMarker) {
-        fence = false
-        fenceMarker = ""
-      }
+      if (!fence) fence = { ch: fm.ch, len: fm.len }
+      else if (fm.ch === fence.ch && fm.len >= fence.len && fm.info === "") fence = null
       continue
     }
     if (fence) continue
@@ -411,12 +407,14 @@ export function createDelivery(
     const token = await getAccessToken(config.qq.appId, config.qq.clientSecret)
     const seq = getNextMsgSeq(passiveMsgId ?? "")
     const isGroup = ctx.type === "group" && ctx.groupId
+    // 主动 markdown 同样走围栏配对兜底（与被动回复同口径，防未闭合围栏吞成空卡片）
+    const mdText = balanceFences(text)
     try {
       if (isGroup) {
-        const r = await sendGroupMessage(token, ctx.groupId!, text, passiveMsgId, seq, true)
+        const r = await sendGroupMessage(token, ctx.groupId!, mdText, passiveMsgId, seq, true)
         return r?.id ? [r.id] : []
       }
-      const r = await sendC2CMessage(token, ctx.userId, text, passiveMsgId, seq, true)
+      const r = await sendC2CMessage(token, ctx.userId, mdText, passiveMsgId, seq, true)
       return r?.id ? [r.id] : []
     } catch (error) {
       console.error("[bridge] 主动 markdown 发送失败，回退纯文本:", error)

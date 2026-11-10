@@ -7,6 +7,7 @@
 
 import type { SessionMessage } from "./client.js"
 import { redactSecrets } from "./history.js"
+import { labelBlock } from "../core/markdown.js"
 
 const USER_CLIP = 160
 
@@ -73,8 +74,10 @@ export function buildDigest(messages: SessionMessage[]): string | null {
     lines.push(`🤖 ${clip(answer, clipLimit)}`)
     if (answer.length > clipLimit) lines.push(`（答案共 ${answer.length} 字，回 /history 看更多）`)
   } else {
-    // 全文模式：保留原文换行/排版（clip 的空白折叠只用于截断模式）
-    lines.push(`🤖 ${answer}`)
+    // 全文模式：保留原文换行/排版（clip 的空白折叠只用于截断模式）。
+    // 标签必须走 labelBlock：正文以 ```/标题/列表等块级语法开头时独占一行，
+    // 否则 "🤖 ```" 让开围栏不顶格 → QQ 渲染空代码卡 + 正文外泄（2026-11-10 截图实证）。
+    lines.push(labelBlock("🤖", answer))
   }
   return redactSecrets(lines.join("\n"))
 }

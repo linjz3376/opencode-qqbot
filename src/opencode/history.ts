@@ -8,6 +8,7 @@
 //              content 部件: {type:"text",text} | {type:"tool", tool?, state:{status,input,content,metadata}}
 //   idle:      { id, time, type:"idle", outcome }
 import type { MessagePart, SessionMessage } from "./client.js"
+import { labelBlock } from "../core/markdown.js"
 
 // H1（2026-10-30，/history 格式化重做）：默认上限放宽——/history 的目的是"回看
 // 内容"，旧 400 字/160 字无意义；保留 env 逃生门。按字符计（投递层管字节）。
@@ -78,11 +79,12 @@ export function renderHistory(messages: SessionMessage[], turns: number): string
       if (m.type === "user") {
         const text = (m as { text?: string }).text ?? ""
         // H1 安全修复：正文全量脱敏（旧版只脱工具行，用户/AI 正文可外泄密钥）
-        if (text.trim()) lines.push(`🧑 ${clipBlock(redactSecrets(text.trim()), userClip)}`)
+        // 2026-11-10：标签走 labelBlock，正文以围栏/标题/列表开头时标签独占一行。
+        if (text.trim()) lines.push(labelBlock("🧑", clipBlock(redactSecrets(text.trim()), userClip)))
       } else if (m.type === "assistant") {
         for (const p of m.content ?? []) {
           if (p.type === "text" && p.text?.trim()) {
-            lines.push(`🤖 ${clipBlock(redactSecrets(p.text.trim()), textClip)}`)
+            lines.push(labelBlock("🤖", clipBlock(redactSecrets(p.text.trim()), textClip)))
           } else if (p.type === "tool") {
             const t = toolRunOf(p)
             const st = toolStats.get(t.name) ?? { ok: 0, fail: 0 }
