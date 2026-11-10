@@ -225,8 +225,10 @@ export function selectRideMsgId(
 
 export interface Delivery {
   enqueuePush: (userId: string, line: string) => void
-  deliver: (ctx: MessageContext, text: string) => Promise<void>
-  safeDeliver: (ctx: MessageContext, text: string) => Promise<void>
+  /** 返回 true=实际出站成功；false=24h 去重拦截（DEF-qqbot-20261110-9：调用方据此刻画销账口径） */
+  deliver: (ctx: MessageContext, text: string) => Promise<boolean>
+  /** 同 deliver；彻底失败时贴条待下次消化并返回 false */
+  safeDeliver: (ctx: MessageContext, text: string) => Promise<boolean>
   sendReply: (ctx: MessageContext, text: string) => Promise<void>
 }
 
@@ -310,19 +312,20 @@ export function createDelivery(
   //（2026-10-13 实测教训：回合 >5 分钟时旧路径答案永久丢失）。
   // P 项贴条包装：deliver 入口消化贴条状态——有待贴条则前缀拼入正文；
   // 投递失败则把贴条放回（留待下次），成功才算消化。
-  async function deliver(ctx: MessageContext, text: string): Promise<void> {
+  async function deliver(ctx: MessageContext, text: string): Promise<boolean> {
     const now = Date.now()
     // 跨进程原子占位：直答/镜像/恢复即使落在不同执行体，同文长回复也只放行一次。
     const attemptKey = reserveDeliveryAttempt(ctx.userId, text, now)
     if (!attemptKey) {
       console.log(`[bridge] 同文长回复已在 24h 内投递，跳过重复出站 user=${ctx.userId}`)
-      return
+      return false
     }
     const hadNotice = undelivered.delete(ctx.userId)
     // QQ 渲染适配：有序列表改写，防 QQ 端跨段落续编（桌面所见=QQ 所见）
     const body = qqListNormalize(hadNotice ? UNDELIVERED_NOTICE + text : text)
     try {
       await deliverCore(ctx, body)
+      return true
     } catch (error) {
       // 发送失败不占去重位，后续恢复/重试仍可送达。
       releaseDeliveryAttempt(ctx.userId, text, now)
@@ -391,12 +394,13 @@ export function createDelivery(
     saveQuotaMap(activeQuota) // O5：计数落盘，跨重启不归零
   }
 
-  async function safeDeliver(c: MessageContext, text: string): Promise<void> {
+  async function safeDeliver(c: MessageContext, text: string): Promise<boolean> {
     try {
-      await deliver(c, text)
+      return await deliver(c, text)
     } catch (error) {
       undelivered.add(c.userId) // P 项：最终失败 → 贴条待下次消化
       console.error("[bridge] 消息无法送达（被动+主动均失败）:", error)
+      return false
     }
   }
 

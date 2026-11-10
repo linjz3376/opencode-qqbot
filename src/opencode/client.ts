@@ -278,6 +278,29 @@ export function turnStateOf(msgs: SessionMessage[], promptId: string, baseline: 
 
 let client: OpencodeClient | null = null
 
+/**
+ * DEF-qqbot-20261110-9 归属守卫（纯函数，导出供测试）：
+ * anchored=false 的回落命中是否属于「邻回合答案」——命中的 assistant 正文若位于
+ * 消息窗口中最后一条 user 行之前，则它属于更早的回合（本回合 user 尚未落库），
+ * 回落不得取用它（否则该回合被假完成，内容再被 24h 去重拦截后无声消失）。
+ */
+export function fallbackAnswerStolen(msgs: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>, text: string): boolean {
+  if (!text.trim()) return false
+  let lastUserIdx = -1
+  msgs.forEach((m, i) => {
+    if (m.type === "user") lastUserIdx = i
+  })
+  if (lastUserIdx < 0) return false
+  const needle = text.trim()
+  const idx = msgs.findIndex(
+    (m, i) =>
+      m.type === "assistant" &&
+      i < lastUserIdx &&
+      (m.content ?? []).some((p) => p.type === "text" && typeof p.text === "string" && p.text.trim() === needle),
+  )
+  return idx >= 0
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -523,10 +546,19 @@ export function createClient(baseUrl: string): OpencodeClient {
         // tool message. 共享会话下别回合的 idle/assistant 都不再计入本回合判定。
         const turn = turnStateOf(msgs, promptId, baseline)
         if (turn.hasIdle) {
-          // Aggregate text parts from ALL assistant messages of this turn,
-          // dropping reasoning/tool parts. In practice only the final assistant
-          // carries text; earlier ones are reasoning+tool.
-          return turn.text || "(AI 未返回内容)"
+          // DEF-qqbot-20261110-9（2026-11-10 回归实证）：anchored=false 回落命中时
+          // 必须校验答案归属——若命中正文属于「最后一条 user 行之前」的更早回合
+          //（本回合 user 尚未落库、回落把邻回合答案亮出来），不得张冠李戴，
+          // 继续等本回合落库；否则该回合会被邻回合答案"假完成"并在去重拦截后
+          // 无声消失。
+          if (!turn.anchored && turn.text && fallbackAnswerStolen(msgs, turn.text)) {
+            console.log(`[opencode] 回落答案归属邻回合，弃用继续等 prompt=${promptId}`)
+          } else {
+            // Aggregate text parts from ALL assistant messages of this turn,
+            // dropping reasoning/tool parts. In practice only the final assistant
+            // carries text; earlier ones are reasoning+tool.
+            return turn.text || "(AI 未返回内容)"
+          }
         }
         // DEF-qqbot-20261107-P2：死回合不等待——检测到同会话新输入接管立即以
         // 「被打断」终态抛出（bridge 给用户可见交代 + superseded 销账）。检测延迟

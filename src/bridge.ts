@@ -1314,6 +1314,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           })
         }
 
+        let turnDelivered = false // DEF-qqbot-20261110-9：实际出站与否决定销账口径
         if (replyText.trim()) {
           // 缺口 4：AI 主动发文件——QQ_SEND_FILE 标记行拦截发送文件，剩余文本照送
           const extracted = extractSendFileMarkers(replyText)
@@ -1330,9 +1331,14 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           // 超长回合可能已超被动窗口：deliver 被动失败自动降级主动，答案不丢
           // 直答出口统一脱敏（DEF-qqbot-20261106-2）：与 history/mirror/form 同一脱敏器，
           // 防 AI 复述的密钥/令牌经直答气泡明文外泄。
-          if (extracted.text) await safeDeliver(ctx, redactSecrets(extracted.text))
+          if (extracted.text) turnDelivered = await safeDeliver(ctx, redactSecrets(extracted.text))
         }
-        settleInflight(trackId, undefined, "answered") // R 项：回合处理到终态（答案已投递尝试），销账
+        // DEF-qqbot-20261110-9（2026-11-10 回归实证）：有正文但被 24h 去重拦截时
+        // 不得记 answered——那是「台账假已答、用户侧零内容」。改记 error 并给用户交代。
+        if (replyText.trim() && !turnDelivered) {
+          await safeDeliver(ctx, "⚠️ 本轮结果与 24h 内已发送内容重复，已被防重拦截（未重复投递）。如非预期请重发或换个说法")
+        }
+        settleInflight(trackId, undefined, replyText.trim() && !turnDelivered ? "error" : "answered")
       } catch (error) {
         if (error instanceof SupersededError) {
           // DEF-qqbot-20261107-P2：同会话新输入（桌面端/他端直注）接管了本回合——

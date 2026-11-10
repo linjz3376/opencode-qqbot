@@ -1,4 +1,4 @@
-// @input:  node:os/node:path（路径）、./outbox.ts、../config（Config 类型）
+﻿// @input:  node:os/node:path（路径）、./outbox.ts、../config（Config 类型）
 // @output: createNotifySink / resolveNotifyRecipients / defaultOutboxPath / 常量
 // @pos:    core - openqq notify 外部入队通道的消费端：bot 进程注册 'notify'
 //          outbox handler，把 outbox.json 里积压的通知用 delivery 投给 QQ 用户。
@@ -18,7 +18,7 @@ export const DEFAULT_NOTIFY_TTL_HOURS = 24
 /** 单条最大投递尝试次数：配额耗尽等永久失败不无限退避。 */
 export const DEFAULT_NOTIFY_MAX_ATTEMPTS = 8
 
-export type DeliverLike = (ctx: MessageContext, text: string) => Promise<void>
+export type DeliverLike = (ctx: MessageContext, text: string) => Promise<boolean>
 
 export interface NotifySinkOptions {
   config: Config

@@ -1,4 +1,4 @@
-// @input:  ../opencode/{client, eventstream, mirror, sessions}, ../qq/types, ../commands, fs/path/os
+﻿// @input:  ../opencode/{client, eventstream, mirror, sessions}, ../qq/types, ../commands, fs/path/os
 // @output: createMirror
 // @pos:    根层/core - 摘要镜像域（O7d 2026-10-15 自 bridge.ts 拆出：会话订阅、
 //          QQ 回合标记与延迟解锁、回合完成摘要投递、开关持久化）
@@ -55,7 +55,7 @@ export interface MirrorDeps {
   eventStream: EventStream
   client: OpencodeClient
   lastCtx: ReadonlyMap<string, MessageContext> // bridge 拥有写权，本域只读
-  safeDeliver: (ctx: MessageContext, text: string) => Promise<void>
+  safeDeliver: (ctx: MessageContext, text: string) => Promise<boolean>
   bgWaits: ReadonlyMap<string, { cancel: () => void }> // 后台等待在途则不解锁
   busyUsers: ReadonlySet<string> // 会话主人在忙则不解锁（5 秒宽限内再判定）
 }

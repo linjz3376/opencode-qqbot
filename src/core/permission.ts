@@ -1,4 +1,4 @@
-// @input:  ../opencode/client, ../qq/types, fs/path/os
+﻿// @input:  ../opencode/client, ../qq/types, fs/path/os
 // @output: createPermissionGate, parsePermissionDecision, formatPermissionPrompt, DECISION_LABELS,
 //          PERM_PROMPT_TTL_MS, PERM_NUDGE_MS, createPushGate（弹卡延迟闸）,
 //          classifyApprovalReplyError, formatPermissionConflictNotice（纯函数供测试）, ApprovalReplyFailure
@@ -173,7 +173,7 @@ function savePendingPermMap(m: ReadonlyMap<string, PendingPermission>): void {
 export interface PermissionGateDeps {
   client: OpencodeClient
   sendReply: (ctx: MessageContext, text: string) => Promise<void>
-  safeDeliver: (ctx: MessageContext, text: string) => Promise<void>
+  safeDeliver: (ctx: MessageContext, text: string) => Promise<boolean>
   /** A 项（2026-10-29）：卡片按钮审批发送通道；返回 false 时本域自动降级文字菜单 */
   sendApprovalPrompt?: (
     ctx: MessageContext,

@@ -1,4 +1,4 @@
-// @input:  ../opencode/client (FormInfo/FormField/FormOption), ../qq/types (MessageContext), ./form-journal
+﻿// @input:  ../opencode/client (FormInfo/FormField/FormOption), ../qq/types (MessageContext), ./form-journal
 // @output: renderFormPrompt, parseFormAnswer, createFormBridge, FORM_PROMPT_TTL_MS
 // @pos:    core - 表单桥接：QQ 同步、作答回传、跨重启恢复与服务端对账。
 //
@@ -209,7 +209,7 @@ export interface FormInteractionEvent {
 export interface FormBridgeDeps {
   client: OpencodeClient
   sendReply: (ctx: MessageContext, text: string) => Promise<void>
-  safeDeliver: (ctx: MessageContext, text: string) => Promise<void>
+  safeDeliver: (ctx: MessageContext, text: string) => Promise<boolean>
   sendFormCard?: (ctx: MessageContext, form: FormInfo, keyboard: InlineKeyboard) => Promise<boolean>
   /** 测试/嵌入方可显式指定台账；生产默认 ~/.openqq/forms.json 或 QQ_FORM_JOURNAL_FILE。 */
   journalPath?: string
@@ -249,9 +249,10 @@ export function createFormBridge(deps: FormBridgeDeps): FormBridge {
     return tracked
   }
 
-  function deliver(ctx: MessageContext, text: string): Promise<void> {
+  function deliver(ctx: MessageContext, text: string): Promise<boolean> {
     return track(deps.safeDeliver(ctx, text).catch((error) => {
       console.error("[form-bridge] 回执投递失败:", error instanceof Error ? error.message : error)
+      return false
     }))
   }
 
