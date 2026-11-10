@@ -435,6 +435,24 @@ export function resolveOrphanMs(envValue: string | undefined): number {
   return ORPHAN_DEFAULT_MS
 }
 
+/**
+ * /ledger 数字参数歧义消解（DEF-qqbot-20261110-8，2026-11-10 回归实证）：
+ * 纯数字参数既是合法 msgId 尾号（design §3.5 详情查询）也是合法页码（后增功能）——
+ * 旧实现数字一律当页码，尾号详情永不可达。口径：尾号唯一命中→详情；
+ * 多条命中→歧义提示；零命中→按页码。
+ */
+export type LedgerNumericResolution =
+  | { kind: "detail"; entry: ViewEntry }
+  | { kind: "ambiguous"; count: number }
+  | { kind: "page"; page: number }
+
+export function resolveLedgerNumericArg(sub: string, pool: readonly ViewEntry[]): LedgerNumericResolution {
+  const hits = pool.filter((e) => e.msgId === sub || e.msgId.endsWith(sub) || shortId(e.msgId) === sub)
+  if (hits.length === 1 && hits[0]) return { kind: "detail", entry: hits[0] }
+  if (hits.length > 1) return { kind: "ambiguous", count: hits.length }
+  return { kind: "page", page: Math.max(1, Number(sub)) }
+}
+
 /** 孤儿提醒状态（design §3.4：仅新增孤儿且距上次提醒 >gapMs 才汇总，不刷屏） */
 export interface OrphanNotifyState {
   lastNotifyAt: number

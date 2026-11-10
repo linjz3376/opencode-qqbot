@@ -67,6 +67,7 @@ import {
 import {
   deriveQueueView,
   resolveOrphanMs,
+  resolveLedgerNumericArg,
   decideOrphanNotify,
   type OrphanNotifyState,
   formatQueueReply,
@@ -863,7 +864,13 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       const view = queueViewFor(userId)
       const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0]?.toLowerCase() ?? ""
-      if (/^\d+$/.test(sub)) return formatLedgerReply(view, { page: Math.max(1, Number(sub)) })
+      if (/^\d+$/.test(sub)) {
+        // DEF-qqbot-20261110-8：数字先按尾号消解（唯一命中→详情/多条→歧义），零命中才当页码
+        const resolution = resolveLedgerNumericArg(sub, [...view.inflightEntries, ...view.settledRecent])
+        if (resolution.kind === "detail") return formatLedgerReply(view, { detail: resolution.entry })
+        if (resolution.kind === "ambiguous") return `尾号「${sub}」匹配到 ${resolution.count} 条，请给更长的尾号`
+        return formatLedgerReply(view, { page: resolution.page })
+      }
       if (sub === "orphan" || sub === "rejected" || sub === "inflight" || sub === "settled") {
         const page = Number(parts[1] ?? "1")
         return formatLedgerReply(view, {
