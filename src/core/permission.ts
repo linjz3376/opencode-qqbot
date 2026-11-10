@@ -145,7 +145,7 @@ export interface PermissionGate {
   restore: () => void
   // L 项（2026-10-30）：常驻监听器发现的外部审批（如桌面端回合发起）——注册
   // "无活 waiter"槽（restored 语义：裁决走直连 reply），推卡片/文字菜单
-  pushExternal: (userId: string, ctx: MessageContext, request: PermissionRequest, mainSessionId: string) => void
+  pushExternal: (userId: string, ctx: MessageContext, request: PermissionRequest, mainSessionId: string, origin?: PermOrigin) => void
   /** 联动清槽（2026-11-09）：SSE permission.replied={sessionID,requestID,reply} 到达时，
    *  若该 requestID 在挂起槽中（无论来源 bot/external），清槽 + QQ 回执「源头已处理」，
    *  并唤醒队列。返回 true=确有槽被清。无匹配槽返回 false（正常：QQ 已先裁决）。 */
@@ -192,6 +192,12 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
   ): Promise<PermissionDecision> {
     return new Promise<PermissionDecision>((resolve) => {
       const createdAt = Date.now()
+      // DEF-qqbot-20261110-3（P2，2026-11-10 实战实证）：覆写单一槽前必须先清旧槽
+      // 计时器——SSE pushExternal 先建的 external 槽被本 waiter 覆写后，其 TTL/告警
+      // 计时器仍按同 request.id 挂表，30min 到点会误删新 waiter 槽、把正在等的
+      // 回合自动拒绝（旧 restored 槽 resolve 为 noop，无需代答）。
+      const stale = pendingPermissions.get(ctx.userId)
+      if (stale) clearTimers(stale)
       const alertTimer = startNudgeTimer(ctx.userId, request.id, ctx)
       const timer = setTimeout(() => {
         if (pendingPermissions.get(ctx.userId)?.request.id === request.id) {
@@ -330,6 +336,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     ctx: MessageContext,
     request: PermissionRequest,
     mainSessionId: string,
+    origin: PermOrigin = "external",
   ): void {
     if (pendingPermissions.get(userId)?.request.id === request.id) return
     // 单一挂起槽：新审批取代旧槽
@@ -357,14 +364,14 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       ctx,
       createdAt: Date.now(),
       restored: true,
-      origin: "external", // 常驻监听发现的外部审批（桌面端回合发起）
+      origin, // DEF-qqbot-20261110-4：来源按回合归属传入（bot=QQ 回合 / external=桌面回合），不再一律桌面
     })
     savePendingPermMap(pendingPermissions)
-    console.log(`[perm] 外部审批已推送 user=${userId.slice(0, 8)}… request=${request.id} action=${request.action}`)
+    console.log(`[perm] 外部审批已推送 user=${userId.slice(0, 8)}… request=${request.id} action=${request.action} origin=${origin}`)
     // 推送失败不撤槽（用户仍可能文字裁决）
     void (async () => {
       const sentByCard = deps.sendApprovalPrompt
-        ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, "external").catch(() => false)
+        ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, origin).catch(() => false)
         : false
       if (!sentByCard) {
         await sendReply(ctx, formatPermissionPrompt(request, mainSessionId, "external")).catch((error) => {

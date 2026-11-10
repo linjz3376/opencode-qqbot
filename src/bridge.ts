@@ -41,6 +41,7 @@ import {
   formatPermissionPrompt,
   formatPermissionConflictNotice,
   DECISION_LABELS,
+  type PermOrigin,
 } from "./core/permission.js"
 import { truncate } from "./core/util.js"
 import { createDelivery, QQ_LIST_FORMAT_HINT } from "./core/delivery.js"
@@ -740,8 +741,13 @@ export function createBridge(
     if (!req?.id || !req.sessionID) return
     for (const uid of usersOfSession(req.sessionID)) {
       if (perm.hasPending(uid)) continue
-      console.log(`[perm-event] permission.asked 即时推送 user=${uid.slice(0, 8)}… request=${req.id}`)
-      perm.pushExternal(uid, ctxForUser(uid), req, req.sessionID)
+      // DEF-qqbot-20261110-4（实战实证）：来源标注按回合归属判定——该会话正有 bot
+      // 前台回合在跑（QQ 发起）时不得标「桌面端回合」（此前一律 external，回执
+      // 「已由桌面端处理」与事实不符）；真·桌面回合（busyUsers 未命中）才标 external。
+      const bound = sessions.getSession(uid)
+      const origin: PermOrigin = bound?.sessionId === req.sessionID && busyUsers.has(uid) ? "bot" : "external"
+      console.log(`[perm-event] permission.asked 即时推送 user=${uid.slice(0, 8)}… request=${req.id} origin=${origin}`)
+      perm.pushExternal(uid, ctxForUser(uid), req, req.sessionID, origin)
     }
   })
 
