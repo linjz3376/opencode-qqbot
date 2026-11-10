@@ -72,7 +72,7 @@
 | 模块 | 职责 | 关键机制 |
 |---|---|---|
 | `client.ts` | REST 客户端 | V2 API 封装（Basic Auth）：steer prompt、会话 get/move、权限 reply、表单端点、interrupt |
-| `runner`（回合运行器） | 回合执行与流式聚合 | `delivery:"steer"` prompt 下发（声明前台在场 → 引擎审批门闭合）→ SSE 事件流聚合（step/text/tool）→ promptId 锚定回合边界（turnStateOf）→ **同会话串行链**（防并发自撞）→ 30min 只通知/6h 硬上限；会话加载携带自身 location.directory（缓存缺失经 REST 解析回填） |
+| `runner`（回合运行器） | 回合执行与流式聚合 | `delivery:"steer"` prompt 下发（声明前台在场 → 引擎审批门闭合）→ SSE 事件流聚合（step/text/tool）→ promptId 锚定回合边界（turnStateOf）→ 同会话串行性由每用户串行队列承担（每用户同时仅一个在途回合；他端并发由引擎 -32603 兜底拦截）→ 30min 只通知/24h 硬上限；会话加载携带自身 location.directory（缓存缺失经 REST 解析回填） |
 | `sessions.ts` | 用户↔会话映射 | 持久化 `~/.openqq/sessions.json`；目录继承链；模型/Agent 重放 |
 | `eventstream.ts` | 全局 SSE 订阅 | 单连接、按 sessionID 分流；`permission.asked` 即时推送（裁决前送达）；坏帧容错、退避重连、200KB 缓冲上限 |
 | `history.ts` | 历史渲染/脱敏 | 回复文本收集、redactSecrets |
@@ -272,7 +272,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 在途台账 | 一切"重启后要记住"的状态落盘；退出路径必须结账 | 内存态即缺陷候选；孤儿/幽灵必须可观测、可修复、禁静默删除 |
 | 队列恢复语义 | 重启后 queued 条目重建队列"继续排队"，非重跑 | "重跑一条"会重复副作用；"继续排队"保持用户意图 |
 | 回合边界 | promptId 精确锚定（turnStateOf），不依赖消息启发式 | 共享会话里"下一条 user/assistant"启发式必然张冠李戴 |
-| 超时语义 | 会话没有超时限，只有弹窗有 TTL：30min 只通知转后台，6h 硬上限兜底 | 长任务合法；误杀长回合会造成 -32603 级联 |
+| 超时语义 | 会话没有超时限，只有弹窗有 TTL：30min 只通知转后台，24h 硬上限兜底 | 长任务合法；误杀长回合会造成 -32603 级联 |
 | 审批 fail-closed | 无匹配选项=cancelled；拒绝后显式 cancel；冲突即告警 | 安全底线 |
 | 会话归属目录 | 会话 ⇔ location.directory 强绑定；load 携带会话自身目录 | 对齐官方会话归属校验；切会话不建孤儿 |
 | 传输 | **单一传输路径：纯 service 客户端**（与桌面同构）——REST `delivery:"steer"` prompt + SSE 事件订阅（含 permission.asked 即时推送）+ REST 裁决；无 ACP 子进程、无私有服务器 | 引擎审批门=在场语义（steer 前台 / queue 无人值守）；QQ 与桌面共享同一服务的单实例、单事件总线、单数据库，会话天然同步——传输路径多于一条即破坏该模型 |
