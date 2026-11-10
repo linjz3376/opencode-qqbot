@@ -1,6 +1,6 @@
 // @input:  ../opencode/client, ../qq/types, fs/path/os
 // @output: createPermissionGate, parsePermissionDecision, formatPermissionPrompt, DECISION_LABELS,
-//          PERM_PROMPT_TTL_MS, classifyApprovalReplyError, formatPermissionConflictNotice（纯函数供测试）, ApprovalReplyFailure
+//          PERM_PROMPT_TTL_MS, PERM_NUDGE_MS, classifyApprovalReplyError, formatPermissionConflictNotice（纯函数供测试）, ApprovalReplyFailure
 // @pos:    根层/core - 审批域（O7b 2026-10-15 自 bridge.ts 拆出：挂起槽、等待/
 //          裁决、跨重启恢复、自然语言决策解析、菜单格式化、中断态落盘）
 import { existsSync, readFileSync, writeFileSync } from "fs"
@@ -16,6 +16,8 @@ export interface PendingPermission {
   mainSessionId: string // 审批发起时的主会话（子会话请求需要它做来源标注）
   resolve: (decision: PermissionDecision) => void
   timer: ReturnType<typeof setTimeout> | null
+  /** design §3.6 保险网：10min 无裁决告警计时器（裁决/TTL/清槽即取消；只报一次） */
+  alertTimer?: ReturnType<typeof setTimeout> | null
   ctx: MessageContext // O2：落盘快照，跨重启直答用
   createdAt: number // O2：TTL 基准（落盘与恢复共用）
   restored?: boolean // O2：启动恢复条目（无活 waiter，走直连 reply）
@@ -26,6 +28,9 @@ export interface PendingPermission {
 export type PermOrigin = "bot" | "external"
 
 export const PERM_PROMPT_TTL_MS = 30 * 60 * 1000
+
+/** design §3.6 权限保险网：挂起 10 分钟仍无裁决则告警提醒（TTL 30min 自动拒前的兜底） */
+export const PERM_NUDGE_MS = 10 * 60 * 1000
 
 export const DECISION_LABELS: Record<PermissionDecision, string> = {
   once: "允许（本次）",
@@ -124,6 +129,8 @@ export interface PermissionGateDeps {
    *  挡回，裁决后须由调用方重新放行队列——否则挂起期间入队的消息要等用户再发一条才动
    *  （2026-11-05 举一反三：permission 域的"终态无人唤醒"漏洞）。 */
   onDecision?: (userId: string) => void
+  /** 10min 无裁决告警间隔（测试注入小值；缺省 PERM_NUDGE_MS） */
+  nudgeMs?: number
 }
 
 export interface PermissionGate {
@@ -158,6 +165,24 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     return pendingPermissions.get(userId)
   }
 
+  // design §3.6 权限保险网：10min 无裁决告警。只报一次（计时器随建槽设置、
+  // 随裁决/TTL/清槽取消）；到点时槽位仍属于同一请求才发，防误报旧请求。
+  function startNudgeTimer(userId: string, requestId: string, ctx: MessageContext): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      if (pendingPermissions.get(userId)?.request.id !== requestId) return
+      console.log(`[perm] 10min 无裁决告警 user=${userId.slice(0, 8)}… request=${requestId}`)
+      void safeDeliver(
+        ctx,
+        "⏳ 一条审批已等待 10 分钟未裁决，30 分钟到期将自动拒绝。如需继续请尽快裁决（允许/总是/拒绝）。",
+      ).catch(() => {})
+    }, deps.nudgeMs ?? PERM_NUDGE_MS)
+  }
+
+  function clearTimers(entry: PendingPermission): void {
+    if (entry.timer) clearTimeout(entry.timer)
+    if (entry.alertTimer) clearTimeout(entry.alertTimer)
+  }
+
   // promptAndWait 的 onPermission 回调：推 QQ 审批菜单，挂起等待用户回复。
   // 只有 用户回复 或 30 分钟 TTL 会 resolve —— 后者自动拒绝，避免永久挂起。
   function waitForDecision(
@@ -166,6 +191,8 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     mainSessionId: string,
   ): Promise<PermissionDecision> {
     return new Promise<PermissionDecision>((resolve) => {
+      const createdAt = Date.now()
+      const alertTimer = startNudgeTimer(ctx.userId, request.id, ctx)
       const timer = setTimeout(() => {
         if (pendingPermissions.get(ctx.userId)?.request.id === request.id) {
           pendingPermissions.delete(ctx.userId)
@@ -183,8 +210,9 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         mainSessionId,
         resolve,
         timer,
+        alertTimer,
         ctx,
-        createdAt: Date.now(),
+        createdAt,
         origin: "bot", // ACP 自有回合的权限（bridge onPermission 直答路径）
       })
       savePendingPermMap(pendingPermissions) // O2：落盘，重启不丢
@@ -206,7 +234,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
   function resolve(userId: string, decision: PermissionDecision): void {
     const entry = pendingPermissions.get(userId)
     if (!entry) return
-    if (entry.timer) clearTimeout(entry.timer)
+    clearTimers(entry)
     pendingPermissions.delete(userId)
     savePendingPermMap(pendingPermissions)
     deps.onDecision?.(userId) // 裁决即唤醒队列（drainQueue 的 pendingPerm 守卫此刻已放行）
@@ -249,6 +277,9 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     for (const [uid, e] of Object.entries(saved)) {
       const left = PERM_PROMPT_TTL_MS - (Date.now() - e.createdAt)
       if (left <= 0) continue
+      // 保险网告警按 createdAt 对齐：恢复时若 10min 点已过则不再补报
+      const nudgeLeft = PERM_NUDGE_MS - (Date.now() - e.createdAt)
+      const alertTimer = nudgeLeft > 0 ? startNudgeTimer(uid, e.request.id, e.ctx) : null
       const timer = setTimeout(() => {
         if (pendingPermissions.get(uid)?.request.id === e.request.id) {
           pendingPermissions.delete(uid)
@@ -268,6 +299,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         mainSessionId: e.mainSessionId,
         resolve: () => {},
         timer,
+        alertTimer,
         ctx: e.ctx,
         createdAt: e.createdAt,
         restored: true,
@@ -302,8 +334,9 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     if (pendingPermissions.get(userId)?.request.id === request.id) return
     // 单一挂起槽：新审批取代旧槽
     const prev = pendingPermissions.get(userId)
-    if (prev?.timer) clearTimeout(prev.timer)
+    if (prev) clearTimers(prev)
 
+    const alertTimer = startNudgeTimer(userId, request.id, ctx)
     const timer = setTimeout(() => {
       if (pendingPermissions.get(userId)?.request.id !== request.id) return
       pendingPermissions.delete(userId)
@@ -320,6 +353,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       mainSessionId,
       resolve: () => {},
       timer,
+      alertTimer,
       ctx,
       createdAt: Date.now(),
       restored: true,
@@ -348,7 +382,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       if (entry.request.id !== requestID) continue
       if (sessionID && entry.request.sessionID && sessionID !== entry.request.sessionID) continue
       const e = entry
-      if (e.timer) clearTimeout(e.timer)
+      clearTimers(e)
       pendingPermissions.delete(uid)
       savePendingPermMap(pendingPermissions)
       deps.onDecision?.(uid) // 槽清空即唤醒该用户队列（与裁决/TTL 同口径）
