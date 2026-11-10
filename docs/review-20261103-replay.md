@@ -1,5 +1,6 @@
 # 复盘：QQ 端重复回复根治与投递链路硬化（2026-11-02 → 11-03）
 
+> 历史事故复盘档（防重蹈覆辙）；现行系统结构见 `docs/design.md`，当时的队列可观测性设计见 `docs/design-queue-observability.md`。
 > 项目侧复盘档（qqbot-upgrade-sync 步骤 6 纪律）；对账清单另见 `D:\OpenCode\new-snmp\.tmp\plan-qqbot-duplicate-replies.md` 与 `.tmp/plan-qqbot-acceptance.md`。主体产物=本仓 6 个 commit（`02d5ff8`→`ed76844`），已推送 origin/master，未发版。
 
 ## 1. 病历（36 小时时间线摘要）

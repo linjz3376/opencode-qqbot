@@ -109,6 +109,8 @@ gateway 事件 → inbound-dedupe（指纹去重）→ 命令分流（commands.t
 **消息管道**：`message-queue`（每用户队列/恢复）、`queue-view`（对账视图）、`delivery-dedupe`、`inbound-dedupe`、`reply-limiter`、`stream-stagger`、`context-buffer`（引用/引用条上下文）。
 
 **会话与台账**：`inflight-journal`（在途台账+启动对账）、`form-journal`（表单台账）、`gateway-state`（网关 seq 持久化）。
+> 设计依据（9 状态机 / 不变量 I1–I6 / 票号 vs 位置语义 / 回复契约 / 重启恢复顺序）见 `docs/design-queue-observability.md`（已实现，P0+P1 交付于 e2a8854；个别细节以现行代码为准）。
+> 去重/网关/直答归属防线的来历（11-03 重复回复事故复盘）见 `docs/review-20261103-replay.md`。
 
 **审批与交互**：`permission.ts`（REST 权限等待/裁决适配）、`card-approval.ts`（审批卡片+按钮回调）、`form-bridge.ts`（REST 表单通道）、`question-form.ts`（纯函数题库）。
 
