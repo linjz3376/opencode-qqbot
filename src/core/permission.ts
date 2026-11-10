@@ -20,7 +20,12 @@ export interface PendingPermission {
   alertTimer?: ReturnType<typeof setTimeout> | null
   ctx: MessageContext // O2：落盘快照，跨重启直答用
   createdAt: number // O2：TTL 基准（落盘与恢复共用）
-  restored?: boolean // O2：启动恢复条目（无活 waiter，走直连 reply）
+  restored?: boolean // O2：无活 waiter 槽（裁决走直连 reply）——restore() 与 pushExternal() 都会置位
+  /** DEF-qqbot-20261110-7：真跨重启恢复标记，仅 restore() 置位。
+   *  restored 表达的是"无活 waiter、裁决走直连 reply"的行为语义，实时推送（pushExternal）
+   *  同样置位；但实时审批的卡片/文字菜单在点击后已有选择回显，再补一条"跨重启"回执
+   *  属误报，只在从磁盘恢复的条目上投递。 */
+  resumedFromDisk?: boolean
   origin?: PermOrigin // 2026-11-09：回合归属标注——bot=机器人回合，external=桌面端发起（镜像推送）
 }
 
@@ -67,7 +72,7 @@ export function classifyApprovalReplyError(error: unknown): ApprovalReplyFailure
 // 误导路径。与 greeted/watch.json 同款风格（损坏即空）。
 const PENDING_PERM_FILE = join(homedir(), ".openqq", "pending-permissions.json")
 
-type PersistedPermission = {
+export type PersistedPermission = {
   request: PermissionRequest
   mainSessionId: string
   createdAt: number
@@ -131,6 +136,8 @@ export interface PermissionGateDeps {
   onDecision?: (userId: string) => void
   /** 10min 无裁决告警间隔（测试注入小值；缺省 PERM_NUDGE_MS） */
   nudgeMs?: number
+  /** 跨重启恢复读盘入口（测试注入；缺省读 ~/.openqq/pending-permissions.json） */
+  loadPending?: () => Record<string, PersistedPermission>
 }
 
 export interface PermissionGate {
@@ -254,7 +261,16 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
             path: { sessionID: entry.request.sessionID, requestID: entry.request.id },
             body: { decision },
           })
-          await safeDeliver(entry.ctx, `✅ 审批已跨重启完成（${label}），原会话已继续`)
+          // DEF-qqbot-20261110-7：只有真跨重启恢复的条目才补回执。实时推送
+          // （pushExternal）的审批在 QQ 点击后卡片/菜单本身已有选择回显，
+          // 再发"已跨重启完成"既是误报也会重复刷屏。
+          if (entry.resumedFromDisk) {
+            await safeDeliver(entry.ctx, `✅ 审批已跨重启完成（${label}），原会话已继续`)
+          } else {
+            console.log(
+              `[perm] 实时审批已裁决 user=${userId.slice(0, 8)}… request=${entry.request.id} decision=${decision}`,
+            )
+          }
         } catch (error) {
           // 2026-11-05 用户拍板：失败按类型区分文案——过期副本（点的是旧卡片）明确说
           // "重新发起"，服务异常才说"稍后重试"，不再一句"可能已失效"糊在一起。
@@ -279,7 +295,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
   // O2（P2-4a）：恢复重启前挂起的审批（30min TTL 内有效）；恢复条目超时则
   // 直连 reject 解阻塞会话（原 waiter 已不存在，无人代答）
   function restore(): void {
-    const saved = loadPendingPermMap()
+    const saved = (deps.loadPending ?? loadPendingPermMap)()
     for (const [uid, e] of Object.entries(saved)) {
       const left = PERM_PROMPT_TTL_MS - (Date.now() - e.createdAt)
       if (left <= 0) continue
@@ -309,6 +325,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         ctx: e.ctx,
         createdAt: e.createdAt,
         restored: true,
+        resumedFromDisk: true, // DEF-qqbot-20261110-7：真跨重启条目，裁决后补回执
         ...(e.origin ? { origin: e.origin } : {}),
       })
       console.log(`[perm] 恢复重启前挂起的审批 ${uid.slice(0, 8)}… request=${e.request.id}`)
