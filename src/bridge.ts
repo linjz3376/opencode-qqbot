@@ -944,6 +944,7 @@ export function createBridge(
       entries: [...journal.inflight, ...journal.settled].filter((e) => e.userId === userId),
       jobs: msgQueue.list(userId),
       orphanMs: resolveOrphanMs(process.env.QQ_ORPHAN_MS),
+      queueMax: QUEUE_MAX,
       runtime: {
         busy: busyUsers.has(userId),
         draining: draining.has(userId),

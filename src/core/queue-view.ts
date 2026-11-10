@@ -144,6 +144,8 @@ export interface DeriveQueueViewInput {
   now?: number
   orphanMs?: number
   rejectedWindowMs?: number
+  /** 队列上限（违例 I4 长度校验用；缺省 20） */
+  queueMax?: number
 }
 
 function toViewEntry(entry: InflightEntry, stage: ViewStage, enqueuedAt?: number): ViewEntry {
@@ -291,6 +293,37 @@ export function deriveQueueView(input: DeriveQueueViewInput): QueueView {
     const cur = queued[i]?.queueId ?? 0
     if (cur <= prev) {
       warnings.push("队列编号非递增（顺序异常）")
+      break
+    }
+  }
+
+  // —— design §3.4 不变量补校：I3（settled 不得在队列）/ I4 长度半条 /
+  //    I5（队列顺序=入队顺序）/ I6（at ≤ now、updatedAt ≥ at）——
+  //    违例只进 warnings 观测面，不改任何状态。
+  const queueMax = input.queueMax ?? 20
+  if (queued.length > queueMax) warnings.push(`队列长度 ${queued.length} 超上限 ${queueMax}（违例）`)
+  const settledMsgIds = new Set(settled.map((e) => e.msgId))
+  for (const job of jobs) {
+    if (job.ctx.msgId && settledMsgIds.has(job.ctx.msgId)) {
+      warnings.push("已结清条目仍出现在队列（违例）")
+      break
+    }
+  }
+  for (let i = 1; i < queued.length; i++) {
+    if ((queued[i]?.enqueuedAt ?? 0) < (queued[i - 1]?.enqueuedAt ?? 0)) {
+      warnings.push("队列顺序≠入队顺序（违例）")
+      break
+    }
+  }
+  for (const e of [...inflight, ...settled]) {
+    if (e.at > now) {
+      warnings.push(`条目 ${shortId(e.msgId)} 受理时刻晚于当前时间（违例）`)
+      break
+    }
+  }
+  for (const e of [...inflight, ...settled]) {
+    if (e.updatedAt !== undefined && e.updatedAt < e.at) {
+      warnings.push(`条目 ${shortId(e.msgId)} 更新时刻早于受理时刻（违例）`)
       break
     }
   }
