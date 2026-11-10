@@ -416,9 +416,14 @@ export function createClient(baseUrl: string): OpencodeClient {
     },
 
     async promptAndWait(sessionId, text, options) {
-      // v2: prompt body 只接受 {text,...}（additionalProperties:false），model/agent
-      // 会被静默剥离 —— 不再往 body 里塞；模型/agent 由 SessionManager 走 session 级端点。
-      const body: { text: string; files?: Array<{ uri: string; name?: string }> } = { text }
+      // v2: model/agent 会被 additionalProperties:false 静默剥离 —— 不往 body 里塞；
+      // 模型/agent 由 SessionManager 走 session 级端点。
+      // delivery:"steer"（SDK V2SessionPromptData.body 已实证支持）：声明前台在场，
+      // 引擎审批门据此闭合（design §3.2/§4「steer 前台在场语义」）。
+      const body: { text: string; files?: Array<{ uri: string; name?: string }>; delivery: "steer" } = {
+        text,
+        delivery: "steer",
+      }
       if (options?.files?.length) body.files = options.files
 
       // 债务D1：子会话（subagent）审批检测——session 详情带 parentID
