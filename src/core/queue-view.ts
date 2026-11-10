@@ -49,6 +49,8 @@ export interface ViewEntry {
   settleReason?: SettleReason
   updatedAt?: number
   lastError?: string
+  /** K2 内容指纹（design §3.5：/ledger 详情须含） */
+  fingerprint?: string
 }
 
 export interface QueueView {
@@ -159,6 +161,7 @@ function toViewEntry(entry: InflightEntry, stage: ViewStage, enqueuedAt?: number
     ...(entry.settleReason ? { settleReason: entry.settleReason } : {}),
     ...(entry.updatedAt !== undefined ? { updatedAt: entry.updatedAt } : {}),
     ...(entry.lastError ? { lastError: entry.lastError } : {}),
+    ...(entry.fingerprint ? { fingerprint: entry.fingerprint } : {}),
   }
 }
 
@@ -510,6 +513,7 @@ function formatLedgerDetail(entry: ViewEntry, maxChars: number): string {
     `状态：${entry.stage}（${stageLabel(entry.stage)}）`,
     `msgId：${entry.msgId}`,
     `attemptId：${entry.attemptId ?? "-"}`,
+    `指纹：${entry.fingerprint ?? "-"}`,
     `会话：${entry.sessionId ?? "-"}`,
     `promptId：${entry.promptId ?? "-"}`,
     `队列编号：${entry.queueId ?? "-"}`,
