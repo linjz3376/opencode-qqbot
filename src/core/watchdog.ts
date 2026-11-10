@@ -7,7 +7,7 @@
 //   锁文件 pid（单实例仲裁的唯一真相）+ process.kill(pid,0) + 心跳文件新鲜度。
 // 约定：锁 mtime 由 bot 每 10s 刷新（instance-lock）；心跳文件由 bot 每 60s 刷新，
 // 且 2026-11-09 起「抢锁后立即写」，因此「进程活但心跳陈旧」= 真僵死，不是启动中。
-import { readFileSync, statSync, writeFileSync } from "fs"
+import { readFileSync, statSync, unlinkSync, writeFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
 
@@ -422,6 +422,18 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
         return { action: "give-up", detail: `pid=${pid} 无法终止`, killedPid: null, spawnedPid: null }
       }
       killedPid = pid
+    }
+    // design §3.9.1 监督矩阵行 2「无锁 / 锁 pid 已死 → 清锁 → 拉起」：
+    // 死 bot 的锁文件由监督者在拉起前清理。否则刚死（锁 mtime<30s）时
+    // 新实例 try 模式判锁新鲜而拒绝接管，本轮拉起空转，须再等一个巡检周期。
+    // 仅当锁 pid 已死/无锁才删（grace-kill 路径已确认死亡，killedPid 非空）。
+    try {
+      if (killedPid !== null || health.lockPid === null || health.pidAlive === false) {
+        unlinkSync(deps.paths.lockPath)
+        audit(`清锁：${deps.paths.lockPath}（${action.reason}）`)
+      }
+    } catch {
+      /* 锁不存在或删除失败：新实例 try 模式仍按 mtime 仲裁，不阻断拉起 */
     }
     const spawnedPid = deps.spawn()
     state.restartLog.push(Date.now())
