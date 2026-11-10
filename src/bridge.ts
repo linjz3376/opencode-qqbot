@@ -67,6 +67,8 @@ import {
 import {
   deriveQueueView,
   resolveOrphanMs,
+  decideOrphanNotify,
+  type OrphanNotifyState,
   formatQueueReply,
   formatQueueFullReceipt,
   formatLedgerReply,
@@ -1099,7 +1101,7 @@ export function createBridge(
     return Number.isFinite(n) && n > 0 ? Math.floor(n * 1000) : 0
   })()
   const ORPHAN_NOTIFY_GAP_MS = 10 * 60_000
-  const lastOrphanNotify = new Map<string, number>()
+  const orphanNotifyState = new Map<string, OrphanNotifyState>()
   if (ORPHAN_SCAN_MS > 0) {
     setInterval(() => {
       try {
@@ -1107,9 +1109,15 @@ export function createBridge(
         const users = new Set(listInflightView().inflight.map((e) => e.userId))
         for (const uid of users) {
           const view = queueViewFor(uid)
-          if (view.counts.orphan === 0) continue
-          if (now - (lastOrphanNotify.get(uid) ?? 0) < ORPHAN_NOTIFY_GAP_MS) continue
-          lastOrphanNotify.set(uid, now)
+          // design §3.4：仅新增孤儿且距上次提醒 >10min 发汇总（decideOrphanNotify 纯函数决策）
+          const dec = decideOrphanNotify(
+            orphanNotifyState.get(uid),
+            view.orphan.map((o) => o.msgId),
+            now,
+            ORPHAN_NOTIFY_GAP_MS,
+          )
+          orphanNotifyState.set(uid, dec.state)
+          if (!dec.notify) continue
           console.log(`[queue] orphan-scan user=${uid.slice(0, 8)}… count=${view.counts.orphan}`)
           void safeDeliver(
             ctxForUser(uid),

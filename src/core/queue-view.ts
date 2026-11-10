@@ -402,6 +402,41 @@ export function resolveOrphanMs(envValue: string | undefined): number {
   return ORPHAN_DEFAULT_MS
 }
 
+/** 孤儿提醒状态（design §3.4：仅新增孤儿且距上次提醒 >gapMs 才汇总，不刷屏） */
+export interface OrphanNotifyState {
+  lastNotifyAt: number
+  /** 上次提醒时已通告的孤儿 msgId 集合 */
+  notifiedIds: ReadonlySet<string>
+}
+
+/**
+ * 孤儿提醒决策（纯函数）。口径：
+ * - 当前无孤儿 → 清空已通告集合（下次出现即为新增），不提醒；
+ * - 存在上次未通告的新孤儿 且 距上次提醒 ≥ gapMs → 提醒并记录当前集合；
+ * - 有新孤儿但间隔未满 → 不提醒且保留旧集合（挂起，间隔满后补报）；
+ * - 无新孤儿 → 不提醒（旧孤儿存续不重复刷）。
+ */
+export function decideOrphanNotify(
+  prev: OrphanNotifyState | undefined,
+  currentIds: readonly string[],
+  now: number,
+  gapMs: number,
+): { notify: boolean; state: OrphanNotifyState } {
+  const currentSet = new Set(currentIds)
+  if (currentIds.length === 0) {
+    return { notify: false, state: { lastNotifyAt: prev?.lastNotifyAt ?? 0, notifiedIds: currentSet } }
+  }
+  const hasNew = !prev || currentIds.some((id) => !prev.notifiedIds.has(id))
+  const gapOk = !prev || now - prev.lastNotifyAt >= gapMs
+  const notify = hasNew && gapOk
+  return {
+    notify,
+    state: notify
+      ? { lastNotifyAt: now, notifiedIds: currentSet }
+      : { lastNotifyAt: prev?.lastNotifyAt ?? 0, notifiedIds: prev?.notifiedIds ?? currentSet },
+  }
+}
+
 export interface QueueReplyOptions {
   all?: boolean
   page?: number
