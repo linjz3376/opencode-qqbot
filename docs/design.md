@@ -223,7 +223,7 @@ interface InflightEntry {
 | instance-lock | 单实例锁：尝试模式 / 强制接管（心跳失踪判定）/ 锁 mtime 心跳 30s / 持锁 60s 自检自杀 |
 | watchdog（监督矩阵） | `decideSupervise` 纯函数 + `superviseOnce` 执行器：ok / spawn / grace-kill-spawn（SIGTERM→8s→SIGKILL，**确认死亡才拉**，绝不自杀）/ cooldown(2min) / **give-up（3 次/15min）+ QQ 告警（30min 去抖）**；监督者认领锁互斥（插件引导器 × 计划任务不双开）；强度账落盘 supervisor.json |
 | 心跳判据 | 心跳 5min 未刷新 = 事件循环僵死（启动宽限 60s）；loop-lag 漂移遥测（>5s 告警） |
-| bot-control | 生命周期：等空闲 → 停 → 拉（restartBot）；在途计数 |
+| bot-control | 生命周期原语：等空闲、在途计数、拉起；杀/停一律委托 superviseOnce 的 grace-kill（确认死亡才拉） | 见 §4"杀/重启权威" |
 | bot-launcher | 运行时探测（bun/node）+ detached 拉起（windowsHide、环境剥离 QQ_*/OPENCODE_*/ALLOWED_USERS，**.env 单点**）；插件 dist 整目录部署 + 哈希对账（版本同一性）；进程内文件日志常开（core/file-log 双写 bot.out.log） |
 | discovery | OpenCode 端口自动发现（netstat/ss 三分支+降级，401 诊断"凭据不匹配"） |
 
@@ -250,9 +250,20 @@ interface InflightEntry {
 | 超时语义 | 会话没有超时限，只有弹窗有 TTL：30min 只通知转后台，6h 硬上限兜底 | 长任务合法；误杀长回合会造成 -32603 级联 |
 | 审批 fail-closed | 无匹配选项=cancelled；拒绝后显式 cancel；冲突即告警 | 安全底线 |
 | 会话归属目录 | 会话 ⇔ location.directory 强绑定；load 携带会话自身目录 | 对齐官方 ACP 归属校验；切会话不建孤儿 |
-| 传输分层 | QQ 侧回合走 ACP（引擎在场审批语义的真闸通道）；REST 用于会话治理/对账/详情 | 单一职责：执行通道与治理通道分离 |
+| 传输架构 | **目标形态：纯 service 客户端**（与桌面同构）——REST `delivery:"steer"` prompt（声明前台在场 → 引擎审批门闭合）+ SSE 事件订阅（`permission.asked` 即时推送）+ REST 裁决（permission reply 端点结算 deferred）；ACP 子进程为过渡通道，切换验收后退役，`QQBOT_TRANSPORT` 保留回退开关 | 引擎审批门是"在场语义"：steer=前台、queue=无人值守；QQ 与桌面必须共享单实例/单总线/单库，会话天然同步；ACP 私有服务器（`serve --stdio --port 0`）破坏该模型，仅为当前引擎版本下的过渡真闸 |
+| 杀/重启权威 | **唯一权威 = superviseOnce（监督矩阵）**；`openqq restart` 降级为请求式入口，复用同一 grace-kill 原语（确认死亡才拉），不设第二套杀逻辑 | kill+spawn 分散多处 = 互杀与边杀边拉的根源；所有重启受冷却/强度/give-up 约束 |
 
-## 5. 数据与配置
+## 5. 传输切换验收判据（steer 架构落地门禁）
+
+实现按 §4"传输架构"推进，全部通过方可退役 ACP：
+
+1. **真闸复测**：无人工干预下，steer prompt 命中 ask 规则时工具 ≥60s 零执行（以事件流 `tool.success` 判定），复测环境须无第三方自动裁决器；
+2. **自动同步**：同一回合的 SSE 事件在桌面端实时可见，无需手动刷新；
+3. **全量回归**：会话归属目录、prompt 串行链、后台等待、停滞提醒、启动对账在 REST steer 通道行为一致；
+4. **进程收敛**：退役后进程树无 `serve --stdio --port 0` 私有实例；
+5. **验证**：`bun run verify` 全绿 + 真实链路（允许/拒绝/长回合/重启）复验留证。
+
+## 6. 数据与配置
 
 `~/.openqq/`（数据目录，禁止放代码）：`.env`（密钥单点）、`sessions.json`（用户↔会话+目录映射）、
 `inflight.json`（在途台账）、`forms.json`、`gateway-state.json`、`transport.json`、`supervisor.json`（重启强度账）、
@@ -262,7 +273,7 @@ interface InflightEntry {
 `QQBOT_TRANSPORT`(acp|rest)、`QQBOT_ACP_CWD`、`QQ_WATCHDOG_INTERVAL_MS`、`QQ_ORPHAN_MS`、`QQ_ACK_RECEIPT`、
 `QQ_LOG_FILE`、`QQ_ACTIVE_DAILY_LIMIT`、`QQ_EVENT_PROBE`。
 
-## 6. 部署与验证
+## 7. 部署与验证
 
 - **双通道同源**：`bun run deploy:plugin`（构建→本地 pack→解包进 `~/.config/opencode/plugins/opencode-qqbot/`）；
   npm registry 通道产物逐字节一致。
