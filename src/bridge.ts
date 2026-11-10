@@ -153,6 +153,25 @@ export function stallSnapshot(
   }
 }
 
+// ===== 后台进度心跳（2026-11-10 owner 裁定方案 A：长任务过程可见性）=====
+// 背景：停滞提醒只在「零进展」时触发——活跃的长任务全程零可见（昨晚 69 分钟报告实证），
+// 用户体验=「任务一下子没了」。裁定：转后台后每 15min 推送一条进度心跳，不设次数上限
+// （直至完成/24h 放弃）；内容与停滞自检合流——心跳内联「无进展分钟」，任务假活时
+// 用户从心跳文案即可看出；停滞提醒仍独立触发（同 tick 内提醒优先，避免双发）。
+export const BG_HEARTBEAT_MS = 15 * 60_000
+
+/** 心跳决策：距上次心跳（或挂起起点）满 interval 即推送。纯函数供测试。 */
+export function heartbeatDecision(lastHeartbeatAt: number, now: number, intervalMs: number = BG_HEARTBEAT_MS): "beat" | "wait" {
+  return now - lastHeartbeatAt >= intervalMs ? "beat" : "wait"
+}
+
+/** 心跳文案：进行中 + 已运行 + 最近动作 + 内联停滞自检（idle≥30min 明示疑似停滞）。纯函数供测试。 */
+export function heartbeatText(execMin: number, idleMin: number, lastAction?: string): string {
+  const action = lastAction ? `｜最近动作：${lastAction}` : ""
+  const stale = idleMin >= 30 ? `｜⚠️ 已 ${idleMin} 分钟无进展（疑似停滞，可 /stop 后重发）` : ""
+  return `⏳ 后台任务执行中｜已运行 ${execMin} 分钟${action}${stale}`
+}
+
 interface Bridge {
   handleMessage: (ctx: MessageContext) => Promise<void>
   // HC2（2026-10-26）：暴露事件流句柄，index 侧链路自愈巡检需对其热换基
@@ -305,6 +324,9 @@ export function createBridge(
     let lastProgressAt = startedAt
     let nudges = 0
     let lastMarker = ""
+    let lastHeartbeatAt = startedAt // 方案 A：进度心跳调度起点
+    let probeFails = 0 // 服务不可达计数（≥5 一次性告警）
+    let unreachableAlerted = false
 
     const cleanup = (): void => {
       cancelled = true
@@ -415,6 +437,8 @@ export function createBridge(
       if (cancelled || finished) return
       try {
         const listJson = await client.session.messages({ path: { id: sessionId } })
+        probeFails = 0
+        unreachableAlerted = false
         const msgs = listJson?.data ?? []
 
         // H2 停滞检测：消息数或最新 created 变化=有进展；零进展超窗则提醒用户。
@@ -450,6 +474,17 @@ export function createBridge(
               lastAction,
             }),
           ).catch(() => {})
+        } else if (heartbeatDecision(lastHeartbeatAt, now) === "beat") {
+          // 方案 A 进度心跳（2026-11-10 owner 裁定）：活跃长任务的过程可见性。
+          // 无次数上限（至完成/24h 放弃）；内联 idle 自检——任务假活时用户可从
+          // 文案直接看出；同 tick 停滞提醒优先（else-if 天然互斥，不双发）。
+          lastHeartbeatAt = now
+          const hbIdleMin = Math.max(0, Math.round((now - lastProgressAt) / 60_000))
+          const hbExecMin = Math.max(0, Math.round((now - execStartAt) / 60_000))
+          const hbSt = turnStats.get(sessionId)
+          const hbAction = hbSt?.lastTool && hbSt?.lastAt ? `${hbSt.lastTool}（${agoLabel(hbSt.lastAt)}）` : undefined
+          console.log(`[bridge] 后台任务进度心跳 session=${sessionId} execMin=${hbExecMin} idleMin=${hbIdleMin}`)
+          void safeDeliver(ctx, heartbeatText(hbExecMin, hbIdleMin, hbAction)).catch(() => {})
         }
 
         if (turn.superseded) {
@@ -459,7 +494,17 @@ export function createBridge(
           await finish("done")
         }
       } catch (error) {
-        console.error("[bridge] 后台等待轮询失败:", error)
+        probeFails += 1
+        console.error(`[bridge] 后台等待轮询失败(第${probeFails}次):`, error)
+        // 挂死分级处置（2026-11-10 方案 A 配套）：OpenCode 服务不可达时一次性明示，
+        // 用户知晓「状态未知」而非误以为任务在进行；恢复后自动续跳并重置计数。
+        if (probeFails >= 5 && !unreachableAlerted) {
+          unreachableAlerted = true
+          void safeDeliver(
+            ctx,
+            "⚠️ OpenCode 服务连续不可达：后台任务状态未知（可能仍在执行）。服务恢复后自动继续跟踪；也可用 /history 查看会话进展。",
+          ).catch(() => {})
+        }
       }
     }
 
