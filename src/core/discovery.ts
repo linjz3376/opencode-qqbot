@@ -84,7 +84,9 @@ async function listListenPorts(): Promise<number[]> {
         : ["ss -tln", "netstat -tln"]
   for (const cmd of candidates) {
     try {
-      const { stdout } = await execAsync(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: 10_000 })
+      // windowsHide（2026-11-10 静默审计补齐）：exec 经 cmd 中转，缺此参数时每次端口探测
+      // 弹可见控制台——owner 实证「修订后仍见 DOS 弹窗一闪」的闪现源之一。
+      const { stdout } = await execAsync(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: 10_000, windowsHide: true })
       const ports = parseListenPorts(stdout)
       if (ports.length > 0) return ports
     } catch (error) {
