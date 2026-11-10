@@ -67,6 +67,7 @@ import {
 import {
   deriveQueueView,
   formatQueueReply,
+  formatQueueFullReceipt,
   formatLedgerReply,
   formatStatusLine,
   shortId,
@@ -1335,7 +1336,7 @@ export function createBridge(
         if (!queued) {
           if (claimedMsgId) settleInflight(claimedMsgId, undefined, "queue-full") // 已满回执即终态，不能留账让启动对账再次执行
           console.log(`[queue] reject user=${ctx.userId.slice(0, 8)}… msg=${shortId(ctx.msgId)} reason=full size=${msgQueue.size(ctx.userId)}/${QUEUE_MAX}`)
-          await notifyUser(ctx, `排队已满（${QUEUE_MAX} 条），本条未入队；请稍候再试或 /cancel 中止当前任务`)
+          await notifyUser(ctx, formatQueueFullReceipt(QUEUE_MAX))
           return
         }
         if (ctx.msgId) {

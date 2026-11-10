@@ -354,6 +354,11 @@ function clampReply(lines: string[], maxChars: number, hint: string): string {
   return out
 }
 
+/** 队列满拒绝回执（固定文案，design §3.4：指向 /queue）。 */
+export function formatQueueFullReceipt(max: number): string {
+  return `排队已满（${max} 条），本条未入队；请稍候再试，发 /queue 查看队列或 /cancel 中止当前任务`
+}
+
 export interface QueueReplyOptions {
   all?: boolean
   page?: number
