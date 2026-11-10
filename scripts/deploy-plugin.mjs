@@ -9,7 +9,8 @@ import { join } from "path"
 import { homedir } from "os"
 import { spawnSync } from "child_process"
 
-const targetDir = join(homedir(), ".config", "opencode", "plugins", "opencode-qqbot")
+// 目标目录可用 env 覆盖（演练/测试用）；缺省为全局插件目录
+const targetDir = process.env.OPENCODE_QQBOT_PLUGIN_DIR ?? join(homedir(), ".config", "opencode", "plugins", "opencode-qqbot")
 const repo = process.cwd()
 
 // 1. 打包（prepublishOnly 自动构建 dist 双产物）
@@ -36,6 +37,44 @@ if (tar.status !== 0) {
 }
 
 const installed = readdirSync(targetDir)
+
+// 5) design §3.9 哈希对账（版本同一性）：解包落盘须与打包源逐文件一致。
+// 覆盖 package.json/index.js shim 之前校验（这两件是 loader 兼容层，不参与对账）。
+// 任何缺失/不一致 = 半成功解包或旧文件残留，必须报错退出，不得带病部署。
+const { createHash } = await import("crypto")
+const { readFileSync, statSync } = await import("fs")
+function sha256(buf) {
+  return createHash("sha256").update(buf).digest("hex")
+}
+function walkFiles(root, prefix = "") {
+  const out = []
+  for (const name of readdirSync(join(root, prefix))) {
+    const rel = prefix ? `${prefix}/${name}` : name
+    if (statSync(join(root, rel)).isDirectory()) out.push(...walkFiles(root, rel))
+    else out.push(rel)
+  }
+  return out
+}
+const SKIP = new Set(["package.json", "index.js"]) // loader 友好覆盖层（见第 4 步注释）
+const mismatches = []
+for (const rel of walkFiles(targetDir)) {
+  if (SKIP.has(rel)) continue
+  const installedHash = sha256(readFileSync(join(targetDir, rel)))
+  let sourceHash = null
+  try {
+    sourceHash = sha256(readFileSync(join(repo, rel)))
+  } catch {
+    /* 源缺失按不一致处理 */
+  }
+  if (installedHash !== sourceHash) mismatches.push(rel)
+}
+if (mismatches.length > 0) {
+  console.error(`哈希对账失败：${mismatches.length} 个文件与打包源不一致（半成功解包/旧文件残留？）`)
+  for (const rel of mismatches) console.error(`  ✗ ${rel}`)
+  console.error("已中止部署：插件目录保持现状，请清理目标目录后重试。")
+  process.exit(1)
+}
+console.log(`哈希对账通过（${walkFiles(targetDir).length - SKIP.size} 个文件与打包源逐字节一致）`)
 
 // 4. loader 友好化覆盖（2026-11-02 实证定案）：2.2.1 全局插件目录扫描器对目录
 //    插件的 exports 解析有洞——只认根级目标（./index.js 命中，./dist/xxx.js 跳过）。
