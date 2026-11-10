@@ -161,26 +161,30 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 ### 3.5 会话与台账（inflight-journal）
 
-**台账 schema**（字段均可选，向后兼容）：
+**台账条目定义**（InflightEntry，所有扩展字段可选、向后兼容旧文件）：
 
-```ts
-interface InflightEntry {
-  msgId; userId; sessionId?; text; at; fingerprint; attemptId;
-  state: "inflight" | "settled"
-  stage?: "claimed" | "queued" | "dispatched" | "running" | "background" | "settled"
-  queueId?: number        // 票号，对齐队列 #id
-  enqueuedAt?: number     // 重建 FIFO 用
-  updatedAt?: number
-  settleReason?: "answered" | "queue-full" | "duplicate-msgid" | "duplicate-content"
-               | "cancelled" | "dropped" | "expired" | "error" | "redispatch" | "manual"
-  ownerPid?: number       // 跨进程归属（诊断）
-  lastError?: string      // 截 200 字
-}
-```
+| 字段 | 取值/类型语义 | 用途 |
+|---|---|---|
+| msgId | 消息 ID | 主键；join 键最高优先级 |
+| userId / text / at | QQ 用户 / 消息正文（截 300 字）/ 受理时刻 | 基本事实 |
+| fingerprint | 内容指纹（稳定尾段随机段） | K2 去重；join 键次优先级 |
+| attemptId | 本次受理尝试 ID | 跨进程认领/销账对齐 |
+| sessionId / promptId | 进入的会话 / 锚定回合 | 派生 dispatched/running 判定 |
+| state | `inflight`（在途）/ `settled`（已结清） | 主状态，旧代码兼容 |
+| stage | `claimed` → `queued` → `dispatched` → `running` → `background` → `settled` | 生命周期阶段，派生视图输入 |
+| queueId | 票号（对齐队列 #N，只增不复用） | drop/日志关联 |
+| enqueuedAt / updatedAt | 入队时刻 / 最后状态变更时刻 | 重建 FIFO；重启恢复排序 |
+| settleReason | 结清原因枚举 | 见下 |
+| ownerPid | 受理进程 pid | 跨进程归属诊断（对账判断"原执行进程是否已死"） |
+| lastError | 错误摘要（截 200 字） | /ledger 详情与对账 |
 
-**API**：`claimInflightDetailed`（落账）/`markInflightStage`/`settleInflight(msgId, attemptId?, reason?)`/`listInflightView`。
-**保留策略**：inflight 全留；settled 保留 24h 且最新 20 条。
-**结账纪律**：所有退出路径必须结账——`/queue drop`→dropped、`/queue clear` 与 `/cancel`→cancelled（逐条）、drain 失败→error、排队空账（无 sessionId）→清账不重派。
+**结清原因（settleReason）枚举**：`answered`（已答）/ `queue-full`（排队已满拒入）/ `duplicate-msgid` / `duplicate-content`（幂等拦截）/ `cancelled`（/cancel 与 /queue clear）/ `dropped`（/queue drop）/ `expired`（超 24h 清账）/ `error`（派发/执行失败）/ `redispatch`（旧账结清、重派新账）/ `manual`（人工 /ledger settle）。
+
+**台账操作**：落账（claim，含指纹与 attemptId）/ 阶段标记（markStage）/ 结清（settle：msgId + attemptId + 原因，文件锁原子读写）/ 视图导出（listView：派生视图输入）。
+
+**保留策略**：inflight 全留；settled 保留 24h 且最新 20 条；新增字段不参与裁剪。
+
+**结账纪律**：所有退出路径必须结账——/queue drop→dropped；/queue clear 与 /cancel→cancelled（逐条）；drain 失败→error；排队空账（无 sessionId）→清账不重派；禁止静默删除，结清必留日志。
 
 **对账回复契约**（命令路径零模型调用，单条 ≤1800 字符，超出分页）：
 
@@ -219,21 +223,43 @@ interface InflightEntry {
 
 | 模块 | 设计 |
 |---|---|
-| instance-lock | 单实例锁：尝试模式 / 强制接管（心跳失踪判定）/ 锁 mtime 心跳 30s / 持锁 60s 自检自杀 |
-| watchdog（监督矩阵） | `decideSupervise` 纯函数 + `superviseOnce` 执行器：ok / spawn / grace-kill-spawn（SIGTERM→8s→SIGKILL，**确认死亡才拉**，绝不自杀）/ cooldown(2min) / **give-up（3 次/15min）+ QQ 告警（30min 去抖）**；监督者认领锁互斥（插件引导器 × 计划任务不双开）；强度账落盘 supervisor.json |
-| 心跳判据 | 心跳 5min 未刷新 = 事件循环僵死（启动宽限 60s）；loop-lag 漂移遥测（>5s 告警） |
-| bot-control | 生命周期原语：等空闲、在途计数、拉起；杀/停一律委托 superviseOnce 的 grace-kill（确认死亡才拉） | 见 §4"杀/重启权威" |
+| instance-lock | 单实例锁：尝试模式 / 强制接管（心跳失踪判定）/ 锁 mtime 心跳 / 持锁 60s 自检自杀 |
+| bot-control | 生命周期原语：等空闲、在途计数、拉起（杀/停不在此实现，见 §3.9.1） |
 | bot-launcher | 运行时探测（bun/node）+ detached 拉起（windowsHide、环境剥离 QQ_*/OPENCODE_*/ALLOWED_USERS，**.env 单点**）；插件 dist 整目录部署 + 哈希对账（版本同一性）；进程内文件日志常开（core/file-log 双写 bot.out.log） |
 | discovery | OpenCode 端口自动发现（netstat/ss 三分支+降级，401 诊断"凭据不匹配"） |
+
+#### 3.9.1 杀与重启（系统唯一权威）
+
+**唯一权威 = `superviseOnce`（监督矩阵执行器）**。系统内一切"杀 bot / 拉 bot"只能经由它，不存在第二套杀逻辑。触发入口共三个，全部是它的调用方而非独立实现：
+
+| 入口 | 形态 |
+|---|---|
+| 计划任务看门狗 | 每 10min `--once`（schtasks 注册，常驻兜底） |
+| 插件引导器巡检 | OpenCode 宿主内每 5min（OpenCode 在线时的主通道） |
+| `openqq restart [--force]` | 人工/脚本请求式入口，复用同一 grace-kill + spawn 原语与强度约束 |
+
+**监督矩阵（观测 → 动作）**：
+
+| 观测 | 动作 |
+|---|---|
+| 心跳新鲜 | 不动（绝大多数巡检走这里，零副作用） |
+| 无锁 / 锁 pid 已死 | 清锁 → 拉起 |
+| pid 活 + 心跳 >5min | 优雅杀：SIGTERM → 等 8s → SIGKILL → **确认死亡才拉** |
+| 距上次重启 <2min | 冷却跳过（防多入口互踢、防误杀瞬时态） |
+| 15min 内已重启 ≥3 次 | **give-up**：停止循环 + QQ 告警（30min 去抖）——同因反复死亡时上报人工，不当重启永动机 |
+
+**不变约束**：绝不自杀（killPid=自身拒杀）；确认死亡才拉（严禁边杀边拉）；杀不掉（权限/系统级）→ 放弃本轮并留审计；监督者认领锁互斥（多入口不双开）。
+
+**矩阵输入（判活判据）**：心跳文件 5min 未刷新 = 事件循环僵死（启动宽限 60s）；loop-lag 漂移遥测（>5s 告警）；锁 mtime 30s 心跳独立证锁活性。强度账落盘 `supervisor.json`（重启时间戳滑动窗口）。
 
 ### 3.10 入口、CLI 与插件引导器
 
 - `index.ts`：抢锁→写心跳→401 快速失败（连续 3 次认证被拒即退出释放锁）→连接检查→bridge→gateway；优雅关闭清定时器。
-- `openqq-main.ts` → `openqq-cli.js`：`openqq restart [--force]`（等空闲→停→拉）。
-- `watchdog-main.ts` → `openqq-watchdog.js`：`--once` / `--loop`（监督矩阵执行入口）。
+- `openqq-main.ts` → `openqq-cli.js`：请求式重启入口（杀/拉设计见 §3.9.1）；`--force` 跳过等空闲。
+- `watchdog-main.ts` → `openqq-watchdog.js`：计划任务侧巡检入口（`--once` / `--loop`，设计见 §3.9.1）。
 - `service-main.ts`：自启注册（win32=schtasks / linux=systemd user / darwin=launchd，三平台生成器纯函数可测）。
 - `notify.ts` → `openqq notify`：通知出队，独立可用。
-- `plugin-entry.ts`：OpenCode 宿主内轻量巡检器（5min superviseOnce；缺凭据/运行时按状态变化告警；**unload 绝不碰 bot**——插件重载=免费看门狗）。
+- `plugin-entry.ts`：宿主内巡检入口（5min 调 superviseOnce，设计见 §3.9.1）；缺凭据/运行时按状态变化告警；**unload 绝不碰 bot**（插件重载=免费看门狗）。
 
 ## 4. 关键设计决策
 
@@ -242,7 +268,7 @@ interface InflightEntry {
 | 单实例 + 锁仲裁 | 锁文件 pid 是唯一真相；心跳独立证活；持锁自检自杀 | QQ 网关单活跃连接协议约束；防多实例互踢与"暗 believer" |
 | 受理幂等 K1/K2 | msgId 跨进程原子认领 + 内容指纹窗口去重 | 网关 backlog 重放、消息重推、启动对账重派都必须收敛到"同内容不重复投递" |
 | 网关状态持久化 | session/seq 落盘，重启优先 RESUME | 重启 IDENTIFY 失忆会引发 backlog 重放，与幂等/台账叠加成风暴 |
-| 监督矩阵 | 优雅杀/冷却/强度上限/give-up 上报 | 重启必须受控：同因反复死亡时停止循环并通知操作者，而不是当永动机 |
+| 杀/重启归一 | 唯一权威与完整机制**只出在 §3.9.1**（superviseOnce：优雅杀+冷却+强度上限+give-up 告警） | kill+spawn 分散多处 = 互杀与边杀边拉的根源；所有重启必须受控 |
 | 在途台账 | 一切"重启后要记住"的状态落盘；退出路径必须结账 | 内存态即缺陷候选；孤儿/幽灵必须可观测、可修复、禁静默删除 |
 | 队列恢复语义 | 重启后 queued 条目重建队列"继续排队"，非重跑 | "重跑一条"会重复副作用；"继续排队"保持用户意图 |
 | 回合边界 | promptId 精确锚定（turnStateOf），不依赖消息启发式 | 共享会话里"下一条 user/assistant"启发式必然张冠李戴 |
@@ -250,7 +276,6 @@ interface InflightEntry {
 | 审批 fail-closed | 无匹配选项=cancelled；拒绝后显式 cancel；冲突即告警 | 安全底线 |
 | 会话归属目录 | 会话 ⇔ location.directory 强绑定；load 携带会话自身目录 | 对齐官方会话归属校验；切会话不建孤儿 |
 | 传输 | **单一传输路径：纯 service 客户端**（与桌面同构）——REST `delivery:"steer"` prompt + SSE 事件订阅（含 permission.asked 即时推送）+ REST 裁决；无 ACP 子进程、无私有服务器 | 引擎审批门=在场语义（steer 前台 / queue 无人值守）；QQ 与桌面共享同一服务的单实例、单事件总线、单数据库，会话天然同步——传输路径多于一条即破坏该模型 |
-| 杀/重启权威 | **唯一权威 = superviseOnce（监督矩阵）**；`openqq restart` 降级为请求式入口，复用同一 grace-kill 原语（确认死亡才拉），不设第二套杀逻辑 | kill+spawn 分散多处 = 互杀与边杀边拉的根源；所有重启受冷却/强度/give-up 约束 |
 
 ## 5. 数据与配置
 
