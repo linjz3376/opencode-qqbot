@@ -7,7 +7,8 @@
 // 两者失联时用户从 /queue 只能看到"队列：空"。本模块把三源（队列/台账/运行态）
 // join 成 9 个对外状态，并给出可复算的回复文案。
 import type { InflightEntry, InflightStage, SettleReason } from "./inflight-journal.js"
-import { agoLabel, previewText, type QueuedJob } from "./message-queue.js"
+import { agoLabel, intentKeyOf, previewText, type QueuedJob } from "./message-queue.js"
+import { messageFingerprint } from "./inbound-dedupe.js"
 
 /** 孤儿判定阈值：台账在途、不在队列、也不在运行/后台，超过该时长即孤儿。 */
 export const ORPHAN_DEFAULT_MS = 90_000
@@ -181,41 +182,71 @@ export function deriveQueueView(input: DeriveQueueViewInput): QueueView {
   const inflight = input.entries.filter((e) => e.state === "inflight")
   const settled = input.entries.filter((e) => e.state === "settled")
   const byMsg = new Map(inflight.map((e) => [e.msgId, e]))
+  // design §3.4：join 键回退链 msgId > queueId > fingerprint（msgId 缺失/漂移时
+  // 仍能对账，而不是直接幽灵）。fingerprint 索引惰性构建（K2 指纹与受理同源）。
+  const byQueueId = new Map(inflight.filter((e) => e.queueId !== undefined).map((e) => [e.queueId as number, e]))
+  const byFingerprint = new Map<string, InflightEntry>()
+  for (const e of inflight) if (e.fingerprint && !byFingerprint.has(e.fingerprint)) byFingerprint.set(e.fingerprint, e)
   const jobs = [...input.jobs]
 
   const queued: ViewEntry[] = []
   const ghost: ViewEntry[] = []
   const linkedMsgIds = new Set<string>()
+  const linkedEntries = new Set<InflightEntry>()
   let noMsgIdJobs = 0
+  let queueIdJoins = 0
+  let fingerprintJoins = 0
+
+  /** 三级回退：msgId → queueId → fingerprint；命中的条目不可被后续 job 重复认领 */
+  function joinEntry(job: QueuedJob): InflightEntry | undefined {
+    const msgId = job.ctx.msgId
+    if (msgId) {
+      const byMsgHit = byMsg.get(msgId)
+      if (byMsgHit && !linkedEntries.has(byMsgHit)) return byMsgHit
+    }
+    const byQueueHit = byQueueId.get(job.id)
+    if (byQueueHit && !linkedEntries.has(byQueueHit)) {
+      queueIdJoins++
+      return byQueueHit
+    }
+    const fp = messageFingerprint(job.userId, intentKeyOf(job.ctx))
+    const byFpHit = byFingerprint.get(fp)
+    if (byFpHit && !linkedEntries.has(byFpHit)) {
+      fingerprintJoins++
+      return byFpHit
+    }
+    return undefined
+  }
 
   for (const job of jobs) {
     const msgId = job.ctx.msgId
-    if (!msgId) {
-      // 无 msgId 的消息从未落账（台账只认 msgId）；单列提示，不误报幽灵。
-      noMsgIdJobs++
-      queued.push({
-        msgId: `queue-${job.id}`,
-        text: job.text,
-        at: job.enqueuedAt,
-        enqueuedAt: job.enqueuedAt,
-        stage: "queued",
-        queueId: job.id,
-      })
-      continue
-    }
-    const entry = byMsg.get(msgId)
+    const entry = joinEntry(job)
     if (!entry) {
-      ghost.push({
-        msgId,
-        text: job.text,
-        at: job.enqueuedAt,
-        enqueuedAt: job.enqueuedAt,
-        stage: "ghost",
-        queueId: job.id,
-      })
+      if (!msgId) {
+        // 无 msgId 且 queueId/fingerprint 均未命中：从未落账，单列提示，不误报幽灵。
+        noMsgIdJobs++
+        queued.push({
+          msgId: `queue-${job.id}`,
+          text: job.text,
+          at: job.enqueuedAt,
+          enqueuedAt: job.enqueuedAt,
+          stage: "queued",
+          queueId: job.id,
+        })
+      } else {
+        ghost.push({
+          msgId,
+          text: job.text,
+          at: job.enqueuedAt,
+          enqueuedAt: job.enqueuedAt,
+          stage: "ghost",
+          queueId: job.id,
+        })
+      }
       continue
     }
-    linkedMsgIds.add(msgId)
+    linkedEntries.add(entry)
+    linkedMsgIds.add(entry.msgId)
     const view = toViewEntry(entry, "queued", job.enqueuedAt)
     view.queueId = job.id
     queued.push(view)
@@ -283,6 +314,8 @@ export function deriveQueueView(input: DeriveQueueViewInput): QueueView {
   )
 
   if (ghost.length > 0) warnings.push(`幽灵 ${ghost.length} 条（队列有、台账无）`)
+  if (queueIdJoins > 0) warnings.push(`${queueIdJoins} 条队列条目经 queueId 回退对账（msgId 未命中）`)
+  if (fingerprintJoins > 0) warnings.push(`${fingerprintJoins} 条队列条目经指纹回退对账（msgId/queueId 未命中）`)
   if (noMsgIdJobs > 0) warnings.push(`队列中 ${noMsgIdJobs} 条无 msgId（无法与台账对账）`)
   if (orphan.length > 0) warnings.push(`孤儿 ${orphan.length} 条（超 ${Math.round(orphanMs / 1000)}s 无人认领）`)
   if (dispatchedWithoutRuntime > 0) {
