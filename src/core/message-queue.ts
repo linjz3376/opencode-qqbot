@@ -21,7 +21,31 @@ const PREVIEW_MAX = 48
 export function intentKeyOf(ctx: MessageContext): string {
   const text = ctx.content.replace(/\s+/g, " ").trim()
   const attachments = (ctx.attachments ?? []).map((a) => `${a.content_type}:${a.size}:${a.filename}`).join("|")
-  return JSON.stringify({ text, referenced: ctx.referencedMsgId ?? "", attachments })
+  return JSON.stringify({ text: stableIntentText(text), referenced: ctx.referencedMsgId ?? "", attachments })
+}
+
+/**
+ * design §3.4 K2「稳定尾段随机段」：剥离文本尾部的随机段（nonce/时间戳/消息指纹类
+ * 尾巴），使带随机尾巴的同内容消息仍归同一意图。口径保守，只剥两类尾 token——
+ * ① 长度 ≥8 且字母数字混杂的连续 token（nonce/hex/base64 形态）；
+ * ② 长度 ≥6 的纯数字 token（毫秒/微秒时间戳形态）。
+ * 剥后留白即再剥（多层尾巴），剥到非随机 token 或空为止；不影响普通文本。
+ */
+export function stableIntentText(text: string): string {
+  let out = text
+  const NOISE = /(?:^|\s)(\S{8,}|\d{6,})$/
+  for (;;) {
+    const m = NOISE.exec(out)
+    if (!m || m[1] === undefined) break
+    // ① 混合形态：字母数字混杂（含大小写混合或数字插入）；纯字母词（如"继续"后的
+    // 英文单词）或纯数字走 ② 的长度门槛，避免误伤正常结尾词
+    const token = m[1]
+    const mixedAlnum = /[a-zA-Z]/.test(token) && /\d/.test(token)
+    const longDigit = /^\d{6,}$/.test(token)
+    if (!mixedAlnum && !longDigit) break
+    out = out.slice(0, m.index).trimEnd()
+  }
+  return out
 }
 
 export function previewText(text: string, max = PREVIEW_MAX): string {
