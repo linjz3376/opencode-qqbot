@@ -31,7 +31,7 @@
 │   ├─ bridge.ts        核心桥接（调度/队列/投递/审批/表单/镜像/对账）               │
 │   ├─ commands.ts      / 命令面（/new /stop /status /sessions /queue /ledger …）   │
 │   ├─ qq/              QQ 接入层（gateway 状态机 + REST API + 发送）               │
-│   ├─ opencode/        OpenCode 对接层（ACP 传输 + REST 客户端 + SSE + 会话映射）  │
+│   ├─ opencode/        OpenCode 对接层（REST 客户端 + SSE + 回合运行器 + 会话映射）│
 │   └─ core/            领域核心（管道/台账/审批卡片/看门狗/启动器…）                 │
 └───────────────────────────────────────────────────────────────────────────────────┘
         ▲ 每 10min 巡检（schtasks → openqq-watchdog.js --once）
@@ -52,7 +52,7 @@
 | 入口/运维 | index.ts、cli/*、plugin-entry.ts | 启动编排、优雅关闭、重启/看门狗/通知/自启 CLI、宿主内巡检 |
 | 桥接层 | bridge.ts、commands.ts | 消息调度、队列、投递、审批、表单、镜像、重启对账、命令面 |
 | QQ 接入层 | qq/* | Gateway 状态机、REST 鉴权、收发与渲染 |
-| OpenCode 层 | opencode/* | ACP 传输、REST 客户端、SSE 事件、会话映射、项目归属 |
+| OpenCode 层 | opencode/* | REST 客户端、回合运行器、SSE 事件、会话映射、项目归属 |
 | 领域核心 | core/* | 管道、台账、锁、看门狗、审批卡片、表单、媒体、镜像、去重 |
 
 ## 3. 功能模块
@@ -71,11 +71,10 @@
 
 | 模块 | 职责 | 关键机制 |
 |---|---|---|
-| `acp.ts` | ACP 传输客户端 | JSON-RPC 行协议；子进程生命周期状态机：exit 清 child/ready（可重启）、initialize 独立握手超时（失败即杀子进程，不留孤儿）、stale 守卫防迟到事件误清新传输、未连接请求立即拒绝；权限 fail-closed（无匹配选项=cancelled） |
-| `acp-session.ts` | ACP 会话运行器 | 用户↔会话映射、prompt 流式聚合、`promptChain` 同会话串行链（防 -32603 自撞）、30min 只通知/6h 硬上限、会话归属目录加载（load 携带会话自身 location.directory，缓存缺失经 REST 解析回填，-32602 漂移自动校正重试一次） |
-| `client.ts` | REST 客户端 | V2 API 封装（Basic Auth）；会话 get/move（项目归属补写） |
+| `client.ts` | REST 客户端 | V2 API 封装（Basic Auth）：steer prompt、会话 get/move、权限 reply、表单端点、interrupt |
+| `runner`（回合运行器） | 回合执行与流式聚合 | `delivery:"steer"` prompt 下发（声明前台在场 → 引擎审批门闭合）→ SSE 事件流聚合（step/text/tool）→ promptId 锚定回合边界（turnStateOf）→ **同会话串行链**（防并发自撞）→ 30min 只通知/6h 硬上限；会话加载携带自身 location.directory（缓存缺失经 REST 解析回填） |
 | `sessions.ts` | 用户↔会话映射 | 持久化 `~/.openqq/sessions.json`；目录继承链；模型/Agent 重放 |
-| `eventstream.ts` | 全局 SSE 订阅 | 单连接、按 sessionID 分流、坏帧容错、退避重连、200KB 缓冲上限 |
+| `eventstream.ts` | 全局 SSE 订阅 | 单连接、按 sessionID 分流；`permission.asked` 即时推送（裁决前送达）；坏帧容错、退避重连、200KB 缓冲上限 |
 | `history.ts` | 历史渲染/脱敏 | 回复文本收集、redactSecrets |
 | `mirror.ts` | 镜像摘要投影 | — |
 
@@ -86,7 +85,7 @@
 ```
 gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.ts）
   → 队列（message-queue）→ 在途台账落账（inflight-journal）
-  → ACP prompt（串行链）→ 流式聚合 → 回合边界判定（promptId 锚定，turnStateOf）
+  → steer prompt（REST，串行链）→ SSE 流式聚合 → 回合边界判定（promptId 锚定，turnStateOf）
   → 投递（delivery：分割/去重/节流/渲染）→ 台账销账
   → 超时/重启时：对账补投 或 重挂后台等待
 ```
@@ -96,11 +95,11 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 调度 | 每用户串行；`pendingSelections`（/sessions /model 序号选择，TTL 60s） |
 | 回合边界 | prompt API 受理返回 promptId 精确锚定；前台直答/后台等待/补投共用 `turnStateOf` 判定，不依赖"下一条 user 消息"启发式 |
 | 后台等待 | `bgWait`：回合转后台后继续等结果（SSE + 5min 轮询兜底）；停滞提醒（30min 节奏，stallSnapshot 纯函数先取快照再重置，闲置分钟/执行时长跨重启不丢） |
-| 审批 | ACP `session/request_permission` → 四键卡片（card-approval）→ 裁决回 ACP；无匹配选项 fail-closed；拒绝后显式 cancel 释放会话 |
-| 表单/提问 | ACP elicitation → 文本多题问答（question-form：schema 归并/字母序号解析/跳过 vs 中止语义，30min TTL）；REST 表单桥（form-bridge）兼容 |
+| 审批 | SSE `permission.asked` **即时推送**（裁决前到达）→ 四键卡片（card-approval）→ REST permission reply 结算引擎 deferred；真闸来自 steer 前台在场语义；无匹配裁决 fail-closed；拒绝后 REST cancel 释放回合 |
+| 表单/提问 | REST form 端点 + SSE 事件（form-bridge 渲染/回执/台账；question-form 多题问答：跳过 vs 中止语义，30min TTL，旧挂起作废防串线） |
 | 镜像 watch | /watch 订阅会话：工具调用/完成摘要实时推送（≥2s 节流合并，主动消息日配额） |
 | 媒体出站 | send-media：本地文件按标记发送（路径白名单） |
-| 传输看门狗 | ACP 60s 自愈；连续失败 3 次 exit 42 移交外部监督者 |
+| 服务健康 | SSE 断线退避重连 + `/status` 服务探活；单进程单连接，无子进程看护面 |
 
 命令面（`commands.ts`）：/new /stop|/cancel（彻底复位：清队列+abort+杀后台等待+结清+drain）/queue /ledger /progress /status /sessions（带目录切换）/model /agent /rename /history /watch /send /mirror /help。
 
@@ -195,9 +194,9 @@ interface InflightEntry {
 
 | 组件 | 设计 |
 |---|---|
-| ACP 权限门 | `session/request_permission` 为**请求-响应阻塞式**：工具停在裁决前；bot 回 once/always/reject；无匹配选项 fail-closed（cancelled）；超时/异常显式 cancel 释放会话 |
+| 审批门 | 引擎侧请求-响应阻塞：工具停在裁决前（deferred）；steer 声明前台在场 → 门闭合；`permission.asked` 经 SSE 即时推送；REST reply 结算（once/always/reject）；无匹配裁决 fail-closed（cancelled）；拒绝后 REST cancel 释放回合 |
 | 审批卡片（card-approval） | 四键（允许一次/总是/拒绝/忽略）+ 文字裁决等价；intent 位 + 互动响应时限；过期按钮拒识；拒绝遇"他端已处理"冲突即告警（不静默） |
-| REST 权限适配（core/permission.ts） | REST 通道的权限等待/裁决/保险网（10min 无裁决告警） |
+| 权限保险网（core/permission.ts） | 裁决等待的兜底：10min 无裁决告警、冲突裁决通知 |
 | 表单桥（form-bridge） | REST 表单通道：渲染/回执/台账（form-journal）/孤儿表单作废 |
 | 提问（question-form） | 纯函数题库：schema 归一（合并 `*_custom`）、字母/序号/原文/自定义/多选解析；未答语义——可选题跳过（accept 部分答案）、必填题中止（cancel）；30min TTL，旧挂起提问作废防串线 |
 
@@ -249,31 +248,21 @@ interface InflightEntry {
 | 回合边界 | promptId 精确锚定（turnStateOf），不依赖消息启发式 | 共享会话里"下一条 user/assistant"启发式必然张冠李戴 |
 | 超时语义 | 会话没有超时限，只有弹窗有 TTL：30min 只通知转后台，6h 硬上限兜底 | 长任务合法；误杀长回合会造成 -32603 级联 |
 | 审批 fail-closed | 无匹配选项=cancelled；拒绝后显式 cancel；冲突即告警 | 安全底线 |
-| 会话归属目录 | 会话 ⇔ location.directory 强绑定；load 携带会话自身目录 | 对齐官方 ACP 归属校验；切会话不建孤儿 |
-| 传输架构 | **目标形态：纯 service 客户端**（与桌面同构）——REST `delivery:"steer"` prompt（声明前台在场 → 引擎审批门闭合）+ SSE 事件订阅（`permission.asked` 即时推送）+ REST 裁决（permission reply 端点结算 deferred）；ACP 的独有能力（真闸/流式/elicitation/会话管理）在 REST 客户端形态下全部有等价物，**切换验收后退役**：停止拉起 ACP 子进程，`acp.ts/acp-session.ts` 保留 dormant 于 `QQBOT_TRANSPORT` 开关后作应急回退，稳定观察期后删码 | 引擎审批门是"在场语义"：steer=前台、queue=无人值守；QQ 与桌面必须共享单实例/单总线/单库，会话天然同步；ACP 私有服务器（`serve --stdio --port 0`）破坏该模型，仅为当前引擎版本下的过渡真闸 |
+| 会话归属目录 | 会话 ⇔ location.directory 强绑定；load 携带会话自身目录 | 对齐官方会话归属校验；切会话不建孤儿 |
+| 传输 | **单一传输路径：纯 service 客户端**（与桌面同构）——REST `delivery:"steer"` prompt + SSE 事件订阅（含 permission.asked 即时推送）+ REST 裁决；无 ACP 子进程、无私有服务器 | 引擎审批门=在场语义（steer 前台 / queue 无人值守）；QQ 与桌面共享同一服务的单实例、单事件总线、单数据库，会话天然同步——传输路径多于一条即破坏该模型 |
 | 杀/重启权威 | **唯一权威 = superviseOnce（监督矩阵）**；`openqq restart` 降级为请求式入口，复用同一 grace-kill 原语（确认死亡才拉），不设第二套杀逻辑 | kill+spawn 分散多处 = 互杀与边杀边拉的根源；所有重启受冷却/强度/give-up 约束 |
 
-## 5. 传输切换验收判据（steer 架构落地门禁）
-
-实现按 §4"传输架构"推进，全部通过方可退役 ACP：
-
-1. **真闸复测**：无人工干预下，steer prompt 命中 ask 规则时工具 ≥60s 零执行（以事件流 `tool.success` 判定），复测环境须无第三方自动裁决器；
-2. **自动同步**：同一回合的 SSE 事件在桌面端实时可见，无需手动刷新；
-3. **全量回归**：会话归属目录、prompt 串行链、后台等待、停滞提醒、启动对账在 REST steer 通道行为一致；
-4. **进程收敛**：退役后进程树无 `serve --stdio --port 0` 私有实例；
-5. **验证**：`bun run verify` 全绿 + 真实链路（允许/拒绝/长回合/重启）复验留证。
-
-## 6. 数据与配置
+## 5. 数据与配置
 
 `~/.openqq/`（数据目录，禁止放代码）：`.env`（密钥单点）、`sessions.json`（用户↔会话+目录映射）、
-`inflight.json`（在途台账）、`forms.json`、`gateway-state.json`、`transport.json`、`supervisor.json`（重启强度账）、
+`inflight.json`（在途台账）、`forms.json`、`gateway-state.json`、`supervisor.json`（重启强度账）、
 `heartbeat`、`*.lock`、`watchdog.log`、`bot.out.log`（+ 进程内双写）、`outbox.json`、`last-discovered.json`。
 
 `.env` 主要键：`QQ_APP_ID/QQ_APP_SECRET`、`OPENCODE_BASE_URL/OPENCODE_PASSWORD`、`ALLOWED_USERS`、
-`QQBOT_TRANSPORT`(acp|rest)、`QQBOT_ACP_CWD`、`QQ_WATCHDOG_INTERVAL_MS`、`QQ_ORPHAN_MS`、`QQ_ACK_RECEIPT`、
+`QQBOT_DEFAULT_CWD`、`QQ_WATCHDOG_INTERVAL_MS`、`QQ_ORPHAN_MS`、`QQ_ACK_RECEIPT`、
 `QQ_LOG_FILE`、`QQ_ACTIVE_DAILY_LIMIT`、`QQ_EVENT_PROBE`。
 
-## 7. 部署与验证
+## 6. 部署与验证
 
 - **双通道同源**：`bun run deploy:plugin`（构建→本地 pack→解包进 `~/.config/opencode/plugins/opencode-qqbot/`）；
   npm registry 通道产物逐字节一致。
