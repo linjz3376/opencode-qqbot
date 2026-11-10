@@ -66,6 +66,7 @@ import {
 } from "./core/inflight-journal.js"
 import {
   deriveQueueView,
+  resolveOrphanMs,
   formatQueueReply,
   formatQueueFullReceipt,
   formatLedgerReply,
@@ -942,6 +943,7 @@ export function createBridge(
     return deriveQueueView({
       entries: [...journal.inflight, ...journal.settled].filter((e) => e.userId === userId),
       jobs: msgQueue.list(userId),
+      orphanMs: resolveOrphanMs(process.env.QQ_ORPHAN_MS),
       runtime: {
         busy: busyUsers.has(userId),
         draining: draining.has(userId),

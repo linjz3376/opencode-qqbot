@@ -362,6 +362,13 @@ export function formatQueueFullReceipt(max: number): string {
   return `排队已满（${max} 条），本条未入队；请稍候再试，发 /queue 查看队列或 /cancel 中止当前任务`
 }
 
+/** design §3.4/§5：孤儿阈值可调（QQ_ORPHAN_MS），非法值回退默认 90s。纯函数便于单测。 */
+export function resolveOrphanMs(envValue: string | undefined): number {
+  const raw = Number(envValue ?? "")
+  if (Number.isFinite(raw) && raw >= 5_000 && raw <= 3_600_000) return raw
+  return ORPHAN_DEFAULT_MS
+}
+
 export interface QueueReplyOptions {
   all?: boolean
   page?: number
