@@ -11,7 +11,7 @@ import { getAccessToken, sendC2CInputNotify, sendC2CMessage, sendGroupMessage } 
 import { prepareQQAttachments, augmentPromptWithAttachments, purgeOldQQImages } from "./qq/media.js"
 import { normalizeForCommandGate } from "./qq/gateway.js"
 import type { OpencodeClient, SessionMessage, PermissionRequest } from "./opencode/client.js"
-import { collectReplyText, SupersededError, turnStateOf } from "./opencode/client.js"
+import { SupersededError, turnStateOf } from "./opencode/client.js"
 import { createEventStream, type V2Event } from "./opencode/eventstream.js"
 import { createAcpSessionRunner, isAcpPromptBusy, isAcpPromptTimeout } from "./opencode/acp-session.js"
 import { readTransportSetting } from "./core/transport-setting.js"
@@ -187,6 +187,48 @@ export function missingIdleDone(
   graceMs: number = MISSING_IDLE_GRACE_MS,
 ): boolean {
   return !turn.hasIdle && Boolean(turn.text) && now - lastProgressAt >= graceMs
+}
+
+// ===== 终稿提取（2026-11-10 工作稿误投事故根修）=====
+// 事故：owner 收到「📤…结果如下：更新测试（新文案+missingIdleDone 用例）：」——那是被打断回合
+// 的【工作稿】（同消息文本段后带工具段），不是答案。口径：同消息含工具段=工作稿，不作答案投递；
+// 只取边界内最后一条「纯文本 assistant 消息」；一条都没有=未产出，走 superseded 如实交代。
+function assistantTextOf(m: SessionMessage): string {
+  return (m.content ?? [])
+    .filter((p) => p.type === "text" && p.text?.trim())
+    .map((p) => p.text ?? "")
+    .join("\n")
+    .trim()
+}
+function hasToolPart(m: SessionMessage): boolean {
+  return (m.parts ?? []).some((p) => p.type === "tool") || (m.content ?? []).some((p) => p.type === "tool")
+}
+
+export function finalAnswerText(msgs: SessionMessage[], promptId: string, baseline: number): string {
+  const ordered = [...msgs].sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
+  let userIdx = promptId ? ordered.findIndex((m) => m.type === "user" && m.id === promptId) : -1
+  if (userIdx < 0 && baseline > 0) {
+    let best = -1
+    let bestDelta = Number.POSITIVE_INFINITY
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      if (ordered[i].type !== "user") continue
+      const delta = Math.abs((ordered[i].time?.created ?? 0) - baseline)
+      if (delta < bestDelta) { bestDelta = delta; best = i }
+    }
+    if (best >= 0 && bestDelta <= 200) userIdx = best
+  }
+  const inBoundary = (m: SessionMessage, idx: number): boolean => {
+    if (userIdx >= 0) return idx > userIdx
+    return (m.time?.created ?? 0) >= baseline
+  }
+  let text = ""
+  for (let i = 0; i < ordered.length; i++) {
+    const m = ordered[i]
+    if (m.type !== "assistant" || !inBoundary(m, i)) continue
+    const t = assistantTextOf(m)
+    if (t && !hasToolPart(m)) text = t // 工作稿（含工具段）跳过
+  }
+  return text
 }
 
 interface Bridge {
@@ -369,14 +411,15 @@ export function createBridge(
       try {
         const probe = await client.session.messages({ path: { id: sessionId } })
         if (finished) return // 探测期间 finish 已赢 race（已结算/已投递），不得双投
-        const turn = turnStateOf(probe?.data ?? [], promptId, baseline)
-        if (turn.text) {
+        // 终稿提取（2026-11-10 工作稿误投事故）：只取纯文本终稿；工作稿不算结果
+        const rescuedText = finalAnswerText(probe?.data ?? [], promptId, baseline)
+        if (rescuedText) {
           finished = true
           settleInflight(tid, undefined, "answered")
           mirror.scheduleUnlock(sessionId)
           void drainQueue(ctx.userId)
           // 投递失败不得上抛：账已结清，补投失败由 deliver 层自己的重试/降级负责
-          await safeDeliver(ctx, `📤 你发来新消息前，上一回合已完成，结果如下：\n\n${turn.text}`).catch(() => {})
+          await safeDeliver(ctx, `📤 你发来新消息前，上一回合已完成，结果如下：\n\n${rescuedText}`).catch(() => {})
           console.log(`[bridge] 接管前抢救：后台回合已完成且未投递，结果已补投 session=${sessionId}`)
           return
         }
@@ -385,15 +428,6 @@ export function createBridge(
       }
       settleInflight(tid, undefined, "superseded")
       mirror.scheduleUnlock(sessionId)
-    }
-
-    /** 完成判定+文本提取统一走回合边界归属（修复⑧）；锚点完整时用注释里的分布 */
-    function classifyNow(listJson: { data?: SessionMessage[] } | undefined): { done: boolean; text: string } {
-      const msgs = listJson?.data ?? []
-      const turn = turnStateOf(msgs, promptId, baseline)
-      if (!turn.anchored) return { done: turn.hasIdle, text: collectReplyText(msgs, baseline) }
-      // 有 idle 才算完；超早事件（别回合完成唬人）由调用方跳过
-      return { done: turn.hasIdle, text: turn.text }
     }
 
     async function finish(kind: "done" | "giveup" | "superseded"): Promise<void> {
@@ -439,7 +473,9 @@ export function createBridge(
       await new Promise((r) => setTimeout(r, 2000))
       try {
         const listJson = await client.session.messages({ path: { id: sessionId } })
-        const { text } = classifyNow(listJson)
+        const msgs = listJson?.data ?? []
+        // 终稿提取：与 rescue 同口径——工作稿（含工具段）不作答案投递
+        const text = finalAnswerText(msgs, promptId, baseline)
         await safeDeliver(
           ctx,
           text

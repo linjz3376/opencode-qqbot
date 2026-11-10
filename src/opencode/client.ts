@@ -85,6 +85,8 @@ export interface SessionMessage {
   type?: string
   time?: { created?: number; completed?: number }
   content?: MessagePart[]
+  /** 运行时工具段（REST 实际返回 tool parts；类型补录 2026-11-10 终稿提取用） */
+  parts?: Array<{ type?: string; tool?: string; state?: { status?: string } }>
   finish?: string
   text?: string
   model?: { id?: string; providerID?: string }
