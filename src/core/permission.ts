@@ -80,6 +80,14 @@ export function createPushGate(deferMs: number): PushGate {
   }
 }
 
+/** QQ_PERM_DEFER_MS 解析（owner 拍板默认 500ms）：空值/非法回退默认——
+ *  注意 Number("")===0，必须先判空再 Number（2026-11-10 回归实证默认值曾因此失效为 0）。 */
+export function resolvePermDeferMs(envValue: string | undefined): number {
+  if (envValue === undefined || envValue.trim() === "") return 500
+  const n = Number(envValue)
+  return Number.isFinite(n) && n >= 0 && n <= 10_000 ? n : 500
+}
+
 export const DECISION_LABELS: Record<PermissionDecision, string> = {
   once: "允许（本次）",
   always: "总是允许（已存入项目白名单）",

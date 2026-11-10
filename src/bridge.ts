@@ -38,6 +38,7 @@ const QUEUE_RECEIPTS_ENABLED = /^(1|true|on)$/i.test(process.env.QQ_QUEUE_RECEIP
 import {
   createPermissionGate,
   createPushGate,
+  resolvePermDeferMs,
   parsePermissionDecision,
   formatPermissionPrompt,
   formatPermissionConflictNotice,
@@ -282,10 +283,7 @@ export function createBridge(
   const eventStream = createEventStream(client.baseUrl)
 // 弹卡延迟窗（owner 2026-11-10 拍板，QQ_PERM_DEFER_MS 可调）：桌面端 autoApprove 实测
 // 20~500ms 内秒回 once——asked 后延迟判定，窗口内被处置的 ask 不推 QQ 卡（与桌面静默放行一致）。
-const PERM_DEFER_MS = (() => {
-  const raw = Number(process.env.QQ_PERM_DEFER_MS ?? "")
-  return Number.isFinite(raw) && raw >= 0 && raw <= 10_000 ? raw : 500
-})()
+const PERM_DEFER_MS = resolvePermDeferMs(process.env.QQ_PERM_DEFER_MS)
 const permPushGate = createPushGate(PERM_DEFER_MS)
 const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   const sessionUnsubs = new Map<string, () => void>()  // sessionID -> SSE 退订
