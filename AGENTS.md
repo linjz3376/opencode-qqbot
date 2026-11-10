@@ -19,15 +19,17 @@
 
 ---
 
-## 1. 发版授权闸（最高优先级，2026-11-10 起施行）
+## 1. 发版授权闸（owner 口径精调 2026-11-10：push 自主，发版逐次同意）
 
-以下三类操作**每一次都必须 owner 当轮明示同意**，此前任何轮次的批准一律不适用：
+| 动作 | 授权 |
+|---|---|
+| **`git push`（提交同步到 GitHub main）** | **自主**——常规工作收尾的自动动作，无需逐次请示 |
+| **GitHub 打包/发版**：`git tag`/GitHub Release/发版产物构建与上传 | owner **当轮明示同意**，无历史豁免 |
+| **`npm publish`**（任何标签/版本） | owner **当轮明示同意** |
+| **版本号变更**（`package.json` version / npm version 系列） | owner **当轮明示同意**（属发版动作） |
 
-1. **`git push`（推送到 github 远端）** —— 视为发版；
-2. **`npm publish`（任何标签/版本）**；
-3. **版本号变更** —— `package.json` 的 `version` 字段、npm version 系列命令。
-
-owner 当轮的开发/测试/部署指令 = 该轮内**本地 commit** 的授权；但上述三类永不默许。
+owner 当轮的开发/测试/部署指令 = 该轮内**本地 commit** 的授权；push 为自主收尾；
+任何「打包/发版/publish/升版」性质的动作永不默许。
 建议的发版顺序（获同意后执行）：改 version → `bun run verify` 全绿 → 全量构建 →
 `npm publish` → `git push` → `git tag v<x.y.z>` 并推 tag。
 
@@ -162,5 +164,6 @@ openqq watchdog --loop --interval-min 10      # 或注册自启：openqq service
 | 2026-11-09 | 架构红线 §2（插件目录/TS 跨平台/迁移清单） | owner 当轮 |
 | 2026-11-09 | 进程处置红线 §5（禁裸杀等五条） | owner「加强审计，加固红线」 |
 | 2026-11-10 | 发版授权闸 §1（push/publish/version 逐次同意） | owner 当轮 |
+| 2026-11-10 | §1 精调：push 自主；GitHub 打包发版/npm publish/升版维持逐次同意 | owner 当轮 |
 | 2026-11-10 | 部署纪律 §3.3（部署≠激活/等空闲/force 收紧） | owner 当轮（上午事故忏悔录） |
 | 2026-11-10 | 角色分层 §0 + 应用者章节 §4 | owner 当轮 |
