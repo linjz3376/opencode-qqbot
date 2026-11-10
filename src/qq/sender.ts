@@ -7,12 +7,12 @@
 // 因此主路径直接透传 AI 的 markdown 原文，交给 QQ 渲染；仅在发送失败时回退纯文本。
 import { sendC2CMessage, sendGroupMessage, getNextMsgSeq, type MessageResponse } from "./api.js"
 import type { MessageContext } from "./types.js"
-import { balanceFences, matchFence, type FenceToken } from "../core/markdown.js"
+import { normalizeOutboundMarkdown, matchFence, type FenceToken } from "../core/markdown.js"
 
 // Markdown 主路径: QQ 原生渲染标准 markdown（含表格/代码），故基本透传，仅做首尾清理
-// 与围栏配对兜底——未闭合围栏会被 QQ 吞成一张空代码卡（2026-11-10 截图实证）。
+// 与围栏归一（补未闭合 + 去空围栏对）——两者都会在 QQ 里变成空代码卡（2026-11-10 实证）。
 export function formatForQQMarkdown(text: string): string {
-  return balanceFences(text.trim())
+  return normalizeOutboundMarkdown(text.trim())
 }
 
 // 纯文本兜底: 去除所有 markdown 标记（当 markdown 发送失败时使用）

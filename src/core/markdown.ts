@@ -62,6 +62,30 @@ export function labelBlock(label: string, body: string): string {
 }
 
 /**
+ * 出站兜底（补）：去掉「空围栏对」——开栏下一行就是同字符同长度闭栏。
+ * 嵌套围栏/套娃预览时，多余的成对围栏会在 QQ 里渲染成一张空白代码卡
+ * （2026-11-10 第二轮截图实证），而空代码块本身没有任何信息量。
+ * 含空白的空块同样去除；非空块逐字保留。
+ */
+export function stripEmptyFences(text: string): string {
+  const lines = text.split("\n")
+  const out: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const open = matchFence(lines[i])
+    if (open) {
+      const next = i + 1 < lines.length ? matchFence(lines[i + 1]) : null
+      const empty = next !== null && next.ch === open.ch && next.len >= open.len && next.info === ""
+      if (empty) {
+        i += 1
+        continue
+      }
+    }
+    out.push(lines[i])
+  }
+  return out.join("\n")
+}
+
+/**
  * 出站兜底：补齐未闭合的围栏。QQ 渲染器把未闭合围栏吞到消息末尾并渲染成空卡片，
  * 因此在发送前把「开栏无闭栏」补成配对（内容仍是原文，只是补一个闭合标记）。
  * 已配对的文本逐字返回，幂等。
@@ -80,4 +104,14 @@ export function balanceFences(text: string): string {
   if (!open) return text
   const closer = open.ch.repeat(open.len)
   return text.endsWith("\n") ? `${text}${closer}` : `${text}\n${closer}`
+}
+
+/**
+ * 出站 markdown 归一：先补配对、再清空块（顺序不可换——配对本就会造出新的空对）。
+ * 归一后为空则回退到只配对的结果，避免整条消息被清空。
+ */
+export function normalizeOutboundMarkdown(text: string): string {
+  const balanced = balanceFences(text)
+  const stripped = stripEmptyFences(balanced)
+  return stripped.trim() ? stripped : balanced
 }

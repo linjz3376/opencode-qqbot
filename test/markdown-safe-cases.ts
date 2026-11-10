@@ -5,7 +5,9 @@ import {
   balanceFences,
   labelBlock,
   matchFence,
+  normalizeOutboundMarkdown,
   startsWithBlockSyntax,
+  stripEmptyFences,
 } from "../src/core/markdown.ts"
 import { buildDigest } from "../src/opencode/mirror.ts"
 import { renderHistory } from "../src/opencode/history.ts"
@@ -53,6 +55,32 @@ check(
 )
 check("matchFence 识别缩进围栏", matchFence("   ```ts")?.info === "ts")
 check("matchFence 拒绝行内围栏", matchFence("前缀 ```ts") === null)
+
+// —— 2b) 空围栏对清理（第二轮截图：嵌套预览渲染出空白代码卡）——
+check("空围栏对删除", stripEmptyFences("前言\n```\n```\n后记") === "前言\n后记")
+check("带语言空块删除", stripEmptyFences("```ts\n```") === "")
+check("非空块保留", stripEmptyFences("```\ncode\n```") === "```\ncode\n```")
+check("空清理幂等", stripEmptyFences(stripEmptyFences("a\n```\n```\nb")) === "a\nb")
+const nested = [
+  "证据：本地预览",
+  "",
+  "```",
+  "📋 桌面问答摘要",
+  "🧑 执行 echo qq-approve-live-9",
+  "🤖",
+  "```",
+  "qq-approve-live-9",
+  "```",
+  "```",
+  "",
+  "后续说明",
+].join("\n")
+const nestedOut = normalizeOutboundMarkdown(nested)
+check("嵌套预览不再产生空代码卡", !/\n`{3}\n`{3}\n/.test(nestedOut), JSON.stringify(nestedOut.slice(-40)))
+check("嵌套预览围栏数降为 2", countOf(nestedOut, "```") === 2, String(countOf(nestedOut, "```")))
+check("嵌套预览正文零丢失", nestedOut.includes("📋 桌面问答摘要") && nestedOut.includes("qq-approve-live-9") && nestedOut.includes("后续说明"))
+check("归一幂等", normalizeOutboundMarkdown(nestedOut) === nestedOut)
+check("孤立围栏不把消息清空", normalizeOutboundMarkdown("```").trim() !== "")
 
 // —— 3) 摘要卡：正是本次截图那一轮 ——
 const digest = buildDigest(mk([

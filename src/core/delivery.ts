@@ -10,7 +10,7 @@ import type { Config } from "../config.js"
 import type { MessageContext } from "../qq/types.js"
 import { getAccessToken, sendC2CMessage, sendGroupMessage, getNextMsgSeq } from "../qq/api.js"
 import { replyToQQ } from "../qq/sender.js"
-import { balanceFences, matchFence } from "./markdown.js"
+import { matchFence, normalizeOutboundMarkdown } from "./markdown.js"
 import { ReplyLimiter } from "./reply-limiter.js"
 import { recordMessage, scopeKeyOf } from "./context-buffer.js"
 
@@ -407,8 +407,8 @@ export function createDelivery(
     const token = await getAccessToken(config.qq.appId, config.qq.clientSecret)
     const seq = getNextMsgSeq(passiveMsgId ?? "")
     const isGroup = ctx.type === "group" && ctx.groupId
-    // 主动 markdown 同样走围栏配对兜底（与被动回复同口径，防未闭合围栏吞成空卡片）
-    const mdText = balanceFences(text)
+    // 主动 markdown 同样走围栏归一（与被动回复同口径，防未闭合/空围栏对渲染成空卡片）
+    const mdText = normalizeOutboundMarkdown(text)
     try {
       if (isGroup) {
         const r = await sendGroupMessage(token, ctx.groupId!, mdText, passiveMsgId, seq, true)
