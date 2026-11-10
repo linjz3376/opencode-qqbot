@@ -167,9 +167,26 @@ export function heartbeatDecision(lastHeartbeatAt: number, now: number, interval
 
 /** 心跳文案：进行中 + 已运行 + 最近动作 + 内联停滞自检（idle≥30min 明示疑似停滞）。纯函数供测试。 */
 export function heartbeatText(execMin: number, idleMin: number, lastAction?: string): string {
-  const action = lastAction ? `｜最近动作：${lastAction}` : ""
-  const stale = idleMin >= 30 ? `｜⚠️ 已 ${idleMin} 分钟无进展（疑似停滞，可 /stop 后重发）` : ""
-  return `⏳ 后台任务执行中｜已运行 ${execMin} 分钟${action}${stale}`
+  const action = lastAction ? `，刚才在处理【${lastAction}】` : ""
+  const stale = idleMin >= 30 ? `。⚠️ 注意：已 ${idleMin} 分钟没有任何动静，疑似卡住——可发 /stop 中止后重发` : ""
+  return `⏳ 你的任务还在后台执行：已用时 ${execMin} 分钟${action}${stale}。完成后我会自动把结果发给你。`
+}
+
+// ===== 无 idle 兜底（2026-11-10 僵尸心跳事故根修）=====
+// 事故链：同一 msgId 被重复派发（08:43/08:47）→ 第二次 prompt 按接管语义打断第一次回合 →
+// 该回合随后又被新消息接管致死——被杀的回合永远不产生 idle 行 → 完成检查 hasIdle 恒 false →
+// 后台等待僵尸化 39 分钟假心跳（09:13/09:29 实证）。口径修正：「边界内有正文」即回合实质已完
+// （与防线 A 同原则）——正文在但 idle 缺失且超过宽限期 → 按完成投递。
+export const MISSING_IDLE_GRACE_MS = 10 * 60_000
+
+/** 无-idle 完成判定：有正文 + 超过宽限期无新进展。纯函数供测试。 */
+export function missingIdleDone(
+  turn: { hasIdle: boolean; text: string },
+  lastProgressAt: number,
+  now: number,
+  graceMs: number = MISSING_IDLE_GRACE_MS,
+): boolean {
+  return !turn.hasIdle && Boolean(turn.text) && now - lastProgressAt >= graceMs
 }
 
 interface Bridge {
@@ -390,7 +407,9 @@ export function createBridge(
           const probe = await client.session.messages({ path: { id: sessionId } })
           const turn = turnStateOf(probe?.data ?? [], promptId, baseline)
           if (turn.anchored && turn.superseded) return finish("superseded")
-          if (turn.anchored && !turn.hasIdle) {
+          // 2026-11-10 修正：无 idle 但有正文=被杀回合实质已完（重复派发→接管打断链不产生 idle），
+          // 不得再以「本回合尚未结束」为由忽略——正文在即交付（与防线 A 同口径）。
+          if (turn.anchored && !turn.hasIdle && !turn.text) {
             console.log(`[bridge] 忽略他回合完成事件（本后台回合尚未结束）session=${sessionId}`)
             return
           }
@@ -490,7 +509,9 @@ export function createBridge(
         if (turn.superseded) {
           // DEF-qqbot-20261107-P2：死回合立即按被打断终态结算（交付+销账在 finish）
           await finish("superseded")
-        } else if (turn.hasIdle) {
+        } else if (turn.hasIdle || missingIdleDone(turn, lastProgressAt, now)) {
+          // 2026-11-10 僵尸事故根修：被杀回合无 idle（重复派发→接管打断链），
+          // 有正文+超宽限即实质已完，按完成投递，杜绝假心跳僵尸。
           await finish("done")
         }
       } catch (error) {
