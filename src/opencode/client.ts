@@ -551,20 +551,30 @@ export function createClient(baseUrl: string): OpencodeClient {
           //（本回合 user 尚未落库、回落把邻回合答案亮出来），不得张冠李戴，
           // 继续等本回合落库；否则该回合会被邻回合答案"假完成"并在去重拦截后
           // 无声消失。
-          if (!turn.anchored && turn.text && fallbackAnswerStolen(msgs, turn.text)) {
+          const stolen = !turn.anchored && !!turn.text && fallbackAnswerStolen(msgs, turn.text)
+          // DEF-9 深挖临时桩（2026-11-10 深夜专项）：记录每次判定的证据面，
+          // 定位残余「假已答零出站」路径后移除。
+          console.log(
+            `[pw9] hasIdle anchored=${turn.anchored} textLen=${turn.text.length} stolen=${stolen} superseded=${turn.superseded} msgCount=${msgs.length} lastUser=${(() => {
+              let idx = -1
+              msgs.forEach((m, i) => {
+                if (m.type === "user") idx = i
+              })
+              return idx
+            })()} prompt=${promptId.slice(0, 8)}`,
+          )
+          if (!turn.anchored && turn.text && stolen) {
             console.log(`[opencode] 回落答案归属邻回合，弃用继续等 prompt=${promptId}`)
           } else {
-            // Aggregate text parts from ALL assistant messages of this turn,
-            // dropping reasoning/tool parts. In practice only the final assistant
-            // carries text; earlier ones are reasoning+tool.
             return turn.text || "(AI 未返回内容)"
           }
         }
-        // DEF-qqbot-20261107-P2：死回合不等待——检测到同会话新输入接管立即以
-        // 「被打断」终态抛出（bridge 给用户可见交代 + superseded 销账）。检测延迟
-        // ≈新回合首个 assistant/idle 行落库（实证探针回合约 2 秒）。
-        if (turn.superseded) throw new SupersededError(sessionId)
+        if (turn.superseded) {
+          console.log(`[pw9] superseded throw prompt=${promptId.slice(0, 8)}`)
+          throw new SupersededError(sessionId)
+        }
       }
+      console.log(`[pw9] deadline exit prompt=${promptId.slice(0, 8)}`)
       throw new Error(`AI 响应超时（${turnTimeoutMinutes()} 分钟）`)
     },
   }

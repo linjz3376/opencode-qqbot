@@ -1335,6 +1335,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         }
         // DEF-qqbot-20261110-9（2026-11-10 回归实证）：有正文但被 24h 去重拦截时
         // 不得记 answered——那是「台账假已答、用户侧零内容」。改记 error 并给用户交代。
+        console.log(`[pw9] settle-check textLen=${replyText.trim().length} delivered=${turnDelivered} track=${shortId(trackId)}`)
         if (replyText.trim() && !turnDelivered) {
           await safeDeliver(ctx, "⚠️ 本轮结果与 24h 内已发送内容重复，已被防重拦截（未重复投递）。如非预期请重发或换个说法")
         }
