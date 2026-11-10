@@ -107,12 +107,13 @@ watchdog/restart/autostart 已全部收编为包内 TS（`core/watchdog.ts` + �
 
 ### 4.1 形态 A：opencode 插件（推荐）
 ```bash
-opencode plugin add @linjz/opencode-qqbot     # 或在 opencode.json(c) 的 plugins 数组加包名
-npx @linjz/opencode-qqbot setup               # 手机 QQ 扫码绑定，自动写 ~/.openqq/.env
-openqq service install                        # 自启注册（win=计划任务 / linux=systemd / mac=launchd）
+opencode plugin add @linjz/opencode-qqbot        # 或在 opencode.json(c) 的 plugins 数组加包名
+npx -p @linjz/opencode-qqbot openqq-setup        # 手机 QQ 扫码绑定，自动写 ~/.openqq/.env
+openqq service install                           # 自启注册（win=计划任务 / linux=systemd / mac=launchd）
 ```
 - 常驻：插件引导器在 OpenCode 在线时自动拉起 bot 并巡检（看门狗内嵌）；serve 重启自动恢复。
-- 升级：`opencode plugin update @linjz/opencode-qqbot` 后 `openqq restart`（等空闲）激活。
+- 升级：`opencode plugin add @linjz/opencode-qqbot@latest`（重装同目录即更新），
+  然后 `openqq restart`（等空闲）激活新代码。
 
 ### 4.2 形态 B：独立部署（无 opencode 桌面环境的机器）
 ```bash
