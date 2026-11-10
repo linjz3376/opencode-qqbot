@@ -250,7 +250,7 @@ interface InflightEntry {
 | 超时语义 | 会话没有超时限，只有弹窗有 TTL：30min 只通知转后台，6h 硬上限兜底 | 长任务合法；误杀长回合会造成 -32603 级联 |
 | 审批 fail-closed | 无匹配选项=cancelled；拒绝后显式 cancel；冲突即告警 | 安全底线 |
 | 会话归属目录 | 会话 ⇔ location.directory 强绑定；load 携带会话自身目录 | 对齐官方 ACP 归属校验；切会话不建孤儿 |
-| 传输架构 | **目标形态：纯 service 客户端**（与桌面同构）——REST `delivery:"steer"` prompt（声明前台在场 → 引擎审批门闭合）+ SSE 事件订阅（`permission.asked` 即时推送）+ REST 裁决（permission reply 端点结算 deferred）；ACP 子进程为过渡通道，切换验收后退役，`QQBOT_TRANSPORT` 保留回退开关 | 引擎审批门是"在场语义"：steer=前台、queue=无人值守；QQ 与桌面必须共享单实例/单总线/单库，会话天然同步；ACP 私有服务器（`serve --stdio --port 0`）破坏该模型，仅为当前引擎版本下的过渡真闸 |
+| 传输架构 | **目标形态：纯 service 客户端**（与桌面同构）——REST `delivery:"steer"` prompt（声明前台在场 → 引擎审批门闭合）+ SSE 事件订阅（`permission.asked` 即时推送）+ REST 裁决（permission reply 端点结算 deferred）；ACP 的独有能力（真闸/流式/elicitation/会话管理）在 REST 客户端形态下全部有等价物，**切换验收后退役**：停止拉起 ACP 子进程，`acp.ts/acp-session.ts` 保留 dormant 于 `QQBOT_TRANSPORT` 开关后作应急回退，稳定观察期后删码 | 引擎审批门是"在场语义"：steer=前台、queue=无人值守；QQ 与桌面必须共享单实例/单总线/单库，会话天然同步；ACP 私有服务器（`serve --stdio --port 0`）破坏该模型，仅为当前引擎版本下的过渡真闸 |
 | 杀/重启权威 | **唯一权威 = superviseOnce（监督矩阵）**；`openqq restart` 降级为请求式入口，复用同一 grace-kill 原语（确认死亡才拉），不设第二套杀逻辑 | kill+spawn 分散多处 = 互杀与边杀边拉的根源；所有重启受冷却/强度/give-up 约束 |
 
 ## 5. 传输切换验收判据（steer 架构落地门禁）
