@@ -128,6 +128,9 @@ export interface OpencodeClient {
     /** DEF-qqbot-20261112-1：引擎待审批按 location 实例分仓，裸查只命中服务端 cwd
      *  实例——必须带会话自身目录（x-opencode-directory）；缺省=裸查（旧行为兼容） */
     list(opts?: { directory?: string }): Promise<{ data?: PermissionRequest[] }>
+    /** DEF-qqbot-20261112-4（抄袭桌面形态）：引擎对该端点按会话自身实例路由
+     *  （FormLocationMiddleware 同款模式）——跨实例天然正确，零 directory 簿记 */
+    forSession(sessionID: string): Promise<{ data?: PermissionRequest[] }>
     reply(opts: {
       path: { sessionID: string; requestID: string }
       body: { decision: PermissionDecision }
@@ -417,6 +420,9 @@ export function createClient(baseUrl: string): OpencodeClient {
             headers: opts?.directory ? { "x-opencode-directory": opts.directory } : undefined,
           }),
         )
+      },
+      async forSession(sessionID) {
+        return json(await req(`/session/${sessionID}/permission`))
       },
       async reply(opts) {
         return json(

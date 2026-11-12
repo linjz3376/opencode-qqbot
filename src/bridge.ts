@@ -707,18 +707,14 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   async function interactionTick(): Promise<void> {
     try {
       // 权限轮询兜底（SSE permission.asked 即时推送为主，轮询为断线兜底，双防线）。
-      // DEF-qqbot-20261112-1：引擎待审按 location 实例分仓，按绑定会话目录分组轮询
-      // （无目录缓存的 legacy 会话回退裸查=服务端 cwd 实例），跨目录按请求 id 去重。
+      // DEF-qqbot-20261112-4（抄袭桌面形态）：改按会话端点（GET /session/:id/permission，
+      // 引擎按会话自身实例路由）逐绑定会话轮询——零 directory 簿记；只有绑定会话才
+      // 可能映射 QQ 用户（usersOfSession），未绑定会话的待审本就不该推 QQ。
       {
-        const dirs = new Set<string>()
-        for (const entry of sessions.all()) {
-          if (entry.directory) dirs.add(entry.directory)
-        }
-        const lists = await Promise.all([
-          client.permission.list().catch(() => undefined),
-          ...[...dirs].map((d) => client.permission.list({ directory: d }).catch(() => undefined)),
-        ])
         const seen = new Map<string, PermissionRequest>()
+        const lists = await Promise.all(
+          sessions.all().map((entry) => client.permission.forSession(entry.sessionId).catch(() => undefined)),
+        )
         for (const res of lists) {
           for (const req of res?.data ?? []) {
             if (!seen.has(req.id)) seen.set(req.id, req)

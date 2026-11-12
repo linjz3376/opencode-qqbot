@@ -211,7 +211,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 审批门 | 引擎侧请求-响应阻塞：工具停在裁决前（deferred）；steer 声明前台在场 → 门闭合；`permission.asked` 经 SSE 即时推送；REST reply 结算（once/always/reject）——**reject 即引擎以 DeclinedError 释放回合**（reply 本身就是释放，无需额外 cancel；同会话挂起请求整批一并 reject）；无匹配裁决 fail-closed（cancelled）；拒绝遇"他端已处理"冲突即告警（不静默）。**权限 REST 全链（list/reply/轮询/延迟闸反查）必须携带会话自身 location 上下文（`x-opencode-directory`），否则命中错误实例仓**（见下行） |
 | 权限实例上下文（2026-11-12 引擎 v2.2.6 源码考据定案） | 引擎待审批是 **per-location 实例内存仓**（core/permission.ts pending Map 随 Location 节点实例化）；HTTP 请求 location 上下文解析三规则：`location[directory]` 查询参数 > `x-opencode-directory` 头 > 服务端进程 cwd（server/location.ts requestRef）；`GET /permission/request` 只列**上下文实例**的待审；`GET /session/:id/permission` 由服务端按会话自身实例解析（跨实例天然正确）；桌面端 auto-approve（客户端本地设置）= `permission.asked` 事件驱动毫秒级回 once + 每次连接按目录全仓 sweep 批陈案 | 决定 bot 反查/轮询/回复三调用全部带会话目录；桌面「静默放行」与延迟闸共存是官方既定行为（非缺陷）；SSE 事件全局可达（与 REST 实例化是两条通道，事件信、列表盲的错配即 DEF-qqbot-20261112-1 根因） |
 | 审批卡片（card-approval） | 四键（允许一次/总是/拒绝/忽略）+ 文字裁决等价；intent 位 + 互动响应时限；过期按钮拒识；拒绝遇"他端已处理"冲突即告警（不静默） |
-| 权限保险网（core/permission.ts） | 裁决等待的兜底：10min 无裁决告警、冲突裁决通知。**弹卡延迟闸 defer 判定反查必须带会话目录**（同实例仍悬置才推；弃推依据 = SSE `permission.replied` 事件 + 同实例反查双保险）；桌面开着时 auto-approve 秒回 → 反查已处置 → 不推卡（与桌面静默放行一致）；桌面关着时请求真悬置 → 反查命中 → QQ 卡接管审批 |
+| 权限保险网（core/permission.ts） | 裁决等待的兜底：10min 无裁决告警、冲突裁决通知。**弹卡延迟闸 defer 判定反查必须带会话目录**（同实例仍悬置才推；弃推依据 = SSE `permission.replied` 事件 + 同实例反查双保险）；桌面开着时 auto-approve 秒回 → 反查已处置 → 不推卡（与桌面静默放行一致）；桌面关着时请求真悬置 → 反查命中 → QQ 卡接管审批。**交互监听兜底（12s）用按会话端点 `GET /session/:id/permission`**（引擎按会话实例路由，FormLocationMiddleware 同款；只扫绑定会话——未绑定会话的待审本不推 QQ，零 directory 簿记） |
 | 表单桥（form-bridge） | REST 表单通道：渲染/回执/台账（form-journal）/孤儿表单作废 |
 | 提问（question-form） | 纯函数题库：schema 归一（合并 `*_custom`）、字母/序号/原文/自定义/多选解析；未答语义——可选题跳过（accept 部分答案）、必填题中止（cancel）；30min TTL，旧挂起提问作废防串线 |
 
@@ -316,5 +316,6 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 | 日期 | 章节 | 内容 | 依据 |
 |---|---|---|---|
+| 2026-11-12 | §3.6 | DEF-qqbot-20261112-3 双防线同请求收养不重复推卡；交互监听兜底改按会话端点（抄袭桌面形态：引擎按会话实例路由，零 directory 簿记）；闸门恢复 500ms（owner 当轮明示改 .env）；挂起槽计时器 unref 修测试链挂死 | ZERO3 实测双卡实证（bot.out.log 11:37:01-02 同请求两卡）；verify 46 套件 EXIT=0 |
 | 2026-11-12 | §3.4 / §4 | 新增「官方对齐口径」：P0 SDK 中间件链对照（concurrencyGuard 串行/messageFilter 去重/有界队列/被动窗），同构·超集·增强·差异四级分类，差异项入学习 backlog；新增「官方对齐基准」决策行 | openclaw-qqbot@8998881 / dsh-qqbot@0ddf232e / @tencent-connect/qqbot-nodejs@1.0.5 源码考据（快照 %TEMP%\opencode\qqbot-sync\20261112-104047） |
 | 2026-11-12 | §3.6 / §4 | 新增「权限实例上下文」考据行（per-location 待审仓 + location 解析三规则 + 桌面 auto-approve 机制）；权限 REST 全链携带 `x-opencode-directory`；延迟闸反查同实例化；新增「完成判定同口径」决策（textCompleted） | DEF-qqbot-20261112-1/2；opencode v2.2.6 源码考据（sst/opencode tag dc2ffcf：core/permission.ts、server/handlers/permission.ts、server/location.ts、app/session/requests/auto-approve.ts、core/session/message-updater.ts） |
