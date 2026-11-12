@@ -161,6 +161,14 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 **孤儿处置**：孤儿巡检每 60s 扫描；仅新增孤儿且距上次提醒 >10min 发汇总（不刷屏）；修复路径 = /ledger check（自动分类）与 /ledger settle（人工，二次确认）；**禁止静默删除**，所有结清带 settleReason 并留日志。
 
+**官方对齐口径（2026-11-12 P0 考据，基准=tencent-connect 双源 + @tencent-connect/qqbot-nodejs@1.0.5 SDK 源码）**：
+
+- 官方事实标准 = SDK 洋葱中间件链：errorHandler → messageFilter（回声+去重）→ 访问控制（空名单 fail-closed）→ 历史/门控/清洗 → 三层限流 → 斜杠命令 → 待答截获 → **concurrencyGuard** → 引用/附件/信封。`concurrencyGuard` 官方注释明言"同 peer 并发调平台会 500"——同用户串行是官方硬性实践；dsh 选用 merge 策略（忙时缓冲、忙完批量合并为一个 survivor）+ maxQueue 20 + maxProcessingMs
+- 同构/超集（审计结论：维持现状）：每用户串行单飞=concurrencyGuard 同构；命令/裁决先于队列=官方 slash/questionAnswer 前置同构；K1/K2 去重=官方 messageFilter（进程内 5s/1000 条）的超集——bot 有重启重派/RESUME 回放长窗（DEF-20261110-2 实证），官方把回合生命周期交宿主 runtime 无此需求；QUEUE_MAX 满员 queue-full 用户可见结算，优于官方默认静默 onDrop；被动窗 5min 与官方群 TTL 一致
+- 合理增强（纯中继架构必需，官方无对应层）：在途台账/30min 转后台/24h 兜底/supersede 接管/看门狗/启动对账
+- 差异项（入学习 backlog，待 owner 裁定是否吸收）：① merge 批量合并（bot 逐条排队，消息洪流 N 连发——吸收会改变"一条消息一回合"的用户语义）；② 单条消息被动回复次数帽（官方 openclaw 取 4 次/1h，bot 仅控日配额+被动窗）；③ urgentPredicate 高优先级跳队（/cancel 语义不同，可借鉴）
+- 举一反三盲区扫描结论（裸发 REST 按服务端路由方式分类）：会话域安全（message.ts 全局 Session.Service；session.ts `instances.provide(info)` 按会话实例路由）；表单域安全（引擎有 FormLocationMiddleware 专门按会话路由）；**权限域曾是唯一 ambient 盲区**（引擎未给权限端点对等 middleware）→ 已由 x-opencode-directory 全链携带修复（DEF-qqbot-20261112-1），并建议上游 issue 对齐 FormLocationMiddleware 模式
+
 ### 3.5 会话与台账（inflight-journal）
 
 **台账条目定义**（InflightEntry，所有扩展字段可选、向后兼容旧文件）：
@@ -279,6 +287,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 审批 fail-closed | 无匹配选项=cancelled；拒绝后显式 cancel；冲突即告警 | 安全底线 |
 | 会话归属目录 | 会话 ⇔ location.directory 强绑定；**权限链 REST 兑现「load 携带会话自身目录」：`x-opencode-directory` 头贯穿 list/reply/轮询/延迟闸反查**（映射缓存 directory，缺省回退裸查=服务端 cwd 实例） | 对齐官方会话归属校验；切会话不建孤儿；2026-11-12 实证裸查致项目会话审批全链失明（DEF-qqbot-20261112-1） |
 | 完成判定同口径 | turnStateOf 的 text 判据与 finalAnswerText 交付判据必须一致：无 idle 但正文所在消息未完成（`time.completed` 缺失，典型=权限挂起中工具阻塞）= 回合仍在途，不得视为「实质已完」早交 | 2026-11-12 实证：权限挂起回合被 SSE 完成事件误结，交付「无文本产出」假完成（DEF-qqbot-20261112-2）；引擎 step.ended/failed/interrupted 均落 completed，被杀回合不受影响 |
+| 官方对齐基准 | 消息队列/入站管道对齐 P0 官方 SDK 中间件链（concurrencyGuard/messageFilter/accessPolicy/rateLimiter）；差异项（merge 合并/单条被动回复帽/urgentPredicate）入学习 backlog，owner 逐项裁定吸收 | 2026-11-12 P0 考据（openclaw-qqbot@8998881 / dsh-qqbot@0ddf232e / qqbot-nodejs@1.0.5 源码）；详见 §3.4「官方对齐口径」 |
 | 传输 | **单一传输路径：纯 service 客户端**（与桌面同构）——REST `delivery:"steer"` prompt + SSE 事件订阅（含 permission.asked 即时推送）+ REST 裁决；无 ACP 子进程、无私有服务器 | 引擎审批门=在场语义（steer 前台 / queue 无人值守）；QQ 与桌面共享同一服务的单实例、单事件总线、单数据库，会话天然同步——传输路径多于一条即破坏该模型 |
 
 ## 5. 数据与配置
@@ -307,4 +316,5 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 | 日期 | 章节 | 内容 | 依据 |
 |---|---|---|---|
+| 2026-11-12 | §3.4 / §4 | 新增「官方对齐口径」：P0 SDK 中间件链对照（concurrencyGuard 串行/messageFilter 去重/有界队列/被动窗），同构·超集·增强·差异四级分类，差异项入学习 backlog；新增「官方对齐基准」决策行 | openclaw-qqbot@8998881 / dsh-qqbot@0ddf232e / @tencent-connect/qqbot-nodejs@1.0.5 源码考据（快照 %TEMP%\opencode\qqbot-sync\20261112-104047） |
 | 2026-11-12 | §3.6 / §4 | 新增「权限实例上下文」考据行（per-location 待审仓 + location 解析三规则 + 桌面 auto-approve 机制）；权限 REST 全链携带 `x-opencode-directory`；延迟闸反查同实例化；新增「完成判定同口径」决策（textCompleted） | DEF-qqbot-20261112-1/2；opencode v2.2.6 源码考据（sst/opencode tag dc2ffcf：core/permission.ts、server/handlers/permission.ts、server/location.ts、app/session/requests/auto-approve.ts、core/session/message-updater.ts） |
