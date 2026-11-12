@@ -948,7 +948,13 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     settle: (userId: string, key: string, confirm: boolean): string => {
       const view = queueViewFor(userId)
       const hits = view.inflightEntries.filter(
-        (e) => e.msgId === key || e.msgId.endsWith(key) || shortId(e.msgId) === key,
+        (e) =>
+          e.msgId === key ||
+          e.msgId.endsWith(key) ||
+          // DEF-qqbot-20261112-6：QQ msgId 恒以 "!" 结尾，人工/Agent 抄尾号时极易
+          // 丢 "!"（2026-11-12 实证：settle 三连"没有匹配"的根因）——容忍 bang 丢失
+          e.msgId.endsWith(`${key}!`) ||
+          shortId(e.msgId) === key,
       )
       if (hits.length === 0) return `台账在途里没有匹配「${key}」的条目`
       if (hits.length > 1) return `尾号「${key}」匹配到 ${hits.length} 条，请给更长的尾号`
