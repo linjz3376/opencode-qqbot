@@ -1,4 +1,4 @@
-﻿// @input:  ../opencode/client, ../qq/types, fs/path/os
+// @input:  ../opencode/client, ../qq/types, fs/path/os
 // @output: createPermissionGate, parsePermissionDecision, formatPermissionPrompt, DECISION_LABELS,
 //          PERM_PROMPT_TTL_MS, PERM_NUDGE_MS, createPushGate（弹卡延迟闸）,
 //          classifyApprovalReplyError, formatPermissionConflictNotice（纯函数供测试）, ApprovalReplyFailure
@@ -232,7 +232,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
   // design §3.6 权限保险网：10min 无裁决告警。只报一次（计时器随建槽设置、
   // 随裁决/TTL/清槽取消）；到点时槽位仍属于同一请求才发，防误报旧请求。
   function startNudgeTimer(userId: string, requestId: string, ctx: MessageContext): ReturnType<typeof setTimeout> {
-    return setTimeout(() => {
+    const t = setTimeout(() => {
       if (pendingPermissions.get(userId)?.request.id !== requestId) return
       console.log(`[perm] 10min 无裁决告警 user=${userId.slice(0, 8)}… request=${requestId}`)
       void safeDeliver(
@@ -240,6 +240,8 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         "⏳ 一条审批已等待 10 分钟未裁决，30 分钟到期将自动拒绝。如需继续请尽快裁决（允许/总是/拒绝）。",
       ).catch(() => {})
     }, deps.nudgeMs ?? PERM_NUDGE_MS)
+    t.unref?.()
+    return t
   }
 
   function clearTimers(entry: PendingPermission): void {
@@ -255,6 +257,39 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     mainSessionId: string,
   ): Promise<PermissionDecision> {
     return new Promise<PermissionDecision>((resolve) => {
+      // DEF-qqbot-20261112-3（2026-11-12 ZERO3 实测双卡实证）：SSE 即时推送路径
+      // （flushPermPush→pushExternal）可能已为同一请求建槽推卡——promptAndWait 轮询
+      // 路径随后发现同请求再进 waitForDecision 时，必须收养既有槽（换真 resolver、
+      // 刷 TTL、清 restored），绝不再推第二张卡。修复前轮询失明掩盖了该竞态。
+      const existing = pendingPermissions.get(ctx.userId)
+      if (existing && existing.request.id === request.id) {
+        clearTimers(existing)
+        const adopted: PendingPermission = {
+          ...existing,
+          resolve,
+          mainSessionId,
+          ctx,
+          createdAt: Date.now(),
+          restored: false, // 收养后裁决走 entry.resolve（真 waiter），非直连 reply
+          directory: deps.directoryOf?.(ctx.userId),
+          origin: "bot",
+        }
+        adopted.alertTimer = startNudgeTimer(ctx.userId, request.id, ctx)
+        adopted.timer = setTimeout(() => {
+          if (pendingPermissions.get(ctx.userId)?.request.id === request.id) {
+            pendingPermissions.delete(ctx.userId)
+            savePendingPermMap(pendingPermissions)
+            deps.onDecision?.(ctx.userId) // TTL 自动拒绝也要唤醒被守卫挡回的队列
+            resolve("reject")
+            void safeDeliver(ctx, "审批超时（30 分钟），已自动拒绝该权限请求").catch(() => {})
+          }
+        }, PERM_PROMPT_TTL_MS)
+        adopted.timer.unref?.()
+        pendingPermissions.set(ctx.userId, adopted)
+        savePendingPermMap(pendingPermissions)
+        console.log(`[perm] 同请求收养既有审批槽（不重复推卡）user=${ctx.userId.slice(0, 8)}… request=${request.id}`)
+        return
+      }
       const createdAt = Date.now()
       // DEF-qqbot-20261110-3（P2，2026-11-10 实战实证）：覆写单一槽前必须先清旧槽
       // 计时器——SSE pushExternal 先建的 external 槽被本 waiter 覆写后，其 TTL/告警
@@ -274,6 +309,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
           void safeDeliver(ctx, "审批超时（30 分钟），已自动拒绝该权限请求").catch(() => {})
         }
       }, PERM_PROMPT_TTL_MS)
+      timer.unref?.() // 不阻塞进程退出（测试链收尾；生产为长驻进程无影响）
 
       pendingPermissions.set(ctx.userId, {
         request,
@@ -376,6 +412,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
           deps.onDecision?.(uid) // 恢复槽 TTL 拒绝也要唤醒队列
         }
       }, left)
+      timer.unref?.()
       pendingPermissions.set(uid, {
         request: e.request,
         mainSessionId: e.mainSessionId,
@@ -433,6 +470,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         .catch(() => {})
       void safeDeliver(ctx, "审批超时（30 分钟），已自动拒绝该权限请求").catch(() => {})
     }, PERM_PROMPT_TTL_MS)
+    timer.unref?.()
 
     pendingPermissions.set(userId, {
       request,
