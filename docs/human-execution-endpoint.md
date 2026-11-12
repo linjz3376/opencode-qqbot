@@ -55,3 +55,10 @@ AEE = 运行「被测 persona 真实客户端」的宿主（物理机/虚拟机/
 - 指挥者通过观察通道读执行者结果；capture() 产出即 UI 主证来源。
 - persona 面（聊天窗）任意时刻只绑定一个会话：指挥会话与执行会话互斥切换（交权/收权走显式命令，切换后首动作前必须 address 复验）。
 - 新端点接入 = 实现一个适配器 + 过准入清单 + 在任务书通道表登记可用性与授权，上层架构零改动。
+
+## 七、win-native 参考实现：135 驱动链
+
+- 驱动资产：`exec135.ps1`（推 `uat-driver.ps1` 到目标机 → 注册 /it 计划任务隐藏执行 → 回读 result.json + 截图 base64 落证据目录）。步骤集：`probe`（环境闸：进程/前台/分辨率）→ `qqconfirm`/`qqclick`（顶号重登，缓存密码常免扫码）→ `qqopenchat`（寻址会话）→ `qqsend`/`qqsendA`/`qqsendB`（发消息）→ `qqshot`（截图）→ `qqclick`/`qqconfirm`（点卡/对话框）。资产随验收轮存 `test/reports/<轮次>/tooling/`。
+- 凭据：`%TEMP%\opencode\cred-135.xml`（WinRM）——经密钥注入点单点只读（纪律 6），不回显、不外带。
+- 唤窗规程：QQ NT 重启后常仅驻托盘（无 MainWindow）——probe 须能识别（勿以进程数判断可用性，以窗口+取证为准）并二次启动唤出主面板；窗口几何可能漂移，先经 /it 任务内 SetWindowPos 归位到司机坐标系再取坐标。
+- 会话寻址：每阶段开头 probe+读截图确认目标会话标识（如「开发角色」= 被测 bot 聊天）——禁止假设当前上下文（纪律 1）。
