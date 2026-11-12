@@ -189,6 +189,9 @@ openqq watchdog --loop --interval-min 10      # 或注册自启：openqq service
   会话点击无效）。需要唤窗/归位窗口几何时也用 /it 任务内 SetWindowPos，随后全程回司机坐标系。
   QQ NT 重启后常仅驻托盘（主面板需二次启动唤出），且窗口几何可能漂移——先 /it 任务归位
   到司机坐标系再开跑。
+- **双会话执行架构（指挥官 C/执行者 E）**：长任务标准形态=persona 面单活绑定互斥切换、
+  C 长回合自主推进、E 纯机器通道执行、三通道分离；全模型与五阶段流程见
+  `docs/commander-executor-architecture.md`。
 - **发送前三件套（2026-11-11 二次学费固化，F6 复发实证）**：经 135 向 bot 发任何测试
   消息/命令前必须完成：①probe 确认 QQ 窗口；②截图确认当前绑定会话标识=专用测试会话；
   ③`~/.openqq/inflight.json` 核在途——**绑定漂移（owner 切会话/序号错位/超时回落 AI
