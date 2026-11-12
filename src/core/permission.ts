@@ -220,6 +220,18 @@ export interface PermissionGate {
 export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
   const { client, sendReply, safeDeliver } = deps
   const pendingPermissions = new Map<string, PendingPermission>()
+  // DEF-qqbot-20261112-5（2026-11-12 ZERO4 实测卡风暴实证）：同一回合并联发起多个
+  // ask（异 request id）时，单挂槽跨请求覆写 + 双推送路径竞态会让先到的请求被重复
+  // 推卡（A 卡×2/B 卡×1 实证）。已推卡请求 id 环：同步认领（check+mark 原子，闭掉
+  // 双路径并发 race），推过的请求绝不再推。进程内有效——跨重启 restore 的重推送是
+  // 有意重通知（新进程集合自然为空），不受影响。
+  const pushedCardIds = new Set<string>()
+  function claimCardPush(requestId: string): boolean {
+    if (pushedCardIds.has(requestId)) return false
+    if (pushedCardIds.size >= 500) pushedCardIds.delete(pushedCardIds.values().next().value as string)
+    pushedCardIds.add(requestId)
+    return true
+  }
 
   function hasPending(userId: string): boolean {
     return pendingPermissions.has(userId)
@@ -324,17 +336,20 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       })
       savePendingPermMap(pendingPermissions) // O2：落盘，重启不丢
       // A 项（2026-10-29）：卡片按钮优先，发送失败降级文字菜单；两者都失败
-      // 不 reject promise（用户仍可能稍后主动回复）
-      void (async () => {
-        const sentByCard = deps.sendApprovalPrompt
-          ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, "bot").catch(() => false)
-          : false
-        if (!sentByCard) {
-          await sendReply(ctx, formatPermissionPrompt(request, mainSessionId, "bot")).catch((error) => {
-            console.error("[bridge] 发送审批请求失败:", error)
-          })
-        }
-      })()
+      // 不 reject promise（用户仍可能稍后主动回复）。DEF-5：同步认领制——已推过
+      // 的请求（并发异请求覆写场景被其他路径推过）不再重复推卡。
+      if (claimCardPush(request.id)) {
+        void (async () => {
+          const sentByCard = deps.sendApprovalPrompt
+            ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, "bot").catch(() => false)
+            : false
+          if (!sentByCard) {
+            await sendReply(ctx, formatPermissionPrompt(request, mainSessionId, "bot")).catch((error) => {
+              console.error("[bridge] 发送审批请求失败:", error)
+            })
+          }
+        })()
+      }
     })
   }
 
@@ -486,17 +501,20 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     })
     savePendingPermMap(pendingPermissions)
     console.log(`[perm] 外部审批已推送 user=${userId.slice(0, 8)}… request=${request.id} action=${request.action} origin=${origin}`)
-    // 推送失败不撤槽（用户仍可能文字裁决）
-    void (async () => {
-      const sentByCard = deps.sendApprovalPrompt
-        ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, origin).catch(() => false)
-        : false
-      if (!sentByCard) {
-        await sendReply(ctx, formatPermissionPrompt(request, mainSessionId, "external")).catch((error) => {
-          console.error("[bridge] 发送审批请求失败:", error)
-        })
-      }
-    })()
+    // 推送失败不撤槽（用户仍可能文字裁决）。DEF-5：同步认领制，防并发异请求覆写
+    // 场景下本请求已被他路推过而重复推卡。
+    if (claimCardPush(request.id)) {
+      void (async () => {
+        const sentByCard = deps.sendApprovalPrompt
+          ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, origin).catch(() => false)
+          : false
+        if (!sentByCard) {
+          await sendReply(ctx, formatPermissionPrompt(request, mainSessionId, "external")).catch((error) => {
+            console.error("[bridge] 发送审批请求失败:", error)
+          })
+        }
+      })()
+    }
   }
 
   // 联动清槽（2026-11-09）：SSE permission.replied={sessionID,requestID,reply} 到达时，
