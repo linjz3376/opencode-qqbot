@@ -2,7 +2,7 @@
 // @output: SessionManager, UserSession
 // @pos:    opencode层 - QQ用户<->OpenCode Session 映射管理（持久化到 ~/.openqq/sessions.json）
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs"
-import { join } from "path"
+import { dirname, join } from "path"
 import { homedir } from "os"
 import type { OpencodeClient } from "./client.js"
 
@@ -22,9 +22,14 @@ const STORE_FILE = join(STORE_DIR, "sessions.json")
 export class SessionManager {
   private sessions = new Map<string, UserSession>()
   private client: OpencodeClient
+  /** DEF-qqbot-20261112-7：持久化路径可注入——单测必须写临时文件，禁写生产映射
+   *  （2026-11-12 实证：session-model/status-title 套件直写 ~/.openqq/sessions.json，
+   *    夹具 u1-u4/sid2-4 垃圾入库；多管理器陈旧整图回写还把 owner 绑定顶回去） */
+  private readonly storeFile: string
 
-  constructor(client: OpencodeClient) {
+  constructor(client: OpencodeClient, storeFile: string = STORE_FILE) {
     this.client = client
+    this.storeFile = storeFile
     this.loadSessions()
   }
 
@@ -32,9 +37,9 @@ export class SessionManager {
   //（2026-10-13 实测教训：重启清空内存映射 → 用户 QQ 消息落到全新会话，AI 失忆从零探索）。
   private loadSessions(): void {
     try {
-      if (!existsSync(STORE_FILE)) return
+      if (!existsSync(this.storeFile)) return
       // 手工编辑或 PowerShell Out-File 常带 BOM，JSON.parse 会炸——先剥掉
-      const raw = readFileSync(STORE_FILE, "utf8").replace(/^\uFEFF/, "")
+      const raw = readFileSync(this.storeFile, "utf8").replace(/^\uFEFF/, "")
       const parsed = JSON.parse(raw) as Record<string, UserSession>
       for (const [userId, session] of Object.entries(parsed)) {
         if (session?.sessionId) this.sessions.set(userId, session)
@@ -49,8 +54,9 @@ export class SessionManager {
 
   private saveSessions(): void {
     try {
-      if (!existsSync(STORE_DIR)) mkdirSync(STORE_DIR, { recursive: true })
-      writeFileSync(STORE_FILE, JSON.stringify(Object.fromEntries(this.sessions), null, 2), "utf8")
+      const dir = dirname(this.storeFile)
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      writeFileSync(this.storeFile, JSON.stringify(Object.fromEntries(this.sessions), null, 2), "utf8")
     } catch (error) {
       console.error("[sessions] 会话映射持久化失败:", error)
     }
