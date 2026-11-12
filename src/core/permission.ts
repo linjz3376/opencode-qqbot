@@ -28,6 +28,9 @@ export interface PendingPermission {
    *  属误报，只在从磁盘恢复的条目上投递。 */
   resumedFromDisk?: boolean
   origin?: PermOrigin // 2026-11-09：回合归属标注——bot=机器人回合，external=桌面端发起（镜像推送）
+  /** DEF-qqbot-20261112-1：裁决 reply 的 x-opencode-directory 值（建槽时快照；
+   *  引擎待审批按 location 实例分仓，裁决/超时拒答不带目录会对项目会话 404） */
+  directory?: string
 }
 
 /** 审批发起来源（卡片/文字菜单标注 + 联动清槽决策用） */
@@ -189,6 +192,9 @@ export interface PermissionGateDeps {
   nudgeMs?: number
   /** 跨重启恢复读盘入口（测试注入；缺省读 ~/.openqq/pending-permissions.json） */
   loadPending?: () => Record<string, PersistedPermission>
+  /** DEF-qqbot-20261112-1：按用户查会话项目目录——裁决/超时拒答 reply 的
+   *  x-opencode-directory（引擎待审按 location 实例分仓；bridge 注入 sessions 映射） */
+  directoryOf?: (userId: string) => string | undefined
 }
 
 export interface PermissionGate {
@@ -278,6 +284,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         ctx,
         createdAt,
         origin: "bot", // 机器人自己回合的权限（bridge onPermission 直答路径）
+        directory: deps.directoryOf?.(ctx.userId),
       })
       savePendingPermMap(pendingPermissions) // O2：落盘，重启不丢
       // A 项（2026-10-29）：卡片按钮优先，发送失败降级文字菜单；两者都失败
@@ -311,6 +318,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
           await client.permission.reply({
             path: { sessionID: entry.request.sessionID, requestID: entry.request.id },
             body: { decision },
+            directory: entry.directory,
           })
           // DEF-qqbot-20261110-7：只有真跨重启恢复的条目才补回执。实时推送
           // （pushExternal）的审批在 QQ 点击后卡片/菜单本身已有选择回显，
@@ -361,6 +369,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
             .reply({
               path: { sessionID: e.request.sessionID, requestID: e.request.id },
               body: { decision: "reject" },
+              directory: deps.directoryOf?.(uid),
             })
             .catch(() => {})
           void safeDeliver(e.ctx, "审批超时（30 分钟），已自动拒绝该权限请求").catch(() => {})
@@ -378,6 +387,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         restored: true,
         resumedFromDisk: true, // DEF-qqbot-20261110-7：真跨重启条目，裁决后补回执
         ...(e.origin ? { origin: e.origin } : {}),
+        directory: deps.directoryOf?.(uid),
       })
       console.log(`[perm] 恢复重启前挂起的审批 ${uid.slice(0, 8)}… request=${e.request.id}`)
       // 恢复即重推审批卡片（卡片优先，失败降级文字）——重启后用户必须能重新
@@ -412,13 +422,14 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     if (prev) clearTimers(prev)
 
     const alertTimer = startNudgeTimer(userId, request.id, ctx)
+    const directory = deps.directoryOf?.(userId)
     const timer = setTimeout(() => {
       if (pendingPermissions.get(userId)?.request.id !== request.id) return
       pendingPermissions.delete(userId)
       savePendingPermMap(pendingPermissions)
       deps.onDecision?.(userId) // 外部审批 TTL 拒绝也要唤醒队列
       void client.permission
-        .reply({ path: { sessionID: request.sessionID, requestID: request.id }, body: { decision: "reject" } })
+        .reply({ path: { sessionID: request.sessionID, requestID: request.id }, body: { decision: "reject" }, directory })
         .catch(() => {})
       void safeDeliver(ctx, "审批超时（30 分钟），已自动拒绝该权限请求").catch(() => {})
     }, PERM_PROMPT_TTL_MS)
@@ -433,6 +444,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       createdAt: Date.now(),
       restored: true,
       origin, // DEF-qqbot-20261110-4：来源按回合归属传入（bot=QQ 回合 / external=桌面回合），不再一律桌面
+      directory,
     })
     savePendingPermMap(pendingPermissions)
     console.log(`[perm] 外部审批已推送 user=${userId.slice(0, 8)}… request=${request.id} action=${request.action} origin=${origin}`)

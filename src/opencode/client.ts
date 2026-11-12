@@ -63,6 +63,9 @@ export interface PromptAndWaitOptions extends PromptOptions {
   // promptId = 本回合 user 消息 id，是「直答归属本回合」的精确锚点（共享会话下
   // 「baseline 后第一条 assistant」会抓到别回合的产物）。
   onAccepted?: (info: { promptId: string; baseline: number }) => void
+  // DEF-qqbot-20261112-1：本回合会话的项目目录——权限轮询 list 与裁决 reply 的
+  // x-opencode-directory 值；引擎待审按 location 实例分仓，不带必查空/404
+  directory?: string
   // 轮询中发现待审批权限时调用；返回用户的审批决策后，promptAndWait 负责
   // POST reply 并继续等待 idle。审批等待时间不计入 5 分钟超时。
   onPermission?: (req: PermissionRequest) => Promise<PermissionDecision>
@@ -122,8 +125,15 @@ export interface OpencodeClient {
     setAgent(opts: { path: { id: string }; body: { agent: string } }): Promise<unknown>
   }
   permission: {
-    list(): Promise<{ data?: PermissionRequest[] }>
-    reply(opts: { path: { sessionID: string; requestID: string }; body: { decision: PermissionDecision } }): Promise<unknown>
+    /** DEF-qqbot-20261112-1：引擎待审批按 location 实例分仓，裸查只命中服务端 cwd
+     *  实例——必须带会话自身目录（x-opencode-directory）；缺省=裸查（旧行为兼容） */
+    list(opts?: { directory?: string }): Promise<{ data?: PermissionRequest[] }>
+    reply(opts: {
+      path: { sessionID: string; requestID: string }
+      body: { decision: PermissionDecision }
+      /** 同 list：reply 端点按调用方上下文实例解析请求，不带目录对项目会话必 404 */
+      directory?: string
+    }): Promise<unknown>
   }
   // L 项（2026-10-30）：V2 Form API——按会话列表（实测 GET /api/form 是 location 维度，
   // bot 进程 cwd 与会话项目不一致会漏；会话级列表才可靠）+ 作答
@@ -188,6 +198,11 @@ export interface TurnState {
   /** DEF-qqbot-20261107-P2：本回合已被同会话新输入接管（runner 接管语义，
    *  回合已死，idle/正文永远不会到来）；前台/后台等待方据此按「被打断」终态结算 */
   superseded: boolean
+  /** DEF-qqbot-20261112-2：text 所在 assistant 消息是否已终结（time.completed）。
+   *  正文可能已流式落库但消息未完成（典型=工具阻塞在权限审批）——此时正文≠回合已完，
+   *  完成判定必须继续等 idle/正文终结；引擎 step.ended/failed/interrupted 均落 completed，
+   *  被杀回合不受影响。未锚定回落路径不应用该守卫，恒 true。 */
+  textCompleted: boolean
 }
 
 /** DEF-qqbot-20261107-P2（2026-11-07）：本回合被同会话新输入接管。
@@ -222,7 +237,13 @@ export function turnStateOf(msgs: SessionMessage[], promptId: string, baseline: 
   if (userIdx < 0) {
     // 回落旧判据：行为与 collectReplyText 时代一致，不引入新风险
     const idle = msgs.find((x) => x.type === "idle" && (x.time?.created ?? 0) >= baseline)
-    return { anchored: false, hasIdle: Boolean(idle), text: collectReplyText(msgs, baseline), superseded: false }
+    return {
+      anchored: false,
+      hasIdle: Boolean(idle),
+      text: collectReplyText(msgs, baseline),
+      superseded: false,
+      textCompleted: true, // 回落路径不应用 textCompleted 守卫（后台 finish 只信 anchored）
+    }
   }
   let end = ordered.length
   for (let i = userIdx + 1; i < ordered.length; i++) {
@@ -233,6 +254,7 @@ export function turnStateOf(msgs: SessionMessage[], promptId: string, baseline: 
   }
   const boundary = ordered.slice(userIdx + 1, end)
   let text = ""
+  let textCompleted = false
   for (let i = boundary.length - 1; i >= 0; i--) {
     const m = boundary[i]
     if (m.type !== "assistant") continue
@@ -243,6 +265,10 @@ export function turnStateOf(msgs: SessionMessage[], promptId: string, baseline: 
       .trim()
     if (joined) {
       text = joined
+      // DEF-qqbot-20261112-2：正文消息是否已终结——权限挂起中消息 streamed 但无
+      // completed，正文已见而回合未完（2026-11-12 ZERO2 实证：此类回合被误结、
+      // 交付「无文本产出」假完成）
+      textCompleted = Boolean(m.time?.completed)
       break
     }
   }
@@ -273,6 +299,7 @@ export function turnStateOf(msgs: SessionMessage[], promptId: string, baseline: 
     hasIdle: boundary.some((m) => m.type === "idle") || nextTurnStarted,
     text,
     superseded,
+    textCompleted,
   }
 }
 
@@ -384,14 +411,19 @@ export function createClient(baseUrl: string): OpencodeClient {
     },
 
     permission: {
-      async list() {
-        return json(await req("/permission/request"))
+      async list(opts) {
+        return json(
+          await req("/permission/request", {
+            headers: opts?.directory ? { "x-opencode-directory": opts.directory } : undefined,
+          }),
+        )
       },
       async reply(opts) {
         return json(
           await req(`/session/${opts.path.sessionID}/permission/${opts.path.requestID}/reply`, {
             method: "POST",
             body: JSON.stringify(opts.body),
+            headers: opts.directory ? { "x-opencode-directory": opts.directory } : undefined,
           }),
         )
       },
@@ -493,7 +525,11 @@ export function createClient(baseUrl: string): OpencodeClient {
         // 审批检测：会话阻塞在权限请求上时不会产生 idle，必须先放行。
         if (options?.onPermission) {
           try {
-            const permJson = await json(await req("/permission/request"))
+            const permJson = await json(
+              await req("/permission/request", {
+                headers: options.directory ? { "x-opencode-directory": options.directory } : undefined,
+              }),
+            )
             const all = (permJson?.data ?? []) as PermissionRequest[]
             // 债务D1：主会话请求 + 子会话（subagent，parentID 指向本会话）请求
             const pending: PermissionRequest[] = []
@@ -516,6 +552,7 @@ export function createClient(baseUrl: string): OpencodeClient {
               const replyRes = await req(`/session/${request.sessionID}/permission/${request.id}/reply`, {
                 method: "POST",
                 body: JSON.stringify({ decision }),
+                headers: options.directory ? { "x-opencode-directory": options.directory } : undefined,
               })
               if (replyRes.status === 404) {
                 // 债务D2：请求已被其他端（桌面）先处理——不是错误，任务继续

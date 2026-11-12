@@ -200,9 +200,10 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 | 组件 | 设计 |
 |---|---|
-| 审批门 | 引擎侧请求-响应阻塞：工具停在裁决前（deferred）；steer 声明前台在场 → 门闭合；`permission.asked` 经 SSE 即时推送；REST reply 结算（once/always/reject）——**reject 即引擎以 DeclinedError 释放回合**（reply 本身就是释放，无需额外 cancel；同会话挂起请求整批一并 reject）；无匹配裁决 fail-closed（cancelled）；拒绝遇"他端已处理"冲突即告警（不静默） |
+| 审批门 | 引擎侧请求-响应阻塞：工具停在裁决前（deferred）；steer 声明前台在场 → 门闭合；`permission.asked` 经 SSE 即时推送；REST reply 结算（once/always/reject）——**reject 即引擎以 DeclinedError 释放回合**（reply 本身就是释放，无需额外 cancel；同会话挂起请求整批一并 reject）；无匹配裁决 fail-closed（cancelled）；拒绝遇"他端已处理"冲突即告警（不静默）。**权限 REST 全链（list/reply/轮询/延迟闸反查）必须携带会话自身 location 上下文（`x-opencode-directory`），否则命中错误实例仓**（见下行） |
+| 权限实例上下文（2026-11-12 引擎 v2.2.6 源码考据定案） | 引擎待审批是 **per-location 实例内存仓**（core/permission.ts pending Map 随 Location 节点实例化）；HTTP 请求 location 上下文解析三规则：`location[directory]` 查询参数 > `x-opencode-directory` 头 > 服务端进程 cwd（server/location.ts requestRef）；`GET /permission/request` 只列**上下文实例**的待审；`GET /session/:id/permission` 由服务端按会话自身实例解析（跨实例天然正确）；桌面端 auto-approve（客户端本地设置）= `permission.asked` 事件驱动毫秒级回 once + 每次连接按目录全仓 sweep 批陈案 | 决定 bot 反查/轮询/回复三调用全部带会话目录；桌面「静默放行」与延迟闸共存是官方既定行为（非缺陷）；SSE 事件全局可达（与 REST 实例化是两条通道，事件信、列表盲的错配即 DEF-qqbot-20261112-1 根因） |
 | 审批卡片（card-approval） | 四键（允许一次/总是/拒绝/忽略）+ 文字裁决等价；intent 位 + 互动响应时限；过期按钮拒识；拒绝遇"他端已处理"冲突即告警（不静默） |
-| 权限保险网（core/permission.ts） | 裁决等待的兜底：10min 无裁决告警、冲突裁决通知 |
+| 权限保险网（core/permission.ts） | 裁决等待的兜底：10min 无裁决告警、冲突裁决通知。**弹卡延迟闸 defer 判定反查必须带会话目录**（同实例仍悬置才推；弃推依据 = SSE `permission.replied` 事件 + 同实例反查双保险）；桌面开着时 auto-approve 秒回 → 反查已处置 → 不推卡（与桌面静默放行一致）；桌面关着时请求真悬置 → 反查命中 → QQ 卡接管审批 |
 | 表单桥（form-bridge） | REST 表单通道：渲染/回执/台账（form-journal）/孤儿表单作废 |
 | 提问（question-form） | 纯函数题库：schema 归一（合并 `*_custom`）、字母/序号/原文/自定义/多选解析；未答语义——可选题跳过（accept 部分答案）、必填题中止（cancel）；30min TTL，旧挂起提问作废防串线 |
 
@@ -276,7 +277,8 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 回合边界 | promptId 精确锚定（turnStateOf），不依赖消息启发式 | 共享会话里"下一条 user/assistant"启发式必然张冠李戴 |
 | 超时语义 | 会话没有超时限，只有弹窗有 TTL：30min 只通知转后台，24h 硬上限兜底 | 长任务合法；误杀长回合会造成 -32603 级联 |
 | 审批 fail-closed | 无匹配选项=cancelled；拒绝后显式 cancel；冲突即告警 | 安全底线 |
-| 会话归属目录 | 会话 ⇔ location.directory 强绑定；load 携带会话自身目录 | 对齐官方会话归属校验；切会话不建孤儿 |
+| 会话归属目录 | 会话 ⇔ location.directory 强绑定；**权限链 REST 兑现「load 携带会话自身目录」：`x-opencode-directory` 头贯穿 list/reply/轮询/延迟闸反查**（映射缓存 directory，缺省回退裸查=服务端 cwd 实例） | 对齐官方会话归属校验；切会话不建孤儿；2026-11-12 实证裸查致项目会话审批全链失明（DEF-qqbot-20261112-1） |
+| 完成判定同口径 | turnStateOf 的 text 判据与 finalAnswerText 交付判据必须一致：无 idle 但正文所在消息未完成（`time.completed` 缺失，典型=权限挂起中工具阻塞）= 回合仍在途，不得视为「实质已完」早交 | 2026-11-12 实证：权限挂起回合被 SSE 完成事件误结，交付「无文本产出」假完成（DEF-qqbot-20261112-2）；引擎 step.ended/failed/interrupted 均落 completed，被杀回合不受影响 |
 | 传输 | **单一传输路径：纯 service 客户端**（与桌面同构）——REST `delivery:"steer"` prompt + SSE 事件订阅（含 permission.asked 即时推送）+ REST 裁决；无 ACP 子进程、无私有服务器 | 引擎审批门=在场语义（steer 前台 / queue 无人值守）；QQ 与桌面共享同一服务的单实例、单事件总线、单数据库，会话天然同步——传输路径多于一条即破坏该模型 |
 
 ## 5. 数据与配置
@@ -300,3 +302,9 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
   哈希对账跳过这两件）；经 npm plugins 数组安装的用户不受影响。
 - **验证门禁**：`bun run verify`（tsc + 全套件）全绿才可提交部署；部署后必复验日志/心跳/台账。
 - **日志规范**：结构化 `k=v` 行；队列/台账关键动作固定前缀（`[queue]`/`[journal]`）；文件日志常开 + 轮转。
+
+## 修订记录
+
+| 日期 | 章节 | 内容 | 依据 |
+|---|---|---|---|
+| 2026-11-12 | §3.6 / §4 | 新增「权限实例上下文」考据行（per-location 待审仓 + location 解析三规则 + 桌面 auto-approve 机制）；权限 REST 全链携带 `x-opencode-directory`；延迟闸反查同实例化；新增「完成判定同口径」决策（textCompleted） | DEF-qqbot-20261112-1/2；opencode v2.2.6 源码考据（sst/opencode tag dc2ffcf：core/permission.ts、server/handlers/permission.ts、server/location.ts、app/session/requests/auto-approve.ts、core/session/message-updater.ts） |

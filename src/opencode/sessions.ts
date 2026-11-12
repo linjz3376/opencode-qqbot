@@ -207,9 +207,9 @@ export class SessionManager {
     }
   }
 
-  // 枚举全部映射（摘要镜像订阅、会话→用户反查用）
-  all(): Array<{ userId: string; sessionId: string }> {
-    return [...this.sessions.entries()].map(([userId, s]) => ({ userId, sessionId: s.sessionId }))
+  // 枚举全部映射（摘要镜像订阅、会话→用户反查、interactionTick 权限分仓轮询用）
+  all(): Array<{ userId: string; sessionId: string; directory?: string }> {
+    return [...this.sessions.entries()].map(([userId, s]) => ({ userId, sessionId: s.sessionId, directory: s.directory }))
   }
 
   // v2: 模型/agent 是 session 级（/prompt body 会被剥离），必须调 session 端点。

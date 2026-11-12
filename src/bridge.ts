@@ -454,7 +454,11 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           if (turn.anchored && turn.superseded) return finish("superseded")
           // 2026-11-10 修正：无 idle 但有正文=被杀回合实质已完（重复派发→接管打断链不产生 idle），
           // 不得再以「本回合尚未结束」为由忽略——正文在即交付（与防线 A 同口径）。
-          if (turn.anchored && !turn.hasIdle && !turn.text) {
+          // DEF-qqbot-20261112-2 追加同口径守卫：正文所在消息必须已终结（time.completed）——
+          // 权限挂起中工具阻塞的消息已流式出正文但回合未完（引擎 step.ended/failed/
+          // interrupted 均落 completed，被杀回合不受影响），此类「无 idle 有未完成正文」
+          // 不得在 finish 时被 SSE 完成事件误结（2026-11-12 实证交付「无文本产出」假完成）。
+          if (turn.anchored && !turn.hasIdle && (!turn.text || !turn.textCompleted)) {
             console.log(`[bridge] 忽略他回合完成事件（本后台回合尚未结束）session=${sessionId}`)
             return
           }
@@ -633,6 +637,9 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     client,
     sendReply,
     safeDeliver,
+    // DEF-qqbot-20261112-1：裁决/超时拒答 reply 的 x-opencode-directory 来源
+    //（引擎待审按 location 实例分仓；映射 directory 缺省时 reply 退化为裸发=旧行为）
+    directoryOf: (userId) => sessions.getSession(userId)?.directory,
     // 2026-11-05 举一反三：审批槽清空（裁决/TTL）即唤醒该用户队列——否则挂起期间
     // 入队的消息要等用户再发一条才会动（drainQueue 的 pendingPerm 守卫无人解除）。
     onDecision: (userId) => void drainQueue(userId),
@@ -699,10 +706,25 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
 
   async function interactionTick(): Promise<void> {
     try {
-      // 权限轮询兜底（SSE permission.asked 即时推送为主，轮询为断线兜底，双防线）
+      // 权限轮询兜底（SSE permission.asked 即时推送为主，轮询为断线兜底，双防线）。
+      // DEF-qqbot-20261112-1：引擎待审按 location 实例分仓，按绑定会话目录分组轮询
+      // （无目录缓存的 legacy 会话回退裸查=服务端 cwd 实例），跨目录按请求 id 去重。
       {
-        const [permRes] = await Promise.all([client.permission.list()])
-        for (const req of permRes?.data ?? []) {
+        const dirs = new Set<string>()
+        for (const entry of sessions.all()) {
+          if (entry.directory) dirs.add(entry.directory)
+        }
+        const lists = await Promise.all([
+          client.permission.list().catch(() => undefined),
+          ...[...dirs].map((d) => client.permission.list({ directory: d }).catch(() => undefined)),
+        ])
+        const seen = new Map<string, PermissionRequest>()
+        for (const res of lists) {
+          for (const req of res?.data ?? []) {
+            if (!seen.has(req.id)) seen.set(req.id, req)
+          }
+        }
+        for (const req of seen.values()) {
           for (const uid of usersOfSession(req.sessionID)) {
             if (perm.hasPending(uid)) continue // 单一槽：在挂起（含同 id）即跳过
             perm.pushExternal(uid, ctxForUser(uid), req, req.sessionID)
@@ -761,9 +783,12 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
 
   // 延迟闸到点：确认请求仍悬置才推卡。双保险=REST 查待审列表（防 SSE 漏事件）；
   // 查询失败按悬置处理继续推（展示面 fail-open，不吞真人裁决入口）。
+  // DEF-qqbot-20261112-1：反查必须带会话自身目录——引擎待审按 location 实例分仓，
+  // 裸查只命中服务端 cwd 实例，项目会话的请求永远查空 → 恒弃推（ZERO2 实证挂起 5h24m 被误弃）。
   async function flushPermPush(uid: string, req: PermissionRequest): Promise<void> {
+    const bound = sessions.getSession(uid)
     try {
-      const res = await client.permission.list()
+      const res = await client.permission.list({ directory: bound?.directory })
       const still = (res?.data ?? []).some((r) => r.id === req.id)
       if (!still) {
         console.log(`[perm-event] 延迟判定：请求已被处置，弃推 user=${uid.slice(0, 8)}… request=${req.id}`)
@@ -775,7 +800,6 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     // DEF-qqbot-20261110-4（实战实证）：来源标注按回合归属判定——该会话正有 bot
     // 前台回合在跑（QQ 发起）时不得标「桌面端回合」（此前一律 external，回执
     // 「已由桌面端处理」与事实不符）；真·桌面回合（busyUsers 未命中）才标 external。
-    const bound = sessions.getSession(uid)
     const origin: PermOrigin = bound?.sessionId === req.sessionID && busyUsers.has(uid) ? "bot" : "external"
     perm.pushExternal(uid, ctxForUser(uid), req, req.sessionID, origin)
   }
@@ -1268,6 +1292,9 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         {
           replyText = await client.promptAndWait(sessionId, promptText, {
           files: files.length ? files : undefined,
+          // DEF-qqbot-20261112-1：权限轮询/裁决携带会话项目目录（引擎待审按
+          // location 实例分仓，裸查失明/裸 reply 404——见 design §3.6 权限实例上下文）
+          directory: sessions.getSession(ctx.userId)?.directory,
           // 修复⑧：受领即落台账锚点 + 本地闭合变量（前台超时转后台等待要带上）
           onAccepted: (info) => {
             promptId = info.promptId
