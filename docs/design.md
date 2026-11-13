@@ -163,6 +163,8 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 **孤儿处置**：孤儿巡检每 60s 扫描；仅新增孤儿且距上次提醒 >10min 发汇总（不刷屏）；修复路径 = /ledger check（自动分类）与 /ledger settle（人工，二次确认）；**禁止静默删除**，所有结清带 settleReason 并留日志。
 
+**僵尸收割（zombie-reaper，DEF-qqbot-20261112-02 修法②，owner 2026-11-14 授权「修」）**：收割 busy lane 悬挂态——前台时限（30min 转后台）与 bgWait 自保（进度心跳/停滞提醒/24h giveup）双层都漏过的「lane 持有中、无 bgWait、无完成事件」（11-12 实证 busy 挂 27min）。独立 60s 巡检（`QQ_REAPER_SCAN_SECONDS`）；三级门全判别实验式、宁漏杀勿误杀：①**年龄门**——busy 持续 > `QQ_REAPER_MIN_AGE_MS`（缺省 40min=前台 30min+10min 宽限），台账 updatedAt 60s 内被碰过=有活人照看即跳过；②**引擎探针**——`turnStateOf` 核实（与 bgWait finish 同判据）：回合实已完成 → **L1 收割**：提取终稿补投（delivery 去重天然防双投）+ answered 结清（对齐 rescueThenSettle 语义；完成但无正文=被杀回合 → expired）；③**静默门**——回合未完且会话最后消息静默 > `QQ_REAPER_SILENCE_MS`（缺省 30min；真长任务消息持续落）→ **L2 收割**：单会话 `session.abort` + expired 结清。动作前重验 lane 仍忙+账仍 inflight+同 attemptId（防竞态杀新生回合）；单 tick 至多 1 收、per-lane 冷却 5min；结算幂等、释放 lane 并 drain、QQ 通知留痕。决策核 `core/zombie-reaper.ts` 纯函数可单测。账已不在但 lane 忙=纯悬挂标志（27min 实证形态），直接清锁放行。
+
 **官方对齐口径（2026-11-12 P0 考据，基准=tencent-connect 双源 + @tencent-connect/qqbot-nodejs@1.0.5 SDK 源码）**：
 
 - 官方事实标准 = SDK 洋葱中间件链：errorHandler → messageFilter（回声+去重）→ 访问控制（空名单 fail-closed）→ 历史/门控/清洗 → 三层限流 → 斜杠命令 → 待答截获 → **concurrencyGuard** → 引用/附件/信封。`concurrencyGuard` 官方注释明言"同 peer 并发调平台会 500"——同用户串行是官方硬性实践；dsh 选用 merge 策略（忙时缓冲、忙完批量合并为一个 survivor）+ maxQueue 20 + maxProcessingMs
@@ -285,6 +287,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 在途台账 | 一切"重启后要记住"的状态落盘；退出路径必须结账 | 内存态即缺陷候选；孤儿/幽灵必须可观测、可修复、禁静默删除 |
 | 队列恢复语义 | 重启后 queued 条目重建队列"继续排队"，非重跑；重建按 (用户,锚定会话) lane 归组 | "重跑一条"会重复副作用；"继续排队"保持用户意图 |
 | 会话隔离（DEF-qqbot-20261112-01 修法①） | 队列/忙锁按 (用户,会话) lane；入队锚定 sessionId 快照、drain 按锚定派发；出站推送门=锚定≠当前绑定不推 | 僵尸/长回合只堵所在会话；persona 面单活绑定的出站语义（owner 2026-11-14） |
+| 僵尸收割（DEF-qqbot-20261112-02 修法②） | 引擎核实后的自动清障：已完回合补投+answered、静默回合单会话 abort+expired；动作前重验同 attemptId | 悬挂态无自然 TTL 可等；真人 /cancel 发现=无人值守失败（owner 2026-11-14） |
 | 回合边界 | promptId 精确锚定（turnStateOf），不依赖消息启发式 | 共享会话里"下一条 user/assistant"启发式必然张冠李戴 |
 | 超时语义 | 会话没有超时限，只有弹窗有 TTL：30min 只通知转后台，24h 硬上限兜底 | 长任务合法；误杀长回合会造成 -32603 级联 |
 | 审批 fail-closed | 无匹配选项=cancelled；拒绝后显式 cancel；冲突即告警 | 安全底线 |
@@ -303,7 +306,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 - 凭据/接入：`QQ_APP_ID` / `QQ_APP_SECRET`、`OPENCODE_BASE_URL`（缺省自动发现）/ `OPENCODE_PASSWORD`、`ALLOWED_USERS`、`QQ_SANDBOX=false`
 - 工作区：`QQBOT_DEFAULT_CWD`（缺省=bot 进程 cwd）
-- 可调阈值：`QQ_WATCHDOG_INTERVAL_MS=300000`、`QQ_ORPHAN_MS=90000`（合法 5s 至 60min）、`QQ_REDISPATCH_MAX_AGE_MS=7200000`（0=关）、`OPENCODE_TURN_TIMEOUT_MINUTES=30`、`QQ_PERM_DEFER_MS=500`（0 至 10s）、`QQ_ACTIVE_DAILY_LIMIT=100`、`QQ_PASSIVE_RIDE_WINDOW_MS=300000`、`QQ_STREAM_STAGGER_MS=300`
+- 可调阈值：`QQ_WATCHDOG_INTERVAL_MS=300000`、`QQ_ORPHAN_MS=90000`（合法 5s 至 60min）、`QQ_REDISPATCH_MAX_AGE_MS=7200000`（0=关）、`OPENCODE_TURN_TIMEOUT_MINUTES=30`、`QQ_PERM_DEFER_MS=500`（0 至 10s）、`QQ_ACTIVE_DAILY_LIMIT=100`、`QQ_PASSIVE_RIDE_WINDOW_MS=300000`、`QQ_STREAM_STAGGER_MS=300`、`QQ_REAPER_SCAN_SECONDS=60`、`QQ_REAPER_MIN_AGE_MS=2400000`（僵尸收割年龄门）、`QQ_REAPER_SILENCE_MS=1800000`（僵尸收割静默门）
 - 开关/路径：`QQ_ACK_RECEIPT`（默认关）、`QQ_QUEUE_RECEIPTS`（默认关）、`QQ_EVENT_PROBE`（默认关）、`QQ_LOG_FILE`（默认 openqq.log）、`QQ_INSTANCE_LOCK`（默认开）
 
 ## 6. 部署与验证
@@ -323,3 +326,4 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 2026-11-12 | §3.4 / §4 | 新增「官方对齐口径」：P0 SDK 中间件链对照（concurrencyGuard 串行/messageFilter 去重/有界队列/被动窗），同构·超集·增强·差异四级分类，差异项入学习 backlog；新增「官方对齐基准」决策行 | openclaw-qqbot@8998881 / dsh-qqbot@0ddf232e / @tencent-connect/qqbot-nodejs@1.0.5 源码考据（快照 %TEMP%\opencode\qqbot-sync\20261112-104047） |
 | 2026-11-12 | §3.6 / §4 | 新增「权限实例上下文」考据行（per-location 待审仓 + location 解析三规则 + 桌面 auto-approve 机制）；权限 REST 全链携带 `x-opencode-directory`；延迟闸反查同实例化；新增「完成判定同口径」决策（textCompleted） | DEF-qqbot-20261112-1/2；opencode v2.2.6 源码考据（sst/opencode tag dc2ffcf：core/permission.ts、server/handlers/permission.ts、server/location.ts、app/session/requests/auto-approve.ts、core/session/message-updater.ts） |
 | 2026-11-14 | §3.3 / §3.4 / §3.5 / §4 | 队列按 (用户,会话) lane（官方 per-peer 的会话级细腻化，owner 当轮）；入队锚定 sessionId 快照+drain 按锚定派发；新增「出站推送门」（锚定≠当前绑定不推）；running 口径改 per-lane；重启恢复按 lane 归组；DEF-qqbot-20261112-01 修法①落地 | owner 当轮「修」原话三口径；精读 design+bridge 实证（msgQueue/busyUsers/drain 全 per-user，1221 行注=派发时回填） |
+| 2026-11-14 | §3.4 / §4 | 新增「僵尸收割」（DEF-qqbot-20261112-02 修法②）：60s 独立巡检+三级门（年龄/引擎探针/静默）+L1 补投/L2 单会话 abort+动作前 attemptId 重验+per-lane 冷却；决策核 core/zombie-reaper.ts 纯函数 | owner 当轮「修。也是先修设计再修代码」；11-12 实证 busy 悬挂 27min（前台时限+bgWait 双层漏过） |

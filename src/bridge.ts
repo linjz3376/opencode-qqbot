@@ -11,6 +11,7 @@ import { getAccessToken, sendC2CInputNotify, sendC2CMessage, sendGroupMessage } 
 import { prepareQQAttachments, augmentPromptWithAttachments, purgeOldQQImages } from "./qq/media.js"
 import { normalizeForCommandGate } from "./qq/gateway.js"
 import type { OpencodeClient, SessionMessage, PermissionRequest } from "./opencode/client.js"
+import { decideReap, REAPER_MIN_AGE_MS, REAPER_SILENCE_MS, resolveReaperMs } from "./core/zombie-reaper.js"
 import { SupersededError, turnStateOf } from "./opencode/client.js"
 import { createEventStream, type V2Event } from "./opencode/eventstream.js"
 
@@ -1036,6 +1037,83 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         console.error("[queue] 孤儿巡检失败:", toErrorMessage(error))
       }
     }, ORPHAN_SCAN_MS)
+  }
+
+  // 僵尸收割（DEF-qqbot-20261112-02 修法②，owner 2026-11-14 授权）：60s 独立巡检，
+  // 收割 busy lane 悬挂态——前台时限/bgWait 双层自保都漏过的形态（11-12 实证 busy 挂 27min）。
+  // 决策核纯函数在 core/zombie-reaper.ts（三级门，宁漏杀勿误杀）；此处只做探针与动作。
+  const REAPER_SCAN_MS = (() => {
+    const n = Number(process.env.QQ_REAPER_SCAN_SECONDS ?? "60")
+    return Number.isFinite(n) && n > 0 ? Math.floor(n * 1000) : 0
+  })()
+  const REAPER_MIN_AGE = resolveReaperMs(process.env.QQ_REAPER_MIN_AGE_MS, REAPER_MIN_AGE_MS)
+  const REAPER_SILENCE = resolveReaperMs(process.env.QQ_REAPER_SILENCE_MS, REAPER_SILENCE_MS)
+  const REAPER_LANE_COOLDOWN_MS = 5 * 60_000
+  const reaperCooldown = new Map<string, number>()
+
+  async function reaperTick(): Promise<void> {
+    const now = Date.now()
+    let budget = 1 // 单 tick 至多 1 收：收割器自己绝不制造风暴
+    for (const lane of [...busyUsers]) {
+      if (budget <= 0) break
+      const uid = userIdOfLane(lane)
+      const sid = sessionIdOfLane(lane)
+      // null lane=派发窗口极短不收割；bgWait 会话有自带 giveup/停滞保险网
+      if (!sid || bgWaits.has(sid)) continue
+      // 账已不在但 lane 忙=纯悬挂标志（27min 实证形态），清锁放行即完成使命
+      const entry = pendingInflight().find((e) => e.userId === uid && e.sessionId === sid && e.state === "inflight")
+      if (!entry) {
+        busyUsers.delete(lane)
+        console.log(`[reaper] 悬挂标志清理（无在途账）user=${uid.slice(0, 8)}… lane=${shortId(sid)}`)
+        void drainQueue(uid, sid)
+        continue
+      }
+      // 引擎探针：会话消息列表 + turnStateOf（与 bgWait finish 同判据）；失败=本轮不动手
+      const probe = await client.session.messages({ path: { id: sid } }).catch(() => undefined)
+      const msgs = probe?.data
+      const lastMsgAt = msgs?.length ? Math.max(...msgs.map((m) => m.time?.created ?? 0)) : entry.at
+      const turn = msgs ? turnStateOf(msgs, entry.promptId ?? "", entry.at) : null
+      const dec = decideReap({
+        entry,
+        turn,
+        lastMsgAt,
+        cooldownUntil: reaperCooldown.get(lane) ?? 0,
+        now,
+        minAgeMs: REAPER_MIN_AGE,
+        silenceMs: REAPER_SILENCE,
+      })
+      if (dec.kind !== "reap-completed" && dec.kind !== "reap-stalled") continue
+      // L2：回合未完且静默超时 → 单会话精准 abort（失败容忍：账侧仍按清障处理）
+      if (dec.kind === "reap-stalled") {
+        await client.session.abort({ path: { id: sid } }).catch(() => undefined)
+      }
+      // 动作前重验：lane 仍忙 + 账仍 inflight + 同一 attemptId——防竞态杀到新生回合
+      if (!busyUsers.has(lane)) continue
+      const cur = pendingInflight().find((e) => e.msgId === entry.msgId)
+      if (!cur || cur.attemptId !== entry.attemptId) continue
+      busyUsers.delete(lane)
+      const ctx: MessageContext = { ...ctxForUser(uid), anchorSessionId: sid }
+      if (dec.kind === "reap-completed" && dec.text) {
+        // L1：回合实已完成 → 终稿补投（delivery 去重天然防双投）+ answered
+        settleInflight(entry.msgId, undefined, "answered")
+        await safeDeliver(ctx, `📤 你卡住的回合其实已完成，结果补投如下：\n\n${dec.text}`).catch(() => {})
+      } else {
+        // 完成无正文（被杀回合）或 L2 静默强杀 → expired + 可见交代
+        settleInflight(entry.msgId, undefined, "expired")
+        await safeDeliver(ctx, "⚠️ 检测到一个卡死的回合（长时间无进展），已自动清理；如未收到预期结果请重新发送").catch(() => {})
+      }
+      console.log(
+        `[reaper] ${dec.kind} user=${uid.slice(0, 8)}… lane=${shortId(sid)} msg=${shortId(entry.msgId)} age=${Math.round((now - entry.at) / 60_000)}m`,
+      )
+      reaperCooldown.set(lane, now + REAPER_LANE_COOLDOWN_MS)
+      void drainQueue(uid, sid)
+      budget--
+    }
+  }
+  if (REAPER_SCAN_MS > 0) {
+    setInterval(() => {
+      void reaperTick().catch((error) => console.error("[reaper] 巡检失败:", toErrorMessage(error)))
+    }, REAPER_SCAN_MS)
   }
 
   // Q2：手动进度查询（本地事件统计，零模型调用）
