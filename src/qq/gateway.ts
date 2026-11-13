@@ -192,6 +192,15 @@ export function normalizeMessageContent(content: string): string {
   return stripped
 }
 
+/**
+ * 纯表情原始判定（DEF-qqbot-20261111-P2，owner 2026-11-12 裁定=应回有据提示）：
+ * 原始内容非空但规范化后为空 = 纯表情被剥。用于在丢弃点回提示，避免「发了像没发」。
+ */
+export function isEmojiOnlyContent(content: string): boolean {
+  const raw = content.replace(/\r\n/g, "\n").trim()
+  return raw.length > 0 && normalizeMessageContent(content) === ""
+}
+
 function stripGroupAtPrefix(content: string): string {
   const normalized = normalizeMessageContent(content)
   return normalized.replace(/^<@!?.+?>\s*/u, "").trim()
@@ -217,6 +226,8 @@ function toC2CMessageContext(event: C2CMessageEvent): MessageContext {
     userId: event.author.user_openid,
     msgId: event.id,
     content: normalizeMessageContent(event.content),
+    // DEF-qqbot-20261111-P2：纯表情标记随 ctx 传递，bridge 丢弃点据此刻回有据提示（不再静默吞）
+    ...(isEmojiOnlyContent(event.content) ? { emojiOnly: true } : {}),
     referencedMsgId: event.message_reference?.message_id,
     attachments: event.attachments,
     timestamp: event.timestamp,
@@ -231,6 +242,8 @@ function toGroupMessageContext(event: GroupMessageEvent): MessageContext {
     groupId: event.group_openid,
     msgId: event.id,
     content: stripGroupAtPrefix(event.content),
+    // DEF-qqbot-20261111-P2：群聊同口径（纯表情有据提示不静默）
+    ...(isEmojiOnlyContent(event.content) ? { emojiOnly: true } : {}),
     referencedMsgId: event.message_reference?.message_id,
     attachments: event.attachments,
     timestamp: event.timestamp,

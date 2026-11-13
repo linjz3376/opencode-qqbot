@@ -505,10 +505,23 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     // 场景下本请求已被他路推过而重复推卡。
     if (claimCardPush(request.id)) {
       void (async () => {
+        // DEF-qqbot-20261114-P5（owner 2026-11-14「全修剩下缺陷」批）：发卡有 token+网络
+        // 耗时（实测 834ms 慢管道），期间桌面端可能已处理（联动清槽）。单线程语义下推卡
+        // 与清槽同 tick 不可交错——卡的「发送前复查」是死守卫（如实移除）；有效防线=
+        // ①发送后槽被清→日志留痕（卡在途不可撤，平台无撤回 API，至少时序可归因）
+        // ②文字降级前复查槽位——不发迟到死菜单（否则时序上早于「已处理」通知，用户困惑）。
         const sentByCard = deps.sendApprovalPrompt
           ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, origin).catch(() => false)
           : false
+        const stillPending = () => pendingPermissions.get(userId)?.request.id === request.id
+        if (!stillPending()) {
+          console.log(`[perm] 发卡途中槽被清：卡片将迟到（死卡，平台无撤回），request=${request.id}`)
+        }
         if (!sentByCard) {
+          if (!stillPending()) {
+            console.log(`[perm] 文字降级前复查：槽已清（他端已处理），跳过文字菜单 request=${request.id}`)
+            return
+          }
           await sendReply(ctx, formatPermissionPrompt(request, mainSessionId, "external")).catch((error) => {
             console.error("[bridge] 发送审批请求失败:", error)
           })

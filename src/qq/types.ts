@@ -154,6 +154,8 @@ export interface MessageContext {
    * 出站推送门据此校验「锚定=当前绑定」，绑定切走即不推（design §3.4 出站推送门）。
    */
   anchorSessionId?: string
+  /** 纯表情消息标记（DEF-qqbot-20261111-P2，owner 裁定=有据提示）：原始内容纯表情被规范化剥空 */
+  emojiOnly?: boolean
   timestamp?: string
   rawEvent?: C2CMessageEvent | GroupMessageEvent
 }

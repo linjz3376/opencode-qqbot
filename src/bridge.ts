@@ -11,7 +11,15 @@ import { getAccessToken, sendC2CInputNotify, sendC2CMessage, sendGroupMessage } 
 import { prepareQQAttachments, augmentPromptWithAttachments, purgeOldQQImages } from "./qq/media.js"
 import { normalizeForCommandGate } from "./qq/gateway.js"
 import type { OpencodeClient, SessionMessage, PermissionRequest } from "./opencode/client.js"
-import { decideReap, REAPER_MIN_AGE_MS, REAPER_SILENCE_MS, resolveReaperMs } from "./core/zombie-reaper.js"
+import {
+  decideReap,
+  decideDispatchStall,
+  sessionExistsFromProbeError,
+  DISPATCH_STALL_MS,
+  REAPER_MIN_AGE_MS,
+  REAPER_SILENCE_MS,
+  resolveReaperMs,
+} from "./core/zombie-reaper.js"
 import { SupersededError, turnStateOf } from "./opencode/client.js"
 import { createEventStream, type V2Event } from "./opencode/eventstream.js"
 
@@ -1048,6 +1056,10 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   })()
   const REAPER_MIN_AGE = resolveReaperMs(process.env.QQ_REAPER_MIN_AGE_MS, REAPER_MIN_AGE_MS)
   const REAPER_SILENCE = resolveReaperMs(process.env.QQ_REAPER_SILENCE_MS, REAPER_SILENCE_MS)
+  const DISPATCH_STALL = (() => {
+    const n = Number(process.env.QQ_DISPATCH_STALL_MS ?? String(DISPATCH_STALL_MS))
+    return Number.isFinite(n) && n >= 30_000 && n <= 3_600_000 ? n : DISPATCH_STALL_MS
+  })()
   const REAPER_LANE_COOLDOWN_MS = 5 * 60_000
   const reaperCooldown = new Map<string, number>()
 
@@ -1107,6 +1119,36 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       )
       reaperCooldown.set(lane, now + REAPER_LANE_COOLDOWN_MS)
       void drainQueue(uid, sid)
+      budget--
+    }
+    // DEF-qqbot-20261114-04（派发悬挂哨兵）：stage=dispatched 且无 promptId、超龄的账——
+    // 幽灵派发（会话不存在）/派发未达引擎会把 lane 挂死冻结全队列（00:57 seed 实证）。
+    // 与 busy-lane 收割同预算/同冷却键；probe 失败（网络）不动手，下轮再判。
+    for (const entry of pendingInflight()) {
+      if (budget <= 0) break
+      if (entry.state !== "inflight" || entry.stage !== "dispatched" || entry.promptId || !entry.sessionId) continue
+      const lane = laneOf(entry.userId, entry.sessionId)
+      const until = reaperCooldown.get(lane) ?? 0
+      if (now < until) continue
+      const probe = await client.session.messages({ path: { id: entry.sessionId } }).catch((error: unknown) => error)
+      const sessionExists = probe instanceof Error ? sessionExistsFromProbeError(probe.message) : true
+      const dec = decideDispatchStall({ entry, sessionExists, now, stallMs: DISPATCH_STALL })
+      if (dec.kind !== "reap-ghost" && dec.kind !== "reap-lost") continue
+      // 动作前重验：账仍 inflight 同 attemptId；lane 若忙（该会话正被别的回合占用）一并释放
+      const cur = pendingInflight().find((e) => e.msgId === entry.msgId)
+      if (!cur || cur.attemptId !== entry.attemptId) continue
+      busyUsers.delete(lane)
+      settleInflight(entry.msgId, undefined, "error")
+      const ctx: MessageContext = { ...ctxForUser(entry.userId), anchorSessionId: entry.sessionId }
+      await safeDeliver(
+        ctx,
+        `⚠️ 一条消息派发失败（${dec.kind === "reap-ghost" ? "目标会话已不存在" : "派发未到达引擎"}，已自动清理，不阻塞后续消息）。需要的话请重发：「${entry.text.length > 50 ? `${entry.text.slice(0, 50)}…` : entry.text}」`,
+      ).catch(() => {})
+      console.log(
+        `[reaper] ${dec.kind} user=${entry.userId.slice(0, 8)}… lane=${shortId(entry.sessionId)} msg=${shortId(entry.msgId)} age=${Math.round((now - entry.at) / 1000)}s`,
+      )
+      reaperCooldown.set(lane, now + REAPER_LANE_COOLDOWN_MS)
+      void drainQueue(entry.userId, entry.sessionId)
       budget--
     }
   }
@@ -1206,8 +1248,12 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       }
 
       const content = ctx.content.trim()
-      // 纯图消息（无文字但有附件）同样放行；真空消息才丢
+      // 纯图消息（无文字但有附件）同样放行；真空消息才丢。
+      // DEF-qqbot-20261111-P2（owner 2026-11-12 裁定）：纯表情不回静默——有据提示。
       if (!content && !ctx.attachments?.length) {
+        if (ctx.emojiOnly) {
+          await notifyUser(ctx, "收到表情 🙂 纯表情我无法理解，请补充文字（表情+文字一起发也可以）")
+        }
         return
       }
       // 记录最近消息上下文：观察/过程推送的通道选择（被动优先）
@@ -1651,6 +1697,31 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
             `🔄 重启恢复：${restored} 条排队消息已恢复（发 /queue 查看；/queue clear 可清空）`,
           )
         }
+      }
+    }
+
+    // DEF 队列容量拒收文案误标修复（owner 2026-11-14「全修剩下缺陷」批，P6）：
+    // 窗口内候选被 QUEUE_MAX 截断的真实原因=队列已满，非「超过恢复窗口」——先单独结清
+    // queue-full + 准确文案，防止流进下方空账分支吃误标归因（00:24 seed 实测 27 进 20 截 7）。
+    const capacityRejected = queueCandidates.filter((e) => !restorable.has(e.msgId))
+    if (capacityRejected.length > 0) {
+      const byUser = new Map<string, InflightEntry[]>()
+      for (const e of capacityRejected) {
+        const list = byUser.get(e.userId) ?? []
+        list.push(e)
+        byUser.set(e.userId, list)
+      }
+      for (const [uid, list] of byUser) {
+        const first = list[0]!
+        const preview = first.text.length > 50 ? `${first.text.slice(0, 50)}…` : first.text
+        await deliver(
+          ctxForUser(uid),
+          `🔄 重启恢复：${list.length} 条排队消息因队列已满（上限 ${QUEUE_MAX} 条）未恢复（如「${preview}」）。等队列消化后再发，或 /queue clear 后重发`,
+        )
+      }
+      for (const e of capacityRejected) {
+        settleInflight(e.msgId, undefined, "queue-full")
+        console.log(`[bridge] 启动对账：容量拒收结清 queue-full msgId=${e.msgId}`)
       }
     }
 

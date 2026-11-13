@@ -85,3 +85,43 @@ export function resolveReaperMs(envValue: string | undefined, fallback: number):
   if (Number.isFinite(raw) && raw >= 300_000 && raw <= 21_600_000) return raw
   return fallback
 }
+
+// ===== 派发悬挂哨兵（DEF-qqbot-20261114-04，owner 2026-11-14「全修剩下缺陷」批）=====
+// 幽灵派发（sessionId 不存在/派发未达引擎）会把 lane 挂死、队列整体冻结
+// （00:57 seed 实证：13 条全 stalled 5min；正常 dispatch→prompt 落库 ~4s/条）。
+// 盯 stage=dispatched 且无 promptId 超龄的台账账（与 busy-lane 收割同巡逻、同冷却键）。
+
+/** 派发悬挂哨兵缺省：120s（4s 正常值的 30 倍宽容，误杀健康派发不可能）。 */
+export const DISPATCH_STALL_MS = 120_000
+
+export interface DispatchStallInput {
+  entry: { stage?: string; promptId?: string; at: number }
+  /** 引擎侧会话存在性探针：true=在 / false=404 不在 / null=探针失败（网络） */
+  sessionExists: boolean | null
+  now: number
+  stallMs?: number
+}
+
+export type DispatchStallAction =
+  | { kind: "skip-has-prompt" }
+  | { kind: "skip-young" }
+  | { kind: "skip-probe-failed" }
+  /** 会话已不存在（幽灵派发种子形态）——判失+通知+释放 lane */
+  | { kind: "reap-ghost" }
+  /** 会话在但派发 120s 无 promptId 落库——派发未达/引擎已拒，判失+通知+释放 lane */
+  | { kind: "reap-lost" }
+
+export function decideDispatchStall(input: DispatchStallInput): DispatchStallAction {
+  const stallMs = input.stallMs ?? DISPATCH_STALL_MS
+  if (input.entry.promptId) return { kind: "skip-has-prompt" }
+  if (input.now - input.entry.at < stallMs) return { kind: "skip-young" }
+  if (input.sessionExists === null) return { kind: "skip-probe-failed" }
+  if (!input.sessionExists) return { kind: "reap-ghost" }
+  return { kind: "reap-lost" }
+}
+
+/** 从探针错误消息判定会话存在性（client.ts json() 抛 `OpenCode API <status>: …`）。 */
+export function sessionExistsFromProbeError(message: string): boolean | null {
+  if (/OpenCode API 404/.test(message)) return false
+  return null
+}

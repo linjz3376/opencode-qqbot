@@ -22,6 +22,34 @@ export function allowedSendRoots(extraEnv = process.env.QQ_SEND_EXTRA_ROOTS): st
   return roots.map((r) => resolve(r))
 }
 
+// DEF-qqbot-20261112-03（owner 2026-11-14「全修剩下缺陷」批）：
+// 白名单是目录级粒度——`..\..\..` 穿越解析后落进白名单根（实测投递 .env 825B 文件卡）。
+// 文件级拒绝名单兜底：**无论落在哪个白名单根内，密钥/凭据类文件绝不外发**（拒绝优先于白名单）。
+/** 精确拒绝的文件名（小写比较） */
+export const SEND_DENIED_NAMES = new Set([
+  ".env",
+  "credentials",
+  "secrets",
+  "id_rsa",
+  "id_dsa",
+  "id_ecdsa",
+  "id_ed25519",
+  ".npmrc",
+  ".pypirc",
+  "netrc",
+])
+/** 拒绝的扩展名（小写比较，密钥/证书/凭据存储类） */
+const SEND_DENIED_EXTS = new Set([".pem", ".key", ".p12", ".pfx", ".kdbx", ".htpasswd"])
+
+/** 文件级拒绝校验（DEF-qqbot-20261112-03）：basename 命中即拒，优先于目录白名单。 */
+export function isDeniedSendFile(filePath: string): boolean {
+  const name = basename(filePath).toLowerCase()
+  if (SEND_DENIED_NAMES.has(name)) return true
+  if (name.startsWith(".env.") || name.startsWith(".env-")) return true
+  const ext = extname(name)
+  return SEND_DENIED_EXTS.has(ext)
+}
+
 /** 路径白名单校验：规范化后必须落在某个允许根目录内（分隔符按平台自适应） */
 export function isAllowedSendPath(filePath: string, roots = allowedSendRoots()): boolean {
   const full = resolve(filePath.trim().replace(/^"|"$/g, ""))
@@ -64,6 +92,10 @@ export async function sendLocalFile(
   deps: SendLocalFileDeps,
 ): Promise<string> {
   const trimmed = filePath.trim()
+  // DEF-qqbot-20261112-03：文件级拒绝优先于目录白名单（穿越解析落白名单根也拦）
+  if (isDeniedSendFile(trimmed)) {
+    throw new Error("该文件属于密钥/凭据类，禁止外发（已拦截）")
+  }
   if (!isAllowedSendPath(trimmed)) {
     throw new Error(`路径不在白名单（仅允许：${allowedSendRoots().join("、")}；可加 QQ_SEND_EXTRA_ROOTS）`)
   }

@@ -372,6 +372,18 @@ async function handleModel(ctx: MessageContext, args: string, cmdCtx: CommandCon
     return "模型格式不对，请使用 /model <provider/model>"
   }
 
+  // DEF-qqbot-20261111-01：存在性校验——此前仅校格式直写映射，假模型也回「已切换成功」误导用户
+  let models: ListedModel[]
+  try {
+    models = await listModels(cmdCtx.client)
+  } catch {
+    return "无法从引擎获取模型列表（引擎不可达），本次未切换，请稍后重试"
+  }
+  const wanted = `${model.providerId}/${model.modelId}`
+  if (!models.some((m) => m.id === wanted)) {
+    return `模型不存在：${wanted}。发 /model 查看可用列表（注意区分大小写与 provider 前缀）`
+  }
+
   await ensureSession(ctx.userId, cmdCtx)
   await cmdCtx.sessions.setModel(ctx.userId, model.providerId, model.modelId)
   return `已切换模型：${model.providerId} / ${model.modelId}`
