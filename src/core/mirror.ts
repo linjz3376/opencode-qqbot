@@ -9,6 +9,7 @@ import type { MessageContext } from "../qq/types.js"
 import type { OpencodeClient } from "../opencode/client.js"
 import { createEventStream } from "../opencode/eventstream.js"
 import { buildDigest, digestTurnKey } from "../opencode/mirror.js"
+import { laneKeyOf } from "./message-queue.js"
 import type { SessionManager } from "../opencode/sessions.js"
 import type { MirrorApi } from "../commands.js"
 
@@ -106,9 +107,11 @@ export function createMirror(deps: MirrorDeps): Mirror {
   function scheduleMirrorUnlock(sessionId: string): void {
     setTimeout(() => {
       if (bgWaits.has(sessionId)) return
+      // 会话隔离（owner 2026-11-14）：busyUsers 存 lane 键——只看本会话 lane 是否忙，
+      // 该用户的其他会话在跑不阻止本会话镜像解锁。
       const ownerBusy = sessions
         .all()
-        .some((x) => x.sessionId === sessionId && busyUsers.has(x.userId))
+        .some((x) => x.sessionId === sessionId && busyUsers.has(laneKeyOf(x.userId, sessionId)))
       if (ownerBusy) return
       qqTurnActive.delete(sessionId)
     }, 5000)
@@ -138,8 +141,11 @@ export function createMirror(deps: MirrorDeps): Mirror {
       for (const userId of owners) {
         // 无最近 ctx（重启后尚未收到新消息）→ 构造主动通道 ctx，
         // deliver 的被动尝试失败会自然降级为主动消息（D4 配额内）。
+        // anchorSessionId=本摘要所属会话：出站推送门据此拦截（绑定切走不推，历史可回读）。
         const recent = lastCtx.get(userId)
-        const ctx: MessageContext = recent ?? { type: "c2c", userId, msgId: "", content: "" }
+        const ctx: MessageContext = recent
+          ? { ...recent, anchorSessionId: sessionID }
+          : { type: "c2c", userId, msgId: "", content: "", anchorSessionId: sessionID }
         await safeDeliver(ctx, digest)
       }
       console.log(`[mirror] 会话 ${sessionID} 摘要已镜像给 ${owners.length} 个用户`)

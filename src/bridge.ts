@@ -28,7 +28,7 @@ import {
   type WatchApi,
 } from "./commands.js"
 import { createMirror } from "./core/mirror.js"
-import { MessageQueue, previewText, agoLabel, intentKeyOf } from "./core/message-queue.js"
+import { MessageQueue, laneKeyOf, sessionIdOfLane, userIdOfLane, previewText, agoLabel, intentKeyOf } from "./core/message-queue.js"
 import { classifyProviderError, rescueText } from "./core/error-rescue.js"
 
 const QUEUE_MAX = 20 // Q1：忙碌队列上限（学习 pi-qqbot queue.max 默认）
@@ -259,7 +259,19 @@ export function createBridge(
   // 排队回执「已排队 #N」为功能性提示不受此开关影响。
   const ackReceiptEnabled = /^(1|true|on)$/i.test(process.env.QQ_ACK_RECEIPT ?? "")
 
+  // 会话隔离（owner 2026-11-14 裁定，DEF-qqbot-20261112-01 修法①）：
+  // busyUsers/draining 存 lane 键（userId|sessionId）——官方 per-peer 串行的会话级
+  // 细腻化；僵尸/长回合只堵所在 lane。票号仍 per-user 单调（message-queue 内）。
   const busyUsers = new Set<string>()
+  const laneOf = (userId: string, sessionId: string | null | undefined): string => laneKeyOf(userId, sessionId)
+  /** 该用户是否有任一 lane 在忙（/status 展示用） */
+  const anyLaneBusy = (userId: string): boolean => {
+    for (const k of busyUsers) if (userIdOfLane(k) === userId) return true
+    return false
+  }
+  /** 出站推送门（design §3.4）：QQ 只呈现当前绑定会话——锚定≠绑定即不推 */
+  const isBoundSession = (userId: string, sessionId: string): boolean =>
+    sessions.getSession(userId)?.sessionId === sessionId
   // 队列 drain 会重入 handleMessage；标记本 ctx 已认领，避免把合法出队当成平台重投。
   const claimedContexts = new WeakSet<MessageContext>()
   // 修复⑦：队列 drain 重入的 ctx——受理回执跳过（drain 已有「开始执行队列」节点，
@@ -360,7 +372,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     if (!line) return
     // 2026-10-14 用户拍板：里程碑只投 /watch 显式订阅者——自身回合回显与
     // 会话订阅表的其他来源一律不再隐式携带（镜像只发📋摘要卡）。
-    for (const userId of milestoneTargets(activeWatches, sessionID)) enqueuePush(userId, line)
+    for (const userId of milestoneTargets(activeWatches, sessionID)) enqueuePush(userId, line, sessionID)
   }
 
   // ===== 摘要镜像域已随 O7d 收进 core/mirror.ts（订阅/在途标记/解锁/摘要投递）=====
@@ -428,7 +440,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           finished = true
           settleInflight(tid, undefined, "answered")
           mirror.scheduleUnlock(sessionId)
-          void drainQueue(ctx.userId)
+          void drainQueue(ctx.userId, sessionId)
           // 投递失败不得上抛：账已结清，补投失败由 deliver 层自己的重试/降级负责
           await safeDeliver(ctx, `📤 你发来新消息前，上一回合已完成，结果如下：\n\n${rescuedText}`).catch(() => {})
           console.log(`[bridge] 接管前抢救：后台回合已完成且未投递，结果已补投 session=${sessionId}`)
@@ -471,8 +483,8 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       // 顺序必须账清在前，否则原因会被 superseded 覆盖（settle 幂等，后写不生效）。
       if (trackId) settleInflight(trackId, undefined, kind === "done" ? "answered" : kind === "giveup" ? "expired" : "superseded")
       cleanup()
-      // Q1：后台等待终态 → 放行该用户队列（此前为串行而挂起）
-      void drainQueue(ctx.userId)
+      // Q1：后台等待终态 → 放行该 lane 队列（此前为串行而挂起；会话隔离后只放本会话 lane）
+      void drainQueue(ctx.userId, sessionId)
       if (kind === "superseded") {
         // DEF-qqbot-20261107-P2：后台等到的回合已被同会话新输入接管——任务已死，
         // 明确交代而非沉默到 24 小时 giveup。
@@ -619,12 +631,17 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   }
 
   // O7c：投递域门面（统一投递/降级/配额/节流队列/被动回复全在 core/delivery.ts）
-  const { enqueuePush, safeDeliver, sendReply, deliver } = createDelivery(config, lastCtx)
+  const { enqueuePush, safeDeliver, sendReply, deliver } = createDelivery(config, lastCtx, isBoundSession)
   // DEF-1 修复（2026-11-04，UAT 实证）：通知类发送永不阻断主流程——受理回执/
   // K2 拦截/排队提示/问候等裸 sendReply 一旦被平台拒（40034024/超时）会直接
   // 中断 handleMessage（实证：回执失败 → 回合未派发给 AI 即结算，用户消息被吞）。
   // 统一走 notifyUser 兜底：发送失败仅告警，主流程继续。
   const notifyUser = async (ctx: MessageContext, text: string): Promise<void> => {
+    // 出站推送门同口径（owner 2026-11-14）：锚定≠当前绑定不推（排队回执/ drain 通知等）
+    if (ctx.anchorSessionId && !isBoundSession(ctx.userId, ctx.anchorSessionId)) {
+      console.log(`[push-gate] 通知拦截：绑定已切走 anchor=${ctx.anchorSessionId.slice(0, 12)}… chars=${text.length}`)
+      return
+    }
     try {
       await sendReply(ctx, text)
     } catch (error) {
@@ -642,7 +659,10 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     directoryOf: (userId) => sessions.getSession(userId)?.directory,
     // 2026-11-05 举一反三：审批槽清空（裁决/TTL）即唤醒该用户队列——否则挂起期间
     // 入队的消息要等用户再发一条才会动（drainQueue 的 pendingPerm 守卫无人解除）。
-    onDecision: (userId) => void drainQueue(userId),
+    onDecision: (userId) => {
+      // 会话隔离：审批裁决放行该用户全部有货 lane（drainQueue 自身对忙 lane 空转安全）
+      for (const lk of msgQueue.laneKeysOf(userId)) void drainQueue(userId, sessionIdOfLane(lk))
+    },
     // A 项：审批卡片发送（失败自动降级文字菜单，permission 域内处理）；origin 穿透到卡片正文
     sendApprovalPrompt: (ctx, request, mainSessionId, origin) =>
       sendApprovalCard({ appId: config.qq.appId, clientSecret: config.qq.clientSecret }, ctx, request, mainSessionId, origin),
@@ -723,6 +743,11 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         for (const req of seen.values()) {
           for (const uid of usersOfSession(req.sessionID)) {
             if (perm.hasPending(uid)) continue // 单一槽：在挂起（含同 id）即跳过
+            // 出站推送门：绑定已切走的用户不推审批卡（owner 2026-11-14；历史/桌面端可裁决）
+            if (!isBoundSession(uid, req.sessionID)) {
+              console.log(`[push-gate] 审批卡拦截（轮询兜底）：绑定已切走 uid=${uid.slice(0, 8)}… sid=${shortId(req.sessionID)}`)
+              continue
+            }
             perm.pushExternal(uid, ctxForUser(uid), req, req.sessionID)
           }
         }
@@ -770,6 +795,12 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     if (!req?.id || !req.sessionID) return
     for (const uid of usersOfSession(req.sessionID)) {
       if (perm.hasPending(uid)) continue
+      // 出站推送门：绑定已切走不推卡（owner 2026-11-14）——usersOfSession 按映射反查，
+      // 未绑定会话自然不在列；此处防的是「映射还在但用户已切走」的残留窗口。
+      if (!isBoundSession(uid, req.sessionID)) {
+        console.log(`[push-gate] 审批卡拦截（SSE asked）：绑定已切走 uid=${uid.slice(0, 8)}… sid=${shortId(req.sessionID)} request=${req.id}`)
+        continue
+      }
       console.log(
         `[perm-event] permission.asked 即时推送（延迟 ${PERM_DEFER_MS}ms 判定）user=${uid.slice(0, 8)}… request=${req.id}`,
       )
@@ -795,8 +826,9 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     }
     // DEF-qqbot-20261110-4（实战实证）：来源标注按回合归属判定——该会话正有 bot
     // 前台回合在跑（QQ 发起）时不得标「桌面端回合」（此前一律 external，回执
-    // 「已由桌面端处理」与事实不符）；真·桌面回合（busyUsers 未命中）才标 external。
-    const origin: PermOrigin = bound?.sessionId === req.sessionID && busyUsers.has(uid) ? "bot" : "external"
+    // 「已由桌面端处理」与事实不符）；真·桌面回合（该会话 lane 未命中）才标 external。
+    const origin: PermOrigin =
+      bound?.sessionId === req.sessionID && busyUsers.has(laneOf(uid, req.sessionID)) ? "bot" : "external"
     perm.pushExternal(uid, ctxForUser(uid), req, req.sessionID, origin)
   }
 
@@ -805,16 +837,15 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   // Q1：队列/台账派生视图（三源 join：内存队列 + 磁盘台账 + 运行态）
   function queueViewFor(userId: string): QueueView {
     const journal = listInflightView()
-    const session = sessions.getSession(userId)
     return deriveQueueView({
       entries: [...journal.inflight, ...journal.settled].filter((e) => e.userId === userId),
-      jobs: msgQueue.list(userId),
+      jobs: msgQueue.listUser(userId),
       orphanMs: resolveOrphanMs(process.env.QQ_ORPHAN_MS),
       queueMax: QUEUE_MAX,
       runtime: {
-        busy: busyUsers.has(userId),
-        draining: draining.has(userId),
-        ...(session?.sessionId ? { sessionId: session.sessionId } : {}),
+        // 会话隔离：busyLanes 即 busyUsers（lane 键集合）；running 按条目自身会话判定
+        busyLanes: busyUsers,
+        draining: draining.size > 0,
         bgSessions: new Set(bgWaits.keys()),
       },
     })
@@ -827,7 +858,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       formatQueueReply(queueViewFor(userId), { all: true, page, limit: QUEUE_MAX }),
     summary: (userId: string): string => formatStatusLine(queueViewFor(userId)),
     clear: (userId: string): number => {
-      const jobs = [...msgQueue.list(userId)]
+      const jobs = [...msgQueue.listUser(userId)]
       for (const job of jobs) {
         if (job.ctx.msgId) settleInflight(job.ctx.msgId, undefined, "cancelled")
       }
@@ -869,10 +900,11 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     // 内存忙标志复位：悬挂的前台等待不退出时 busyUsers/draining 永久挡 drain
     // （11-06 实证 cancel 后死锁 12 分钟）。复位后 opencode 会话串行约束仍在
     // （服务端排队），bot 侧账幂等，不会出现重复投递。
-    busyUsers.delete(userId)
-    draining.delete(userId)
+    // 会话隔离：清该用户全部 lane，并逐 lane 续排。
+    for (const k of [...busyUsers]) if (userIdOfLane(k) === userId) busyUsers.delete(k)
+    for (const k of [...draining]) if (userIdOfLane(k) === userId) draining.delete(k)
     if (settled > 0) console.log(`[bridge] stopAll 结清在途账 user=${userId.slice(0, 8)}… count=${settled}`)
-    void drainQueue(userId)
+    for (const lk of msgQueue.laneKeysOf(userId)) void drainQueue(userId, sessionIdOfLane(lk))
     return { cleared, title: session?.title }
   }
 
@@ -964,7 +996,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         return `将结清：${shortId(hit.msgId)}「${previewText(hit.text, 30)}」\n确认请发 /ledger settle ${key} confirm`
       }
       const ok = settleInflight(hit.msgId, undefined, "manual")
-      const job = msgQueue.list(userId).find((j) => j.ctx.msgId === hit.msgId)
+      const job = msgQueue.listUser(userId).find((j) => j.ctx.msgId === hit.msgId)
       if (job) msgQueue.drop(userId, job.id)
       console.log(`[journal] settle-manual user=${userId.slice(0, 8)}… msg=${shortId(hit.msgId)} ok=${ok}`)
       return ok ? `已结清：${shortId(hit.msgId)}（人工）` : "该条目已不在在途状态"
@@ -1012,7 +1044,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       const session = sessions.getSession(userId)
       if (!session) return "当前还没有会话，发消息即可开始"
       const st = turnStats.get(session.sessionId)
-      const busy = busyUsers.has(userId) ? "处理中" : "空闲"
+      const busy = anyLaneBusy(userId) ? "处理中" : "空闲"
       const bg = bgWaits.has(session.sessionId) ? " · 后台等待在途" : ""
       if (!st) return `当前会话：${busy}${bg}\n暂无工具调用记录（本会话新起或尚无动作类里程碑）`
       return [
@@ -1072,6 +1104,12 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   const handleMessage = async (ctx: MessageContext): Promise<void> => {
     let claimedMsgId = ""
     const intentKey = intentKeyOf(ctx)
+    // 会话隔离（owner 2026-11-14，DEF-qqbot-20261112-01 修法①）：锚定会话=入队快照
+    // （drain 重入已带）或当前绑定；队列/忙锁按 (userId, 锚定会话) lane 粒度。
+    // 声明于函数最顶：外层 catch 也引用 lane——放晚了错误路径会撞 TDZ；
+    // 快照先于一切 await，之后绑定切走也不改本消息归属。
+    const anchorSid = ctx.anchorSessionId ?? sessions.getSession(ctx.userId)?.sessionId ?? null
+    const lane = laneOf(ctx.userId, anchorSid)
     // drain 重入/重启恢复的 ctx 已带受理账；若它在派发前的早退点（表单消费/命令/
     // 序号选择/审批挂起）被拦截，必须结清该账——否则台账残留 inflight，孤儿巡检
     // 会每 10 分钟刷一次告警（2026-11-05 实证：审批挂起导致队列 #1 卡成孤儿）。
@@ -1188,8 +1226,8 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         claimedMsgId = ctx.msgId
       }
 
-      if (busyUsers.has(ctx.userId) && !claimedContexts.has(ctx)) {
-        const duplicateIntent = activeIntents.get(ctx.userId) === intentKey || msgQueue.hasIntent(ctx.userId, intentKey)
+      if (busyUsers.has(lane) && !claimedContexts.has(ctx)) {
+        const duplicateIntent = activeIntents.get(lane) === intentKey || msgQueue.hasIntent(lane, intentKey)
         if (duplicateIntent) {
           settleInflight(ctx.msgId, undefined, "duplicate-intent") // 重复意图已有原回合负责，直接结清，禁止恢复时再跑
           console.log(`[bridge] 相同意图已在执行/队列，跳过 msgId=${ctx.msgId}`)
@@ -1197,7 +1235,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         }
       }
 
-      if (busyUsers.has(ctx.userId)) {
+      if (busyUsers.has(lane)) {
         // Q1（学习 pi-qqbot 队列 UX）：忙碌不再拒绝——FIFO 排队，回合结束自动执行
         // 自检补强：入队即下载附件——QQ 签名 URL 短时效，drain 时下载必过期
         if (ctx.attachments?.length && !ctx.preparedAttachments) {
@@ -1205,18 +1243,19 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
             getAccessToken(config.qq.appId, config.qq.clientSecret),
           )
         }
-        const queued = msgQueue.push(ctx.userId, ctx)
+        const queued = msgQueue.push(lane, ctx.userId, anchorSid ?? undefined, ctx)
         if (!queued) {
           if (claimedMsgId) settleInflight(claimedMsgId, undefined, "queue-full") // 已满回执即终态，不能留账让启动对账再次执行
-          console.log(`[queue] reject user=${ctx.userId.slice(0, 8)}… msg=${shortId(ctx.msgId)} reason=full size=${msgQueue.size(ctx.userId)}/${QUEUE_MAX}`)
+          console.log(`[queue] reject user=${ctx.userId.slice(0, 8)}… msg=${shortId(ctx.msgId)} reason=full size=${msgQueue.size(lane)}/${QUEUE_MAX}`)
           await notifyUser(ctx, formatQueueFullReceipt(QUEUE_MAX))
           return
         }
         if (ctx.msgId) {
-          markInflightStage(ctx.msgId, "queued", { queueId: queued.job.id, enqueuedAt: queued.job.enqueuedAt })
+          // 入队即锚定落账：queued 级也带 sessionId（重启恢复按 lane 归组）
+          markInflightStage(ctx.msgId, "queued", { queueId: queued.job.id, enqueuedAt: queued.job.enqueuedAt, ...(anchorSid ? { sessionId: anchorSid } : {}) })
         }
         console.log(
-          `[queue] enqueue user=${ctx.userId.slice(0, 8)}… qid=${queued.job.id} msg=${shortId(ctx.msgId)} ahead=${queued.ahead} size=${msgQueue.size(ctx.userId)}/${QUEUE_MAX}`,
+          `[queue] enqueue user=${ctx.userId.slice(0, 8)}… lane=${anchorSid ? shortId(anchorSid) : "∅"} qid=${queued.job.id} msg=${shortId(ctx.msgId)} ahead=${queued.ahead} size=${msgQueue.size(lane)}/${QUEUE_MAX}`,
         )
         // 入队前已由 claimInflight 落账；drain 重入时回填 sessionId，不重复写账。
         await notifyUser(
@@ -1226,8 +1265,8 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         return
       }
 
-      activeIntents.set(ctx.userId, intentKey)
-      busyUsers.add(ctx.userId)
+      activeIntents.set(lane, intentKey)
+      busyUsers.add(lane)
 
   // 修复⑦（2026-11-03）：受理即回执——前台回合立刻短句确认，消除静默期
   // （expA 实证：无受理回执时用户观感=「没有任何回复」）。Queue 路径此前
@@ -1252,9 +1291,24 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       let trackId = "" // R 项：在途台账跟踪键（try/catch 跨块可见）
       let promptId = "" // 修复⑧：本回合 user 消息 id（直答归属锚点）
       try {
-        const session = await sessions.getOrCreate(ctx.userId)
-        sessionId = session.sessionId
+        // 会话隔离：派发跟锚定不跟漂移——锚定会话直发（哪怕绑定已切走）；
+        // 无锚定（null lane，从未绑定）才 getOrCreate 解析并落新绑定。
+        if (anchorSid) {
+          sessionId = anchorSid
+        } else {
+          const session = await sessions.getOrCreate(ctx.userId)
+          sessionId = session.sessionId
+        }
+        ctx.anchorSessionId = sessionId
         sessionLastActivity.set(sessionId, Date.now())
+        // DEF-qqbot-20261112-1 同口径：权限链目录必须是「锚定会话自身」的目录——
+        // 锚定≠绑定时映射缓存指向错会话，从服务端回读锚定会话目录（失败回落绑定缓存）。
+        let anchorDirectory: string | undefined = sessions.getSession(ctx.userId)?.directory
+        if (sessions.getSession(ctx.userId)?.sessionId !== sessionId) {
+          anchorDirectory =
+            (await client.session.get({ path: { id: sessionId } }).catch(() => undefined))?.data?.location?.directory ??
+            anchorDirectory
+        }
 
         // 缺口 1（引用上下文，吸收自官方 quote-ref 中间件）：本条消息的引用解析
         // 先于本条登记（顺序不可反：本条入缓存后才能被后续消息引用）
@@ -1295,8 +1349,9 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           replyText = await client.promptAndWait(sessionId, promptText, {
           files: files.length ? files : undefined,
           // DEF-qqbot-20261112-1：权限轮询/裁决携带会话项目目录（引擎待审按
-          // location 实例分仓，裸查失明/裸 reply 404——见 design §3.6 权限实例上下文）
-          directory: sessions.getSession(ctx.userId)?.directory,
+          // location 实例分仓，裸查失明/裸 reply 404——见 design §3.6 权限实例上下文）。
+          // 会话隔离：目录=锚定会话自身目录（锚定≠绑定时已从服务端回读）。
+          directory: anchorDirectory,
           // 修复⑧：受领即落台账锚点 + 本地闭合变量（前台超时转后台等待要带上）
           onAccepted: (info) => {
             promptId = info.promptId
@@ -1364,10 +1419,19 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         }
         // DEF-qqbot-20261110-9（2026-11-10 回归实证）：有正文但被 24h 去重拦截时
         // 不得记 answered——那是「台账假已答、用户侧零内容」。改记 error 并给用户交代。
+        // 会话隔离（owner 2026-11-14）：推送门拦截≠未送达——结果已入锚定会话历史
+        // （QQ 只呈现当前绑定会话），按 answered 结清；仅 24h 去重拦截记 error。
         if (replyText.trim() && !turnDelivered) {
-          await safeDeliver(ctx, "⚠️ 本轮结果与 24h 内已发送内容重复，已被防重拦截（未重复投递）。如非预期请重发或换个说法")
+          if (ctx.anchorSessionId && !isBoundSession(ctx.userId, ctx.anchorSessionId)) {
+            console.log(`[push-gate] 回合结果按历史可回读结清 answered msg=${shortId(trackId)}`)
+            settleInflight(trackId, undefined, "answered")
+          } else {
+            await safeDeliver(ctx, "⚠️ 本轮结果与 24h 内已发送内容重复，已被防重拦截（未重复投递）。如非预期请重发或换个说法")
+            settleInflight(trackId, undefined, "error")
+          }
+        } else {
+          settleInflight(trackId, undefined, "answered")
         }
-        settleInflight(trackId, undefined, replyText.trim() && !turnDelivered ? "error" : "answered")
       } catch (error) {
         if (error instanceof SupersededError) {
           // DEF-qqbot-20261107-P2：同会话新输入（桌面端/他端直注）接管了本回合——
@@ -1422,22 +1486,24 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         if (sessionId) unsubscribeSession(sessionId, ctx.userId) // /watch 若仍挂着则保留订阅
         // 镜像解锁：转后台的任务由 bgWait 完成时解锁，其余延迟 5 秒（SSE 事件宽限）
         if (sessionId && !bgWaits.has(sessionId)) mirror.scheduleUnlock(sessionId)
-        busyUsers.delete(ctx.userId)
-        if (activeIntents.get(ctx.userId) === intentKey) activeIntents.delete(ctx.userId)
+        // 会话隔离：释放本消息 lane；派发解析出的会话与锚定不同（null lane 新建会话）时一并释放
+        busyUsers.delete(lane)
+        if (sessionId && laneOf(ctx.userId, sessionId) !== lane) busyUsers.delete(laneOf(ctx.userId, sessionId))
+        if (activeIntents.get(lane) === intentKey) activeIntents.delete(lane)
         // 队列完成回执（默认关闭）：只对 drain 重入的条目发，普通消息不刷屏。
         const finishedQueueId = queueIdOfCtx.get(ctx)
         if (finishedQueueId !== undefined && QUEUE_RECEIPTS_ENABLED) {
-          await notifyUser(ctx, `队列 #${finishedQueueId} 完成（剩余 ${msgQueue.size(ctx.userId)} 条）`)
+          await notifyUser(ctx, `队列 #${finishedQueueId} 完成（剩余 ${msgQueue.sizeUser(ctx.userId)} 条）`)
         }
-        // Q1：回合结束（成功/失败/转后台）→ 自动执行该用户队列下一条；
+        // Q1：回合结束（成功/失败/转后台）→ 自动执行该 lane 下一条；
         // 转后台等待的会话保持串行——由 bgWait 完成时再 drain（不与前序后台任务并发）
-        if (sessionId && !bgWaits.has(sessionId)) void drainQueue(ctx.userId)
+        if (sessionId && !bgWaits.has(sessionId)) void drainQueue(ctx.userId, sessionId)
       }
     } catch (error) {
       // 认领后、内层回合兜底之前的异常（如排队附件预下载失败）也必须结清，
       // 否则重启对账会把已反馈失败的消息再执行一次。
       if (claimedMsgId) settleInflight(claimedMsgId, undefined, "error")
-      if (activeIntents.get(ctx.userId) === intentKey) activeIntents.delete(ctx.userId)
+      if (activeIntents.get(lane) === intentKey) activeIntents.delete(lane)
       console.error("[bridge] handleMessage failed:", error)
       try {
         await sendReply(ctx, `处理消息失败：${toErrorMessage(error)}`)
@@ -1463,35 +1529,47 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       (e) => !e.sessionId && !e.promptId && Date.now() - e.at <= restoreWindow,
     )
     if (queueCandidates.length > 0) {
-      const byUser = new Map<string, InflightEntry[]>()
+      // 会话隔离（owner 2026-11-14）：按 (userId, 锚定 sessionId) 分 lane 重建——
+      // 2026-11-14 起 queued 级入队即落 sessionId 快照；旧账无 sessionId 归 null lane。
+      const byLane = new Map<string, InflightEntry[]>()
       for (const e of queueCandidates) {
-        const list = byUser.get(e.userId) ?? []
+        const lk = laneOf(e.userId, e.sessionId)
+        const list = byLane.get(lk) ?? []
         list.push(e)
-        byUser.set(e.userId, list)
+        byLane.set(lk, list)
       }
-      for (const [userId, list] of byUser) {
+      for (const [lk, list] of byLane) {
+        const uid = userIdOfLane(lk)
+        const sid = sessionIdOfLane(lk)
         list.sort((a, b) => (a.enqueuedAt ?? a.at) - (b.enqueuedAt ?? b.at))
         const jobs = list.map((e) => ({
           ...(e.queueId !== undefined ? { id: e.queueId } : {}),
-          ctx: { type: "c2c" as const, userId, msgId: e.msgId, content: e.text, timestamp: String(e.at) },
+          ctx: {
+            type: "c2c" as const,
+            userId: uid,
+            msgId: e.msgId,
+            content: e.text,
+            timestamp: String(e.at),
+            ...(sid ? { anchorSessionId: sid } : {}),
+          },
           text: e.text,
           enqueuedAt: e.enqueuedAt ?? e.at,
         }))
-        const restored = msgQueue.restore(userId, jobs)
+        const restored = msgQueue.restore(lk, uid, sid, jobs)
         if (restored > 0) {
-          const restoredJobs = msgQueue.list(userId).slice(-restored)
+          const restoredJobs = msgQueue.list(lk).slice(-restored)
           for (const job of restoredJobs) {
             // drain 重入必须跳过重复认领，否则 duplicate-msgid 会把恢复条目静默丢掉。
             claimedContexts.add(job.ctx)
             // force：旧 stage（如 dispatched 空账）在进程换代后不再可信，恢复即回到 queued。
-            markInflightStage(job.ctx.msgId, "queued", { queueId: job.id, enqueuedAt: job.enqueuedAt }, { force: true })
+            markInflightStage(job.ctx.msgId, "queued", { queueId: job.id, enqueuedAt: job.enqueuedAt, ...(sid ? { sessionId: sid } : {}) }, { force: true })
             restorable.add(job.ctx.msgId)
           }
           console.log(
-            `[queue] restore user=${userId.slice(0, 8)}… count=${restored} window=${Math.round(restoreWindow / 60_000)}m`,
+            `[queue] restore user=${uid.slice(0, 8)}… lane=${sid ? shortId(sid) : "∅"} count=${restored} window=${Math.round(restoreWindow / 60_000)}m`,
           )
           await deliver(
-            ctxForUser(userId),
+            ctxForUser(uid),
             `🔄 重启恢复：${restored} 条排队消息已恢复（发 /queue 查看；/queue clear 可清空）`,
           )
         }
@@ -1554,20 +1632,26 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     }
   }
 
-  // Q1：队列 drain——取该用户队首消息重走完整管线。draining 防重入；
+  // Q1：队列 drain——取该 (用户,会话) lane 队首重走完整管线。draining 防重入；
   // handleMessage 自身的 finally 会继续 drain 下一条（链式）。
-  async function drainQueue(userId: string): Promise<void> {
-    if (draining.has(userId) || busyUsers.has(userId)) return
+  // 会话隔离（owner 2026-11-14）：drain 只动指定 lane；锚定随 ctx 传递——
+  // 排队期间绑定切走也按入队锚定派发（消息跟原会话，不跟漂移的绑定）。
+  async function drainQueue(userId: string, sessionId?: string): Promise<void> {
+    const lane = laneOf(userId, sessionId)
+    if (draining.has(lane) || busyUsers.has(lane)) return
     // 审批挂起时不出队：此时出队只会被 handleMessage 的 pendingPerm 早退吞掉并结清
     // （消息白排队）。等挂起审批的回合走完 finally 自然会再次 drain。
-    if (perm.getPending(userId)) return
-    const job = msgQueue.shift(userId)
+    // 会话隔离：只有挂起审批属于本 lane 的会话才挡本 lane（其他会话的审批不挡）。
+    const pending = perm.getPending(userId)
+    if (pending && (!sessionId || pending.request.sessionID === sessionId)) return
+    const job = msgQueue.shift(lane)
     if (!job) return
-    draining.add(userId)
+    draining.add(lane)
     queueIdOfCtx.set(job.ctx, job.id)
+    if (job.sessionId) job.ctx.anchorSessionId = job.ctx.anchorSessionId ?? job.sessionId
     if (job.ctx.msgId) markInflightStage(job.ctx.msgId, "dispatched", { queueId: job.id })
-    const remain = msgQueue.size(userId)
-    console.log(`[queue] drain-start user=${userId.slice(0, 8)}… qid=${job.id} remain=${remain}`)
+    const remain = msgQueue.size(lane)
+    console.log(`[queue] drain-start user=${userId.slice(0, 8)}… lane=${sessionId ? shortId(sessionId) : "∅"} qid=${job.id} remain=${remain}`)
     try {
       await notifyUser(job.ctx, `开始执行队列 #${job.id}（剩余 ${remain} 条）`)
       drainReentries.add(job.ctx) // 修复⑦：drain 重入跳过受理回执
@@ -1575,9 +1659,9 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     } catch (error) {
       console.error("[bridge] 队列执行失败:", error)
     } finally {
-      draining.delete(userId)
-      console.log(`[queue] drain-done user=${userId.slice(0, 8)}… qid=${job.id} remain=${msgQueue.size(userId)}`)
-      if (msgQueue.size(userId) > 0 && !busyUsers.has(userId)) void drainQueue(userId)
+      draining.delete(lane)
+      console.log(`[queue] drain-done user=${userId.slice(0, 8)}… qid=${job.id} remain=${msgQueue.size(lane)}`)
+      if (msgQueue.size(lane) > 0 && !busyUsers.has(lane)) void drainQueue(userId, sessionId)
     }
   }
 

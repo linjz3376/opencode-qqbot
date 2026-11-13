@@ -7,7 +7,7 @@
 // 两者失联时用户从 /queue 只能看到"队列：空"。本模块把三源（队列/台账/运行态）
 // join 成 9 个对外状态，并给出可复算的回复文案。
 import type { InflightEntry, InflightStage, SettleReason } from "./inflight-journal.js"
-import { agoLabel, intentKeyOf, previewText, type QueuedJob } from "./message-queue.js"
+import { agoLabel, intentKeyOf, laneKeyOf, previewText, type QueuedJob } from "./message-queue.js"
 import { messageFingerprint } from "./inbound-dedupe.js"
 
 /** 孤儿判定阈值：台账在途、不在队列、也不在运行/后台，超过该时长即孤儿。 */
@@ -62,8 +62,8 @@ export interface QueueView {
   queued: ViewEntry[]
   /** 已受理但还在派发窗口内的条目 */
   claimed: ViewEntry[]
-  /** 执行中的条目（最多一条，同用户串行） */
-  running?: ViewEntry
+  /** 执行中的条目（会话隔离后每 (用户,会话) lane 至多一条，用户可多 lane 并行） */
+  running: ViewEntry[]
   /** 后台等待的条目 */
   background: ViewEntry[]
   /** 已派发但当前无运行标记的条目（可能刚结束未销账/进程换代间隙） */
@@ -135,10 +135,10 @@ export interface DeriveQueueViewInput {
   /** 该用户的内存队列 */
   jobs: readonly QueuedJob[]
   runtime: {
-    busy: boolean
+    /** 忙 lane 集合（lane 键 = userId|sessionId；会话隔离后按条目自身会话判定 running） */
+    busyLanes: ReadonlySet<string>
+    /** 任一 lane 正在 drain */
     draining: boolean
-    /** 该用户当前会话 id（台账 sessionId 对齐用） */
-    sessionId?: string
     /** 处于后台等待的会话集合 */
     bgSessions: ReadonlySet<string>
   }
@@ -256,13 +256,15 @@ export function deriveQueueView(input: DeriveQueueViewInput): QueueView {
   const background: ViewEntry[] = []
   const dispatchedOthers: ViewEntry[] = []
   const orphan: ViewEntry[] = []
-  let running: ViewEntry | undefined
+  const running: ViewEntry[] = []
   let dispatchedWithoutRuntime = 0
 
   for (const entry of inflight) {
     if (linkedMsgIds.has(entry.msgId)) continue
     const inBg = !!entry.sessionId && input.runtime.bgSessions.has(entry.sessionId)
-    const sameSession = !!entry.sessionId && entry.sessionId === input.runtime.sessionId
+    // 会话隔离（owner 2026-11-14）：running 判定看条目自身会话的 lane 忙闲——
+    // 与「当前绑定」解耦：锚定会话的回合在跑即执行中，哪怕用户已切走绑定。
+    const laneHit = !!entry.sessionId && input.runtime.busyLanes.has(laneKeyOf(entry.userId, entry.sessionId))
     const hasDispatched = !!entry.sessionId
     const stageRank = entry.stage ? STAGE_RANK[entry.stage] : hasDispatched ? STAGE_RANK.dispatched : STAGE_RANK.claimed
 
@@ -270,10 +272,8 @@ export function deriveQueueView(input: DeriveQueueViewInput): QueueView {
       background.push(toViewEntry(entry, "background"))
       continue
     }
-    if (input.runtime.busy && sameSession && (entry.promptId || stageRank >= STAGE_RANK.dispatched)) {
-      const view = toViewEntry(entry, "running")
-      if (!running) running = view
-      else orphan.push(view) // 同用户串行下不应出现第二条；出现即异常
+    if (laneHit && (entry.promptId || stageRank >= STAGE_RANK.dispatched)) {
+      running.push(toViewEntry(entry, "running"))
       continue
     }
     // 已派发级（stage ≥ dispatched，含 drain 派发窗口 sessionId 尚未回填的秒级间隙）：
@@ -309,7 +309,7 @@ export function deriveQueueView(input: DeriveQueueViewInput): QueueView {
     .slice(0, 20)
     .map((e) => toViewEntry(e, "settled"))
 
-  const inflightEntries = [...queued, ...claimed, ...background, ...dispatchedOthers, ...(running ? [running] : []), ...orphan].sort(
+  const inflightEntries = [...queued, ...claimed, ...background, ...dispatchedOthers, ...running, ...orphan].sort(
     (a, b) => a.at - b.at,
   )
 
@@ -363,11 +363,11 @@ export function deriveQueueView(input: DeriveQueueViewInput): QueueView {
 
   return {
     now,
-    busy: input.runtime.busy,
+    busy: input.runtime.busyLanes.size > 0,
     orphanMs,
     queued,
     claimed,
-    ...(running ? { running } : {}),
+    running,
     background,
     dispatchedOthers,
     orphan,
@@ -378,7 +378,7 @@ export function deriveQueueView(input: DeriveQueueViewInput): QueueView {
     counts: {
       queued: queued.length,
       inflight: inflight.length,
-      running: running ? 1 : 0,
+      running: running.length,
       background: background.length,
       dispatched: dispatchedOthers.length,
       claimed: claimed.length,
@@ -525,8 +525,11 @@ export function formatQueueReply(view: QueueView, opts: QueueReplyOptions = {}):
     lines.push(`派发中 ${view.counts.claimed} 条（受理后 90s 内，正常窗口）`)
   }
 
-  if (view.counts.running > 0 && view.running) {
-    lines.push(`执行中：#${view.running.queueId ?? "-"} · ${previewText(view.running.text, PREVIEW)} · ${agoLabel(view.running.at, view.now)}`)
+  if (view.counts.running > 0) {
+    for (const r of view.running.slice(0, 5)) {
+      lines.push(`执行中：#${r.queueId ?? "-"} · ${previewText(r.text, PREVIEW)} · ${agoLabel(r.at, view.now)}`)
+    }
+    if (view.running.length > 5) lines.push(`  …还有 ${view.running.length - 5} 条执行中（多会话并行）`)
   }
 
   if (view.counts.background > 0) {

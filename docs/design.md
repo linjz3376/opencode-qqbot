@@ -92,7 +92,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 | 功能域 | 机制 |
 |---|---|
-| 调度 | 每用户串行；`pendingSelections`（/sessions /model 序号选择，TTL 60s）；首条消息问候；队列完成回执开关制（`QQ_QUEUE_RECEIPTS`，默认关） |
+| 调度 | 每(用户,会话) 串行（per-lane；DEF-qqbot-20261112-01 修法=官方 per-peer 的会话级细腻化）；`pendingSelections`（/sessions /model 序号选择，TTL 60s）；首条消息问候；队列完成回执开关制（`QQ_QUEUE_RECEIPTS`，默认关） |
 | 回合边界 | prompt API 受理返回 promptId 精确锚定；前台直答/后台等待/补投共用 `turnStateOf` 判定，不依赖"下一条 user 消息"启发式 |
 | 后台等待 | `bgWait`：回合转后台后继续等结果（SSE + 1min 轮询兜底，P0-1 收紧自 5min）；停滞提醒（30min 节奏，stallSnapshot 纯函数先取快照再重置，闲置分钟/执行时长跨重启不丢）；后台 15min 进度心跳（BG_HEARTBEAT）；missingIdleDone 完成兜底判定；finalAnswerText 工作稿防误投 |
 | 引用上下文 | context-buffer：引用解析 LRU 缓存（QQ 103 内嵌被引内容权威 + 本地缓存兜底）+ 出站回复登记（供"引用 AI 答案"命中） |
@@ -114,7 +114,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | K1 | msgId 原子认领（跨进程文件锁） | 同一 msgId 重复受理 → 静默拒（QQ 重推/重放不产生二次执行） |
 | K2 | 内容指纹（稳定尾段随机段） | 窗口内同内容 → 短提示拒；窗口外重投按重发处理 |
 
-**队列（message-queue）**：每用户 FIFO，上限 20；两条独立语义同时呈现——
+**队列（message-queue）**：每 (用户,会话) 一条 lane 的 FIFO（owner 2026-11-14 裁定=官方 per-peer 串行的会话级细腻化），每 lane 上限 20；僵尸/长回合只堵所在 lane。**入队即锚定 sessionId 快照，drain 按锚定会话派发**——排队期间绑定切走，消息仍回锚定会话执行（跟原会话，不跟漂移的绑定）；无绑定消息落 null lane，派发时经 getOrCreate 解析并按解析结果补锁。两条独立语义同时呈现——
 
 | 概念 | 语义 | 复用规则 |
 |---|---|---|
@@ -122,6 +122,8 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 位置 `第M位` | 当前实际排队次序 | 出队/删除后前移 |
 
 入队回执：`已排队 #N（第M位，前面还有 X 条）`；拒绝回执（队列满）固定文案并指向 /queue。
+
+**出站推送门（persona 面单活绑定，owner 2026-11-14 裁定）**：QQ 窗只呈现用户**当前绑定会话**的对话流——一切出站（直答/队列回执/摘要镜像/milestone 观察/审批卡/保险网告警）在投递时校验「锚定会话 = 当前绑定」；绑定已切走 → 本条不推（`[push-gate]` 日志留痕），只能经历史对话/桌面端回读。锚定会话随消息/事件携带（`ctx.anchorSessionId`，入队/派发时快照），门在 deliver 单点实施；审批卡与 nudge 告警走同一门（切走后不推，回合由 30min TTL 自然收尾）。
 
 **派生视图（queue-view，`deriveQueueView` 纯函数）**——输入固定（台账条目 + 队列 job + 运行态 + now），输出可复算；不制造新事实，join 键优先级 `msgId > queueId > fingerprint`。
 
@@ -132,7 +134,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | claimed | 已受理，未入队/派发 | 台账 inflight；不在队列/运行；age ≤ 90s |
 | queued | 排队中 | inflight + 在内存队列 |
 | dispatched | 已派发，等 prompt 落库 | inflight + 有 sessionId 无 promptId |
-| running | 执行中 | inflight + 有 promptId + busyUsers 命中 |
+| running | 执行中 | inflight + 有 promptId + 该条目会话的 busy lane 命中（每 lane 至多一条；用户多 lane 可并行） |
 | background | 后台等待 | bgWaits 命中该 session |
 | settled | 已答 | settled + reason=answered |
 | rejected | 已拒/作废 | settled + reason ∈ {queue-full, duplicate-msgid, duplicate-intent, cancelled, dropped, expired, error, redispatch, manual, blocked, superseded} |
@@ -155,7 +157,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 **重启恢复顺序**（队列语义 = 继续排队，不是重跑）：
 
 1. 读台账取 inflight；
-2. `stage=queued`（或无 sessionId/promptId 且 age 在窗口内）→ 按 enqueuedAt/at 升序重建内存队列；
+2. `stage=queued`（或无 sessionId/promptId 且 age 在窗口内）→ 按 (userId, 锚定 sessionId) 分 lane、lane 内按 enqueuedAt/at 升序重建内存队列；
 3. 其余 inflight → `classifyInflight`（查会话历史）：answered→补投并结清；running→重挂后台等待；lost→窗口内重派 / 超窗仅通知；
 4. 全部动作写日志 + updatedAt。
 
@@ -164,7 +166,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 **官方对齐口径（2026-11-12 P0 考据，基准=tencent-connect 双源 + @tencent-connect/qqbot-nodejs@1.0.5 SDK 源码）**：
 
 - 官方事实标准 = SDK 洋葱中间件链：errorHandler → messageFilter（回声+去重）→ 访问控制（空名单 fail-closed）→ 历史/门控/清洗 → 三层限流 → 斜杠命令 → 待答截获 → **concurrencyGuard** → 引用/附件/信封。`concurrencyGuard` 官方注释明言"同 peer 并发调平台会 500"——同用户串行是官方硬性实践；dsh 选用 merge 策略（忙时缓冲、忙完批量合并为一个 survivor）+ maxQueue 20 + maxProcessingMs
-- 同构/超集（审计结论：维持现状）：每用户串行单飞=concurrencyGuard 同构；命令/裁决先于队列=官方 slash/questionAnswer 前置同构；K1/K2 去重=官方 messageFilter（进程内 5s/1000 条）的超集——bot 有重启重派/RESUME 回放长窗（DEF-20261110-2 实证），官方把回合生命周期交宿主 runtime 无此需求；QUEUE_MAX 满员 queue-full 用户可见结算，优于官方默认静默 onDrop；被动窗 5min 与官方群 TTL 一致
+- 同构/超集（审计结论：维持现状）：官方 concurrencyGuard 按 peer 串行（"同 peer 并发调平台会 500"）；bot 自 2026-11-14（owner 裁定，DEF-qqbot-20261112-01 修法）细化为按 **(用户,会话) lane** 串行——引擎本就按会话实例路由、桌面端本就允许多会话并行，此为官方模型的会话级细腻化，不归差异项；命令/裁决先于队列=官方 slash/questionAnswer 前置同构；K1/K2 去重=官方 messageFilter（进程内 5s/1000 条）的超集——bot 有重启重派/RESUME 回放长窗（DEF-20261110-2 实证），官方把回合生命周期交宿主 runtime 无此需求；QUEUE_MAX 满员 queue-full 用户可见结算，优于官方默认静默 onDrop；被动窗 5min 与官方群 TTL 一致
 - 合理增强（纯中继架构必需，官方无对应层）：在途台账/30min 转后台/24h 兜底/supersede 接管/看门狗/启动对账
 - 差异项（入学习 backlog，待 owner 裁定是否吸收）：① merge 批量合并（bot 逐条排队，消息洪流 N 连发——吸收会改变"一条消息一回合"的用户语义）；② 单条消息被动回复次数帽（官方 openclaw 取 4 次/1h，bot 仅控日配额+被动窗）；③ urgentPredicate 高优先级跳队（/cancel 语义不同，可借鉴）
 - 举一反三盲区扫描结论（裸发 REST 按服务端路由方式分类）：会话域安全（message.ts 全局 Session.Service；session.ts `instances.provide(info)` 按会话实例路由）；表单域安全（引擎有 FormLocationMiddleware 专门按会话路由）；**权限域曾是唯一 ambient 盲区**（引擎未给权限端点对等 middleware）→ 已由 x-opencode-directory 全链携带修复（DEF-qqbot-20261112-1），并建议上游 issue 对齐 FormLocationMiddleware 模式
@@ -179,7 +181,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | userId / text / at | QQ 用户 / 消息正文（截 300 字）/ 受理时刻 | 基本事实 |
 | fingerprint | 内容指纹（稳定尾段随机段） | K2 去重；join 键次优先级 |
 | attemptId | 本次受理尝试 ID | 跨进程认领/销账对齐 |
-| sessionId / promptId | 进入的会话 / 锚定回合 | 派生 dispatched/running 判定 |
+| sessionId / promptId | 进入的会话 / 锚定回合（入队即快照：排队期绑定切走仍回锚定会话——见 §3.4 队列锚定） | 派生 dispatched/running 判定 |
 | state | `inflight`（在途）/ `settled`（已结清） | 主状态，旧代码兼容 |
 | stage | `claimed` → `queued` → `dispatched` → `running` → `background` → `settled` | 生命周期阶段，派生视图输入 |
 | queueId | 票号（对齐队列 #N，只增不复用） | drop/日志关联 |
@@ -281,7 +283,8 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 网关状态持久化 | session/seq 落盘，重启优先 RESUME | 重启 IDENTIFY 失忆会引发 backlog 重放，与幂等/台账叠加成风暴 |
 | 杀/重启归一 | 唯一权威与完整机制**只出在 §3.9.1**（superviseOnce：优雅杀+冷却+强度上限+give-up 告警） | kill+spawn 分散多处 = 互杀与边杀边拉的根源；所有重启必须受控 |
 | 在途台账 | 一切"重启后要记住"的状态落盘；退出路径必须结账 | 内存态即缺陷候选；孤儿/幽灵必须可观测、可修复、禁静默删除 |
-| 队列恢复语义 | 重启后 queued 条目重建队列"继续排队"，非重跑 | "重跑一条"会重复副作用；"继续排队"保持用户意图 |
+| 队列恢复语义 | 重启后 queued 条目重建队列"继续排队"，非重跑；重建按 (用户,锚定会话) lane 归组 | "重跑一条"会重复副作用；"继续排队"保持用户意图 |
+| 会话隔离（DEF-qqbot-20261112-01 修法①） | 队列/忙锁按 (用户,会话) lane；入队锚定 sessionId 快照、drain 按锚定派发；出站推送门=锚定≠当前绑定不推 | 僵尸/长回合只堵所在会话；persona 面单活绑定的出站语义（owner 2026-11-14） |
 | 回合边界 | promptId 精确锚定（turnStateOf），不依赖消息启发式 | 共享会话里"下一条 user/assistant"启发式必然张冠李戴 |
 | 超时语义 | 会话没有超时限，只有弹窗有 TTL：30min 只通知转后台，24h 硬上限兜底 | 长任务合法；误杀长回合会造成 -32603 级联 |
 | 审批 fail-closed | 无匹配选项=cancelled；拒绝后显式 cancel；冲突即告警 | 安全底线 |
@@ -319,3 +322,4 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 2026-11-12 | §3.6 | DEF-qqbot-20261112-3 双防线同请求收养不重复推卡；交互监听兜底改按会话端点（抄袭桌面形态：引擎按会话实例路由，零 directory 簿记）；闸门恢复 500ms（owner 当轮明示改 .env）；挂起槽计时器 unref 修测试链挂死 | ZERO3 实测双卡实证（bot.out.log 11:37:01-02 同请求两卡）；verify 46 套件 EXIT=0 |
 | 2026-11-12 | §3.4 / §4 | 新增「官方对齐口径」：P0 SDK 中间件链对照（concurrencyGuard 串行/messageFilter 去重/有界队列/被动窗），同构·超集·增强·差异四级分类，差异项入学习 backlog；新增「官方对齐基准」决策行 | openclaw-qqbot@8998881 / dsh-qqbot@0ddf232e / @tencent-connect/qqbot-nodejs@1.0.5 源码考据（快照 %TEMP%\opencode\qqbot-sync\20261112-104047） |
 | 2026-11-12 | §3.6 / §4 | 新增「权限实例上下文」考据行（per-location 待审仓 + location 解析三规则 + 桌面 auto-approve 机制）；权限 REST 全链携带 `x-opencode-directory`；延迟闸反查同实例化；新增「完成判定同口径」决策（textCompleted） | DEF-qqbot-20261112-1/2；opencode v2.2.6 源码考据（sst/opencode tag dc2ffcf：core/permission.ts、server/handlers/permission.ts、server/location.ts、app/session/requests/auto-approve.ts、core/session/message-updater.ts） |
+| 2026-11-14 | §3.3 / §3.4 / §3.5 / §4 | 队列按 (用户,会话) lane（官方 per-peer 的会话级细腻化，owner 当轮）；入队锚定 sessionId 快照+drain 按锚定派发；新增「出站推送门」（锚定≠当前绑定不推）；running 口径改 per-lane；重启恢复按 lane 归组；DEF-qqbot-20261112-01 修法①落地 | owner 当轮「修」原话三口径；精读 design+bridge 实证（msgQueue/busyUsers/drain 全 per-user，1221 行注=派发时回填） |

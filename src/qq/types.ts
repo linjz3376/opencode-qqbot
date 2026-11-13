@@ -149,6 +149,11 @@ export interface MessageContext {
   attachments?: MessageAttachment[]
   /** 排队时预下载的附件（Q1：避免 drain 时 QQ 签名 URL 过期——入队即落盘） */
   preparedAttachments?: import("./media.js").PreparedAttachments
+  /**
+   * 锚定会话（owner 2026-11-14 会话隔离裁定）：入队/派发时快照的目标会话。
+   * 出站推送门据此校验「锚定=当前绑定」，绑定切走即不推（design §3.4 出站推送门）。
+   */
+  anchorSessionId?: string
   timestamp?: string
   rawEvent?: C2CMessageEvent | GroupMessageEvent
 }

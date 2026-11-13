@@ -14,11 +14,12 @@ import { matchFence, normalizeOutboundMarkdown } from "./markdown.js"
 import { ReplyLimiter } from "./reply-limiter.js"
 import { recordMessage, scopeKeyOf } from "./context-buffer.js"
 
-// 用户级推送队列：节流合并（主动消息配额记账已移至 activeQuota 共享）
+// 用户级推送队列：节流合并（主动消息配额记账已移至 activeQuota 共享）。
+// 每行带可选锚定会话（owner 2026-11-14 出站推送门）：flush 时按锚定分组、逐组校验当前绑定。
 interface PushQueue {
   lastSent: number
   timer: ReturnType<typeof setTimeout> | null
-  lines: string[]
+  lines: Array<{ line: string; anchor?: string }>
 }
 
 // O5（2026-10-15，P2-4b）：主动配额落盘——跨重启不归零，防日配额轻微超发。
@@ -224,8 +225,9 @@ export function selectRideMsgId(
 }
 
 export interface Delivery {
-  enqueuePush: (userId: string, line: string) => void
-  /** 返回 true=实际出站成功；false=24h 去重拦截（DEF-qqbot-20261110-9：调用方据此刻画销账口径） */
+  /** anchorSessionId=该观察行的锚定会话（出站推送门按它校验当前绑定，design §3.4） */
+  enqueuePush: (userId: string, line: string, anchorSessionId?: string) => void
+  /** 返回 true=实际出站成功；false=24h 去重拦截或推送门拦截（DEF-qqbot-20261110-9：调用方据此刻画销账口径） */
   deliver: (ctx: MessageContext, text: string) => Promise<boolean>
   /** 同 deliver；彻底失败时贴条待下次消化并返回 false */
   safeDeliver: (ctx: MessageContext, text: string) => Promise<boolean>
@@ -234,9 +236,11 @@ export interface Delivery {
 
 // 投递域门面。lastCtx 为跨域共享状态（bridge 拥有写权），本域只读——
 // 用于推送/批量行的被动窗口内降级判断与主动通道选择。
+// pushGate=出站推送门（owner 2026-11-14）：锚定会话≠用户当前绑定即拦截。
 export function createDelivery(
   config: Config,
   lastCtx: ReadonlyMap<string, MessageContext>,
+  pushGate?: (userId: string, anchorSessionId: string) => boolean,
 ): Delivery {
   const PUSH_MIN_GAP_MS = 2000      // 用户级节流：最快 2 秒一批
   const PUSH_MAX_LINES = 6          // 队列上限：洪峰丢最旧，防积压
@@ -272,14 +276,14 @@ export function createDelivery(
   // O5：恢复落盘配额（非当日条目由 deliver 按 day 字段自然重置）
   for (const [uid, q] of Object.entries(loadQuotaMap())) activeQuota.set(uid, q)
 
-  function enqueuePush(userId: string, line: string): void {
+  function enqueuePush(userId: string, line: string, anchorSessionId?: string): void {
     let q = pushQueues.get(userId)
     if (!q) {
       q = { lastSent: 0, timer: null, lines: [] }
       pushQueues.set(userId, q)
     }
     if (q.lines.length >= PUSH_MAX_LINES) q.lines.shift()
-    q.lines.push(line)
+    q.lines.push({ line, ...(anchorSessionId ? { anchor: anchorSessionId } : {}) })
     if (q.timer) return
     const wait = Math.max(0, PUSH_MIN_GAP_MS - (Date.now() - q.lastSent))
     q.timer = setTimeout(() => {
@@ -296,13 +300,29 @@ export function createDelivery(
       q.lines.length = 0
       return
     }
-    const text = q.lines.splice(0, q.lines.length).map((l) => `· ${l}`).join("\n")
+    // 按锚定会话分组：同组行合并投递；锚定≠当前绑定的整组被推送门丢弃（历史可回读）。
+    const batches: Array<{ anchor?: string; lines: string[] }> = []
+    for (const item of q.lines.splice(0, q.lines.length)) {
+      const last = batches[batches.length - 1]
+      if (last && last.anchor === item.anchor) last.lines.push(item.line)
+      else batches.push({ ...(item.anchor ? { anchor: item.anchor } : {}), lines: [item.line] })
+    }
     q.lastSent = Date.now()
-    try {
-      await deliver(ctx, text)
-    } catch (error) {
-      undelivered.add(userId) // P 项：观察推送彻底失败 → 贴条待下次消化
-      console.error("[bridge] 观察推送失败（被动+主动均失败，丢弃本批）:", error)
+    for (const batch of batches) {
+      if (batch.anchor && pushGate && !pushGate(userId, batch.anchor)) {
+        console.log(
+          `[push-gate] 观察推送整组拦截：绑定已切走 anchor=${batch.anchor.slice(0, 12)}… user=${userId.slice(0, 8)}… count=${batch.lines.length}`,
+        )
+        continue
+      }
+      const text = batch.lines.map((l) => `· ${l}`).join("\n")
+      const outCtx: MessageContext = batch.anchor ? { ...ctx, anchorSessionId: batch.anchor } : ctx
+      try {
+        await deliver(outCtx, text)
+      } catch (error) {
+        undelivered.add(userId) // P 项：观察推送彻底失败 → 贴条待下次消化
+        console.error("[bridge] 观察推送失败（被动+主动均失败，丢弃本批）:", error)
+      }
     }
   }
 
@@ -313,6 +333,14 @@ export function createDelivery(
   // P 项贴条包装：deliver 入口消化贴条状态——有待贴条则前缀拼入正文；
   // 投递失败则把贴条放回（留待下次），成功才算消化。
   async function deliver(ctx: MessageContext, text: string): Promise<boolean> {
+    // 出站推送门（design §3.4，owner 2026-11-14 会话隔离裁定）：QQ 窗只呈现当前绑定
+    // 会话——锚定会话≠当前绑定即不推（结果已入锚定会话历史，可经历史/桌面端回读）。
+    if (ctx.anchorSessionId && pushGate && !pushGate(ctx.userId, ctx.anchorSessionId)) {
+      console.log(
+        `[push-gate] 出站拦截：绑定已切走 anchor=${ctx.anchorSessionId.slice(0, 12)}… user=${ctx.userId.slice(0, 8)}… chars=${text.length}`,
+      )
+      return false
+    }
     const now = Date.now()
     // 跨进程原子占位：直答/镜像/恢复即使落在不同执行体，同文长回复也只放行一次。
     const attemptKey = reserveDeliveryAttempt(ctx.userId, text, now)
