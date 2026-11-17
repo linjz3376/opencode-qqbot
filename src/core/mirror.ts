@@ -2,9 +2,8 @@
 // @output: createMirror
 // @pos:    根层/core - 摘要镜像域（O7d 2026-10-15 自 bridge.ts 拆出：会话订阅、
 //          QQ 回合标记与延迟解锁、回合完成摘要投递、开关持久化）
+import { storageFile, storageRoot } from "./storage.js"
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs"
-import { join } from "path"
-import { homedir } from "os"
 import type { MessageContext } from "../qq/types.js"
 import type { OpencodeClient } from "../opencode/client.js"
 import { createEventStream } from "../opencode/eventstream.js"
@@ -16,12 +15,12 @@ import type { MirrorApi } from "../commands.js"
 type EventStream = ReturnType<typeof createEventStream>
 
 // 摘要镜像开关（~/.openqq/settings.json 持久；BOM 防御与 greeted 一致）
-const MIRROR_SETTINGS_FILE = join(homedir(), ".openqq", "settings.json")
+const MIRROR_SETTINGS_FILE = storageFile("settings.json")
 
-function loadMirrorEnabled(): boolean {
+function loadMirrorEnabled(file: string = MIRROR_SETTINGS_FILE): boolean {
   try {
-    if (existsSync(MIRROR_SETTINGS_FILE)) {
-      const raw = readFileSync(MIRROR_SETTINGS_FILE, "utf-8").replace(/^\uFEFF/, "")
+    if (existsSync(file)) {
+      const raw = readFileSync(file, "utf-8").replace(/^\uFEFF/, "")
       const parsed = JSON.parse(raw)
       if (typeof parsed?.mirror === "boolean") return parsed.mirror
     }
@@ -31,13 +30,13 @@ function loadMirrorEnabled(): boolean {
   return true // 默认开（用户点单 A 摘要镜像）
 }
 
-function saveMirrorEnabled(enabled: boolean): void {
+function saveMirrorEnabled(enabled: boolean, file: string = MIRROR_SETTINGS_FILE): void {
   try {
-    mkdirSync(join(homedir(), ".openqq"), { recursive: true })
+    mkdirSync(storageRoot(), { recursive: true })
     let existing: Record<string, unknown> = {}
-    if (existsSync(MIRROR_SETTINGS_FILE)) {
+    if (existsSync(file)) {
       try {
-        const raw = readFileSync(MIRROR_SETTINGS_FILE, "utf-8").replace(/^\uFEFF/, "")
+        const raw = readFileSync(file, "utf-8").replace(/^\uFEFF/, "")
         const parsed = JSON.parse(raw)
         if (parsed && typeof parsed === "object") existing = parsed
       } catch {
@@ -45,7 +44,7 @@ function saveMirrorEnabled(enabled: boolean): void {
       }
     }
     existing.mirror = enabled
-    writeFileSync(MIRROR_SETTINGS_FILE, JSON.stringify(existing, null, 2), "utf-8")
+    writeFileSync(file, JSON.stringify(existing, null, 2), "utf-8")
   } catch (error) {
     console.error("[mirror] 保存设置失败:", error)
   }
@@ -59,6 +58,8 @@ export interface MirrorDeps {
   safeDeliver: (ctx: MessageContext, text: string) => Promise<boolean>
   bgWaits: ReadonlyMap<string, { cancel: () => void }> // 后台等待在途则不解锁
   busyUsers: ReadonlySet<string> // 会话主人在忙则不解锁（5 秒宽限内再判定）
+  /** 多角色（2026-11-17）：镜像开关文件可按角色注入；缺省 legacy 全局 settings.json */
+  settingsFile?: string
 }
 
 export interface Mirror {
@@ -73,7 +74,7 @@ export function createMirror(deps: MirrorDeps): Mirror {
   const mirrorUnsubs = new Map<string, () => void>() // 摘要镜像订阅（独立于 /watch）
   const qqTurnActive = new Set<string>() // QQ 发起的轮次在途（镜像跳过防重复）
   const mirroredTurns = new Map<string, string>() // 逻辑回合幂等：多 location/重复完成事件只投一次
-  const mirrorState = { enabled: loadMirrorEnabled() }
+  const mirrorState = { enabled: loadMirrorEnabled(deps.settingsFile) }
 
   // ===== 摘要镜像（E 阶段 A 方案）：桌面会话轮次完成 → QQ 摘要卡 =====
   // 与 /watch 观察推送互补：观察给过程里程碑，镜像给问答正文摘要。
@@ -158,7 +159,7 @@ export function createMirror(deps: MirrorDeps): Mirror {
     set(enabled) {
       const prev = mirrorState.enabled
       mirrorState.enabled = enabled
-      saveMirrorEnabled(enabled)
+      saveMirrorEnabled(enabled, deps.settingsFile)
       if (enabled) {
         if (!prev) ensureMirrorSubs()
       } else {

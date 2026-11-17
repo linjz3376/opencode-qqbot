@@ -2,6 +2,7 @@
 // @output: createBridge, isAllowedUser, milestoneTargets, loadWatchedMap, saveWatchedMap,
 //          （O7b 再导出）parsePermissionDecision, formatPermissionPrompt
 // @pos:    根层 - 核心桥接: QQ 消息 -> OpenCode -> QQ 回复
+import { storageFile } from "./core/storage.js"
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
@@ -61,14 +62,8 @@ import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approva
 import { createFormBridge, renderFormPrompt } from "./core/form-bridge.js"
 import { recordMessage, resolveQuote, scopeKeyOf, extractEmbeddedQuote } from "./core/context-buffer.js"
 import {
-  claimInflightDetailed,
-  recordInflight,
-  settleInflight,
-  pendingInflight,
+  createInflightJournal,
   classifyInflight,
-  markInflightPromptId,
-  markInflightStage,
-  listInflightView,
   INFLIGHT_MAX_AGE_MS,
   redispatchMaxAgeMs,
   type InflightEntry,
@@ -247,7 +242,7 @@ export function finalAnswerText(msgs: SessionMessage[], promptId: string, baseli
   return text
 }
 
-interface Bridge {
+export interface Bridge {
   handleMessage: (ctx: MessageContext) => Promise<void>
   // HC2（2026-10-26）：暴露事件流句柄，index 侧链路自愈巡检需对其热换基
   eventStream: ReturnType<typeof createEventStream>
@@ -261,7 +256,15 @@ export function createBridge(
   config: Config,
   client: OpencodeClient,
   sessions: SessionManager,
+  /** 多角色（2026-11-17）：本 bridge 所属角色的 appId。传入后所有角色作用域
+   *  数据文件（台账/审批/表单/配额/观察/问候）落 ~/.openqq/roles/<appId>/；
+   *  缺省 = legacy 全局路径，单角色部署行为零变化。 */
+  storageAppId?: string,
 ): Bridge {
+  // 角色作用域数据根（storage.ts：legacy 根 or roles/<appId>/ 子目录）
+  const roleFile = (name: string): string => storageFile(name, storageAppId)
+  // 在途台账按角色绑定实例（同进程多角色并发不互踩，见 inflight-journal 工厂）
+  const inflight = createInflightJournal(storageAppId ? roleFile("inflight.json") : undefined)
   // H2 停滞提醒文案状态开关就用现成 env 读取风格；这里同步实现⑦开关——
   // 2026-11-03 用户拍板：「已收到」回执默认不发（非调试无价值），调试期在
   // ~/.openqq/.env 设 QQ_ACK_RECEIPT=1 开启。loadEnvFile 全量注入 process.env，
@@ -295,7 +298,7 @@ export function createBridge(
   const queueIdOfCtx = new WeakMap<MessageContext, number>()
   // Persist greeted users to disk so restarting the bot doesn't re-send the
   // full command list to every user on their next message.
-  const greeted = loadGreetedSet()
+  const greeted = loadGreetedSet(storageAppId ? roleFile("greeted.json") : undefined)
   const pendingSelections = new Map<string, PendingSelection>()
 
   // ===== 实时观察 / 回合过程推送 =====
@@ -447,7 +450,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         const rescuedText = finalAnswerText(probe?.data ?? [], promptId, baseline)
         if (rescuedText) {
           finished = true
-          settleInflight(tid, undefined, "answered")
+          inflight.settle(tid, undefined, "answered")
           mirror.scheduleUnlock(sessionId)
           void drainQueue(ctx.userId, sessionId)
           // 投递失败不得上抛：账已结清，补投失败由 deliver 层自己的重试/降级负责
@@ -458,7 +461,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       } catch {
         /* 探测失败落到 superseded 结算（原语义） */
       }
-      settleInflight(tid, undefined, "superseded")
+      inflight.settle(tid, undefined, "superseded")
       mirror.scheduleUnlock(sessionId)
     }
 
@@ -490,7 +493,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       finished = true
       // R 项：先销账再清理——cleanup 对未完成（被取代）路径按 superseded 结清，
       // 顺序必须账清在前，否则原因会被 superseded 覆盖（settle 幂等，后写不生效）。
-      if (trackId) settleInflight(trackId, undefined, kind === "done" ? "answered" : kind === "giveup" ? "expired" : "superseded")
+      if (trackId) inflight.settle(trackId, undefined, kind === "done" ? "answered" : kind === "giveup" ? "expired" : "superseded")
       cleanup()
       // Q1：后台等待终态 → 放行该 lane 队列（此前为串行而挂起；会话隔离后只放本会话 lane）
       void drainQueue(ctx.userId, sessionId)
@@ -607,7 +610,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     const pollTimer = setInterval(() => void tick(), BG_POLL_MS)
     const giveupTimer = setTimeout(() => void finish("giveup"), BG_WAIT_MAX_MS)
     bgWaits.set(sessionId, { cancel: cleanup })
-    if (trackId) markInflightStage(trackId, "background", { sessionId })
+    if (trackId) inflight.markStage(trackId, "background", { sessionId })
     console.log(`[bridge] 会话 ${sessionId} 转入后台等待（最长 ${BG_WAIT_MAX_MS / 3_600_000} 小时）`)
   }
 
@@ -618,7 +621,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       activeWatches.set(userId, sessionID)
       lastCtx.set(userId, ctx)
       subscribeSession(sessionID, userId)
-      saveWatchedMap(activeWatches) // R2-P1-3：落盘，重启恢复
+      saveWatchedMap(activeWatches, storageAppId ? roleFile("watch.json") : undefined) // R2-P1-3：落盘，重启恢复
       return [
         `👁 已开启观察：${sessionID}`,
         "该会话的工具调用/执行完成会实时推送摘要，/watch off 停止。",
@@ -630,7 +633,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       if (!sid) return "当前没有开启观察"
       activeWatches.delete(userId)
       unsubscribeSession(sid, userId)
-      saveWatchedMap(activeWatches) // R2-P1-3：落盘，重启不复活
+      saveWatchedMap(activeWatches, storageAppId ? roleFile("watch.json") : undefined) // R2-P1-3：落盘，重启不复活
       return `已停止观察：${sid}`
     },
     status(userId) {
@@ -640,7 +643,12 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   }
 
   // O7c：投递域门面（统一投递/降级/配额/节流队列/被动回复全在 core/delivery.ts）
-  const { enqueuePush, safeDeliver, sendReply, deliver } = createDelivery(config, lastCtx, isBoundSession)
+  const { enqueuePush, safeDeliver, sendReply, deliver } = createDelivery(
+    config,
+    lastCtx,
+    isBoundSession,
+    storageAppId ? roleFile("quota.json") : undefined,
+  )
   // DEF-1 修复（2026-11-04，UAT 实证）：通知类发送永不阻断主流程——受理回执/
   // K2 拦截/排队提示/问候等裸 sendReply 一旦被平台拒（40034024/超时）会直接
   // 中断 handleMessage（实证：回执失败 → 回合未派发给 AI 即结算，用户消息被吞）。
@@ -675,10 +683,22 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     // A 项：审批卡片发送（失败自动降级文字菜单，permission 域内处理）；origin 穿透到卡片正文
     sendApprovalPrompt: (ctx, request, mainSessionId, origin) =>
       sendApprovalCard({ appId: config.qq.appId, clientSecret: config.qq.clientSecret }, ctx, request, mainSessionId, origin),
+    // 多角色：审批态按角色分文件（缺省 legacy 全局）
+    persistFile: storageAppId ? roleFile("pending-permissions.json") : undefined,
   })
 
   // O7d：摘要镜像域门面（订阅/回合标记/延迟解锁/摘要投递全在 core/mirror.ts）
-  const mirror = createMirror({ sessions, eventStream, client, lastCtx, safeDeliver, bgWaits, busyUsers })
+  const mirror = createMirror({
+    sessions,
+    eventStream,
+    client,
+    lastCtx,
+    safeDeliver,
+    bgWaits,
+    busyUsers,
+    // 多角色：镜像开关按角色分文件（缺省 legacy 全局）
+    settingsFile: storageAppId ? roleFile("settings.json") : undefined,
+  })
 
   // openqq notify 外部入队通道（feature：headless 定时任务结果推送，2026-11-05 外部提案 Part1）：
   // cron/CI 任意进程经 `openqq notify` 写 ~/.openqq/outbox.json（只入队），bot 进程消费投递。
@@ -696,6 +716,8 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     client,
     sendReply,
     safeDeliver,
+    // 多角色：表单日志按角色分文件（缺省 legacy 全局）
+    journalPath: storageAppId ? roleFile("forms.json") : undefined,
     sendFormCard: async (ctx, form, keyboard) => {
       try {
         const token = await getAccessToken(config.qq.appId, config.qq.clientSecret)
@@ -845,7 +867,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
 
   // Q1：队列/台账派生视图（三源 join：内存队列 + 磁盘台账 + 运行态）
   function queueViewFor(userId: string): QueueView {
-    const journal = listInflightView()
+    const journal = inflight.view()
     return deriveQueueView({
       entries: [...journal.inflight, ...journal.settled].filter((e) => e.userId === userId),
       jobs: msgQueue.listUser(userId),
@@ -869,7 +891,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     clear: (userId: string): number => {
       const jobs = [...msgQueue.listUser(userId)]
       for (const job of jobs) {
-        if (job.ctx.msgId) settleInflight(job.ctx.msgId, undefined, "cancelled")
+        if (job.ctx.msgId) inflight.settle(job.ctx.msgId, undefined, "cancelled")
       }
       const n = msgQueue.clear(userId)
       if (n > 0) console.log(`[queue] clear user=${userId.slice(0, 8)}… count=${n} settle=cancelled`)
@@ -878,7 +900,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     drop: (userId: string, id: number): string => {
       const job = msgQueue.find(userId, id)
       if (!job) return `队列里没有 #${id}`
-      if (job.ctx.msgId) settleInflight(job.ctx.msgId, undefined, "dropped")
+      if (job.ctx.msgId) inflight.settle(job.ctx.msgId, undefined, "dropped")
       msgQueue.drop(userId, id)
       console.log(`[queue] drop user=${userId.slice(0, 8)}… qid=${id} settle=dropped`)
       return `已删除队列 #${id}（台账已结清）`
@@ -901,9 +923,9 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       }
     }
     let settled = 0
-    for (const e of pendingInflight()) {
+    for (const e of inflight.pending()) {
       if (e.userId !== userId) continue
-      settleInflight(e.msgId, undefined, "cancelled")
+      inflight.settle(e.msgId, undefined, "cancelled")
       settled++
     }
     // 内存忙标志复位：悬挂的前台等待不退出时 busyUsers/draining 永久挡 drain
@@ -1004,7 +1026,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       if (!confirm) {
         return `将结清：${shortId(hit.msgId)}「${previewText(hit.text, 30)}」\n确认请发 /ledger settle ${key} confirm`
       }
-      const ok = settleInflight(hit.msgId, undefined, "manual")
+      const ok = inflight.settle(hit.msgId, undefined, "manual")
       const job = msgQueue.listUser(userId).find((j) => j.ctx.msgId === hit.msgId)
       if (job) msgQueue.drop(userId, job.id)
       console.log(`[journal] settle-manual user=${userId.slice(0, 8)}… msg=${shortId(hit.msgId)} ok=${ok}`)
@@ -1023,7 +1045,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     setInterval(() => {
       try {
         const now = Date.now()
-        const users = new Set(listInflightView().inflight.map((e) => e.userId))
+        const users = new Set(inflight.view().inflight.map((e) => e.userId))
         for (const uid of users) {
           const view = queueViewFor(uid)
           // design §3.4：仅新增孤儿且距上次提醒 >10min 发汇总（decideOrphanNotify 纯函数决策）
@@ -1073,7 +1095,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       // null lane=派发窗口极短不收割；bgWait 会话有自带 giveup/停滞保险网
       if (!sid || bgWaits.has(sid)) continue
       // 账已不在但 lane 忙=纯悬挂标志（27min 实证形态），清锁放行即完成使命
-      const entry = pendingInflight().find((e) => e.userId === uid && e.sessionId === sid && e.state === "inflight")
+      const entry = inflight.pending().find((e) => e.userId === uid && e.sessionId === sid && e.state === "inflight")
       if (!entry) {
         busyUsers.delete(lane)
         console.log(`[reaper] 悬挂标志清理（无在途账）user=${uid.slice(0, 8)}… lane=${shortId(sid)}`)
@@ -1101,17 +1123,17 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       }
       // 动作前重验：lane 仍忙 + 账仍 inflight + 同一 attemptId——防竞态杀到新生回合
       if (!busyUsers.has(lane)) continue
-      const cur = pendingInflight().find((e) => e.msgId === entry.msgId)
+      const cur = inflight.pending().find((e) => e.msgId === entry.msgId)
       if (!cur || cur.attemptId !== entry.attemptId) continue
       busyUsers.delete(lane)
       const ctx: MessageContext = { ...ctxForUser(uid), anchorSessionId: sid }
       if (dec.kind === "reap-completed" && dec.text) {
         // L1：回合实已完成 → 终稿补投（delivery 去重天然防双投）+ answered
-        settleInflight(entry.msgId, undefined, "answered")
+        inflight.settle(entry.msgId, undefined, "answered")
         await safeDeliver(ctx, `📤 你卡住的回合其实已完成，结果补投如下：\n\n${dec.text}`).catch(() => {})
       } else {
         // 完成无正文（被杀回合）或 L2 静默强杀 → expired + 可见交代
-        settleInflight(entry.msgId, undefined, "expired")
+        inflight.settle(entry.msgId, undefined, "expired")
         await safeDeliver(ctx, "⚠️ 检测到一个卡死的回合（长时间无进展），已自动清理；如未收到预期结果请重新发送").catch(() => {})
       }
       console.log(
@@ -1124,7 +1146,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     // DEF-qqbot-20261114-04（派发悬挂哨兵）：stage=dispatched 且无 promptId、超龄的账——
     // 幽灵派发（会话不存在）/派发未达引擎会把 lane 挂死冻结全队列（00:57 seed 实证）。
     // 与 busy-lane 收割同预算/同冷却键；probe 失败（网络）不动手，下轮再判。
-    for (const entry of pendingInflight()) {
+    for (const entry of inflight.pending()) {
       if (budget <= 0) break
       if (entry.state !== "inflight" || entry.stage !== "dispatched" || entry.promptId || !entry.sessionId) continue
       const lane = laneOf(entry.userId, entry.sessionId)
@@ -1135,10 +1157,10 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       const dec = decideDispatchStall({ entry, sessionExists, now, stallMs: DISPATCH_STALL })
       if (dec.kind !== "reap-ghost" && dec.kind !== "reap-lost") continue
       // 动作前重验：账仍 inflight 同 attemptId；lane 若忙（该会话正被别的回合占用）一并释放
-      const cur = pendingInflight().find((e) => e.msgId === entry.msgId)
+      const cur = inflight.pending().find((e) => e.msgId === entry.msgId)
       if (!cur || cur.attemptId !== entry.attemptId) continue
       busyUsers.delete(lane)
-      settleInflight(entry.msgId, undefined, "error")
+      inflight.settle(entry.msgId, undefined, "error")
       const ctx: MessageContext = { ...ctxForUser(entry.userId), anchorSessionId: entry.sessionId }
       await safeDeliver(
         ctx,
@@ -1198,7 +1220,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   }
   // R2-P1-3：恢复持久化的 /watch 订阅（里程碑已改 /watch 专属，重启不得静默丢）
   {
-    const saved = loadWatchedMap()
+    const saved = loadWatchedMap(storageAppId ? roleFile("watch.json") : undefined)
     const known = new Set(sessions.all().map((x) => x.sessionId))
     let pruned = false
     for (const [uid, sid] of Object.entries(saved)) {
@@ -1210,7 +1232,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       subscribeSession(sid, uid)
       console.log(`[watch] 恢复订阅 ${uid.slice(0, 8)}… → ${sid}`)
     }
-    if (pruned) saveWatchedMap(activeWatches)
+    if (pruned) saveWatchedMap(activeWatches, storageAppId ? roleFile("watch.json") : undefined)
   }
 
   // O2（P2-4a）：恢复重启前挂起的审批（逻辑随 O7b 收进 core/permission.ts）
@@ -1235,7 +1257,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     // 会每 10 分钟刷一次告警（2026-11-05 实证：审批挂起导致队列 #1 卡成孤儿）。
     const releaseClaimed = (reason: SettleReason, note?: string): void => {
       if (!ctx.msgId || !claimedContexts.has(ctx)) return
-      settleInflight(ctx.msgId, undefined, reason)
+      inflight.settle(ctx.msgId, undefined, reason)
       console.log(`[queue] release-early msg=${shortId(ctx.msgId)} reason=${reason}${note ? ` note=${note}` : ""}`)
     }
     try {
@@ -1263,7 +1285,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       // 不跳过会双发相同内容（2026-11-02 用户实证：首次 /help 回复两次）。
       if (!greeted.has(ctx.userId) && !isCommand(content)) {
         greeted.add(ctx.userId)
-        saveGreetedSet(greeted)
+        saveGreetedSet(greeted, storageAppId ? roleFile("greeted.json") : undefined)
         await notifyUser(ctx, buildHelpText())
       }
 
@@ -1329,7 +1351,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       // 都是重复气泡）；duplicate-intent 给一句短提示（首投方不会发，不构成重复）。
       if (ctx.msgId) {
         if (!claimedContexts.has(ctx)) {
-          const admitted = claimInflightDetailed(
+          const admitted = inflight.claimDetailed(
             { msgId: ctx.msgId, userId: ctx.userId, sessionId: "", text: content.slice(0, 300), at: Date.now() },
             { fingerprint: messageFingerprint(ctx.userId, intentKey) },
           )
@@ -1340,7 +1362,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           if (admitted === "duplicate-intent") {
             console.log(`[admit-dedupe] 同内容意图在途，本次重发已忽略 msgId=${ctx.msgId}`)
             // P3（2026-11-03，外部复盘核验 R4）：提示带在途内容摘要提升体感
-            const pend = pendingInflight().find((e) => e.fingerprint === messageFingerprint(ctx.userId, intentKey))
+            const pend = inflight.pending().find((e) => e.fingerprint === messageFingerprint(ctx.userId, intentKey))
             const digest = pend ? `（在途内容：${previewText(pend.text)}）` : ""
             await notifyUser(ctx, `你的相同问题正在处理中${digest}，本次重发已忽略`)
             return
@@ -1353,7 +1375,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       if (busyUsers.has(lane) && !claimedContexts.has(ctx)) {
         const duplicateIntent = activeIntents.get(lane) === intentKey || msgQueue.hasIntent(lane, intentKey)
         if (duplicateIntent) {
-          settleInflight(ctx.msgId, undefined, "duplicate-intent") // 重复意图已有原回合负责，直接结清，禁止恢复时再跑
+          inflight.settle(ctx.msgId, undefined, "duplicate-intent") // 重复意图已有原回合负责，直接结清，禁止恢复时再跑
           console.log(`[bridge] 相同意图已在执行/队列，跳过 msgId=${ctx.msgId}`)
           return
         }
@@ -1369,14 +1391,14 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         }
         const queued = msgQueue.push(lane, ctx.userId, anchorSid ?? undefined, ctx)
         if (!queued) {
-          if (claimedMsgId) settleInflight(claimedMsgId, undefined, "queue-full") // 已满回执即终态，不能留账让启动对账再次执行
+          if (claimedMsgId) inflight.settle(claimedMsgId, undefined, "queue-full") // 已满回执即终态，不能留账让启动对账再次执行
           console.log(`[queue] reject user=${ctx.userId.slice(0, 8)}… msg=${shortId(ctx.msgId)} reason=full size=${msgQueue.size(lane)}/${QUEUE_MAX}`)
           await notifyUser(ctx, formatQueueFullReceipt(QUEUE_MAX))
           return
         }
         if (ctx.msgId) {
           // 入队即锚定落账：queued 级也带 sessionId（重启恢复按 lane 归组）
-          markInflightStage(ctx.msgId, "queued", { queueId: queued.job.id, enqueuedAt: queued.job.enqueuedAt, ...(anchorSid ? { sessionId: anchorSid } : {}) })
+          inflight.markStage(ctx.msgId, "queued", { queueId: queued.job.id, enqueuedAt: queued.job.enqueuedAt, ...(anchorSid ? { sessionId: anchorSid } : {}) })
         }
         console.log(
           `[queue] enqueue user=${ctx.userId.slice(0, 8)}… lane=${anchorSid ? shortId(anchorSid) : "∅"} qid=${queued.job.id} msg=${shortId(ctx.msgId)} ahead=${queued.ahead} size=${msgQueue.size(lane)}/${QUEUE_MAX}`,
@@ -1465,8 +1487,8 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         // R 项（2026-10-30）：在途台账落账——派发前记录，送达才销账；
         // 进程中途死亡时启动对账据此恢复。重派回合无真实 msgId，用合成键跟踪。
         trackId = ctx.msgId || `redispatch-${sessionId}-${turnStart}`
-        recordInflight({ msgId: trackId, userId: ctx.userId, sessionId, text: content.slice(0, 300), at: Date.now() })
-        markInflightStage(trackId, "dispatched", { sessionId })
+        inflight.record({ msgId: trackId, userId: ctx.userId, sessionId, text: content.slice(0, 300), at: Date.now() })
+        inflight.markStage(trackId, "dispatched", { sessionId })
         console.log(`[journal] dispatch user=${ctx.userId.slice(0, 8)}… msg=${shortId(trackId)} sid=${shortId(sessionId)}`)
         let replyText: string
         {
@@ -1479,7 +1501,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           // 修复⑧：受领即落台账锚点 + 本地闭合变量（前台超时转后台等待要带上）
           onAccepted: (info) => {
             promptId = info.promptId
-            markInflightPromptId(trackId, info.promptId)
+            inflight.markPromptId(trackId, info.promptId)
             console.log(`[journal] running msg=${shortId(trackId)} prompt=${shortId(info.promptId)}`)
           },
           onPermission: (req) => perm.waitForDecision(ctx, req, sessionId),
@@ -1548,13 +1570,13 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         if (replyText.trim() && !turnDelivered) {
           if (ctx.anchorSessionId && !isBoundSession(ctx.userId, ctx.anchorSessionId)) {
             console.log(`[push-gate] 回合结果按历史可回读结清 answered msg=${shortId(trackId)}`)
-            settleInflight(trackId, undefined, "answered")
+            inflight.settle(trackId, undefined, "answered")
           } else {
             await safeDeliver(ctx, "⚠️ 本轮结果与 24h 内已发送内容重复，已被防重拦截（未重复投递）。如非预期请重发或换个说法")
-            settleInflight(trackId, undefined, "error")
+            inflight.settle(trackId, undefined, "error")
           }
         } else {
-          settleInflight(trackId, undefined, "answered")
+          inflight.settle(trackId, undefined, "answered")
         }
       } catch (error) {
         if (error instanceof SupersededError) {
@@ -1575,11 +1597,11 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           if (rescuedText) {
             console.log(`[bridge] 前台接管前抢救：回合已完成未投递，先补投 msg=${shortId(trackId)}`)
             await safeDeliver(ctx, `📤 你发来新消息前，上一回合已完成，结果如下：\n\n${rescuedText}`).catch(() => {})
-            settleInflight(trackId, undefined, "answered")
+            inflight.settle(trackId, undefined, "answered")
           } else {
             console.log(`[bridge] 回合被同会话新输入接管（superseded）msg=${shortId(trackId)} sid=${shortId(sessionId)}`)
             await safeDeliver(ctx, "⚠️ 上一条任务被同会话的新输入打断，未产出结果；如需结果请重新发送")
-            settleInflight(trackId, undefined, "superseded")
+            inflight.settle(trackId, undefined, "superseded")
           }
         } else if (sessionId && turnStart > 0 && error instanceof Error && error.message.includes("响应超时")) {
           // 前台时限到 ≠ 放弃：任务继续跑，转入后台等待（SSE + 5 分钟轮询兜底，
@@ -1598,13 +1620,13 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
             ctx,
             "⏳ 该会话正有回合在执行（可能是桌面端在跑，或上一轮尚未结束），本轮未重复发起。\n发 /stop 可中止当前回合后重试。",
           )
-          settleInflight(trackId, undefined, "error")
+          inflight.settle(trackId, undefined, "error")
         } else {
           // Q3：额度/鉴权错误给救援话术（报类别+原文+恢复路径），不死胡同报错
           const errText = toErrorMessage(error)
           const rescue = rescueText(classifyProviderError(errText), errText)
           await safeDeliver(ctx, rescue ?? `处理失败：${errText}`)
-          settleInflight(trackId, undefined, "error") // R 项：失败反馈已送达 = 终态，销账
+          inflight.settle(trackId, undefined, "error") // R 项：失败反馈已送达 = 终态，销账
         }
       } finally {
         if (sessionId) unsubscribeSession(sessionId, ctx.userId) // /watch 若仍挂着则保留订阅
@@ -1626,7 +1648,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     } catch (error) {
       // 认领后、内层回合兜底之前的异常（如排队附件预下载失败）也必须结清，
       // 否则重启对账会把已反馈失败的消息再执行一次。
-      if (claimedMsgId) settleInflight(claimedMsgId, undefined, "error")
+      if (claimedMsgId) inflight.settle(claimedMsgId, undefined, "error")
       if (activeIntents.get(lane) === intentKey) activeIntents.delete(lane)
       console.error("[bridge] handleMessage failed:", error)
       try {
@@ -1643,7 +1665,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   // 2026-11-05（队列/台账可观测性）：从未进会话的在途账 = 重启前还在排队，
   // 先按 enqueuedAt/at 重建内存队列（保留 #id 与顺序），不再直接结清丢弃。
   async function recoverInflightRounds(): Promise<void> {
-    const pending = pendingInflight()
+    const pending = inflight.pending()
     if (pending.length === 0) return
     console.log(`[bridge] 启动对账：${pending.length} 条在途消息待恢复`)
 
@@ -1686,7 +1708,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
             // drain 重入必须跳过重复认领，否则 duplicate-msgid 会把恢复条目静默丢掉。
             claimedContexts.add(job.ctx)
             // force：旧 stage（如 dispatched 空账）在进程换代后不再可信，恢复即回到 queued。
-            markInflightStage(job.ctx.msgId, "queued", { queueId: job.id, enqueuedAt: job.enqueuedAt, ...(sid ? { sessionId: sid } : {}) }, { force: true })
+            inflight.markStage(job.ctx.msgId, "queued", { queueId: job.id, enqueuedAt: job.enqueuedAt, ...(sid ? { sessionId: sid } : {}) }, { force: true })
             restorable.add(job.ctx.msgId)
           }
           console.log(
@@ -1720,7 +1742,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         )
       }
       for (const e of capacityRejected) {
-        settleInflight(e.msgId, undefined, "queue-full")
+        inflight.settle(e.msgId, undefined, "queue-full")
         console.log(`[bridge] 启动对账：容量拒收结清 queue-full msgId=${e.msgId}`)
       }
     }
@@ -1729,7 +1751,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       if (restorable.has(entry.msgId)) continue
       const ageMs = Date.now() - entry.at
       if (ageMs > INFLIGHT_MAX_AGE_MS) {
-        settleInflight(entry.msgId, undefined, "expired") // 超 24h：清账不追溯
+        inflight.settle(entry.msgId, undefined, "expired") // 超 24h：清账不追溯
         continue
       }
       // 恢复投递走主动通道（原 msgId 的被动窗口早已过期）
@@ -1737,7 +1759,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       // 修复③（2026-11-03）：排队空账治本——sessionId 为空=「从未进过会话」。
       // 2026-11-05：窗口内的已在上方恢复进队列；走到这里的只剩超窗空账，只清账通知。
       if (!entry.sessionId) {
-        settleInflight(entry.msgId, undefined, "expired")
+        inflight.settle(entry.msgId, undefined, "expired")
         await deliver(
           ctx,
           `⚠️ 重启前队列里有一条消息超过恢复窗口未执行（「${entry.text.length > 50 ? `${entry.text.slice(0, 50)}…` : entry.text}」）。为避免执行陈旧意图未自动重派，需要的话请重发一次`,
@@ -1750,7 +1772,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         const cls = classifyInflight(entry, listJson.data)
         if (cls.kind === "answered") {
           await deliver(ctx, `🔄 重启补投：你之前的消息已有答案\n\n${cls.answer}`)
-          settleInflight(entry.msgId, undefined, "answered")
+          inflight.settle(entry.msgId, undefined, "answered")
           console.log(`[bridge] 启动对账：已补投答案 msgId=${entry.msgId}`)
         } else if (cls.kind === "running") {
           // 2026-11-09 透明度补强：原执行进程已死时，回合「存活」以服务端为准——
@@ -1766,13 +1788,13 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           startBackgroundWait(entry.sessionId, ctx, entry.at, entry.msgId, entry.promptId ?? "", entry.at)
           console.log(`[bridge] 启动对账：在途任务已重挂后台等待 msgId=${entry.msgId}`)
         } else if (ageMs <= redispatchMaxAgeMs()) {
-          settleInflight(entry.msgId, undefined, "redispatch") // 旧账结清，重派回合走新账（合成 trackId）
+          inflight.settle(entry.msgId, undefined, "redispatch") // 旧账结清，重派回合走新账（合成 trackId）
           await deliver(ctx, `🔄 重启恢复：重新处理你之前的消息「${entry.text.length > 50 ? `${entry.text.slice(0, 50)}…` : entry.text}」`)
           void handleMessage(ctx)
           console.log(`[bridge] 启动对账：丢失消息已重派 msgId=${entry.msgId}`)
         } else {
           await deliver(ctx, `⚠️ 此前重启期间丢失一条你的消息「${entry.text.length > 50 ? `${entry.text.slice(0, 50)}…` : entry.text}」（超过自动重派窗口未重发），需要的话请重发一次`)
-          settleInflight(entry.msgId, undefined, "expired")
+          inflight.settle(entry.msgId, undefined, "expired")
           console.log(`[bridge] 启动对账：超期消息仅通知 msgId=${entry.msgId}`)
         }
       } catch (error) {
@@ -1798,7 +1820,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     draining.add(lane)
     queueIdOfCtx.set(job.ctx, job.id)
     if (job.sessionId) job.ctx.anchorSessionId = job.ctx.anchorSessionId ?? job.sessionId
-    if (job.ctx.msgId) markInflightStage(job.ctx.msgId, "dispatched", { queueId: job.id })
+    if (job.ctx.msgId) inflight.markStage(job.ctx.msgId, "dispatched", { queueId: job.id })
     const remain = msgQueue.size(lane)
     console.log(`[queue] drain-start user=${userId.slice(0, 8)}… lane=${sessionId ? shortId(sessionId) : "∅"} qid=${job.id} remain=${remain}`)
     try {
@@ -1871,7 +1893,7 @@ export function isAllowedUser(userId: string, allowedUsers: string[]): boolean {
 
 // R2-P1-3（2026-10-14）：/watch 持久化——里程碑已改 /watch 专属，重启静默丢
 // 订阅不可接受；与 greeted.json 同款风格（损坏即空、文件名参数化供单测）。
-const WATCH_FILE = join(homedir(), ".openqq", "watch.json")
+const WATCH_FILE = storageFile("watch.json")
 
 export function loadWatchedMap(file: string = WATCH_FILE): Record<string, string> {
   try {
@@ -1898,12 +1920,12 @@ export function saveWatchedMap(m: ReadonlyMap<string, string>, file: string = WA
   }
 }
 
-const GREETED_FILE = join(homedir(), ".openqq", "greeted.json")
+const GREETED_FILE = storageFile("greeted.json")
 
-function loadGreetedSet(): Set<string> {
+function loadGreetedSet(file: string = GREETED_FILE): Set<string> {
   try {
-    if (existsSync(GREETED_FILE)) {
-      const raw = readFileSync(GREETED_FILE, "utf-8")
+    if (existsSync(file)) {
+      const raw = readFileSync(file, "utf-8")
       const arr = JSON.parse(raw)
       if (Array.isArray(arr)) {
         return new Set(arr.filter((x): x is string => typeof x === "string"))
@@ -1915,10 +1937,10 @@ function loadGreetedSet(): Set<string> {
   return new Set<string>()
 }
 
-function saveGreetedSet(set: Set<string>): void {
+function saveGreetedSet(set: Set<string>, file: string = GREETED_FILE): void {
   try {
     mkdirSync(join(homedir(), ".openqq"), { recursive: true })
-    writeFileSync(GREETED_FILE, JSON.stringify([...set]))
+    writeFileSync(file, JSON.stringify([...set]))
   } catch (error) {
     console.error("[bridge] 保存 greeted 失败:", error)
   }

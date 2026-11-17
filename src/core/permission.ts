@@ -1,12 +1,11 @@
-// @input:  ../opencode/client, ../qq/types, fs/path/os
+﻿// @input:  ../opencode/client, ../qq/types, fs/path/os
 // @output: createPermissionGate, parsePermissionDecision, formatPermissionPrompt, DECISION_LABELS,
 //          PERM_PROMPT_TTL_MS, PERM_NUDGE_MS, createPushGate（弹卡延迟闸）,
 //          classifyApprovalReplyError, formatPermissionConflictNotice（纯函数供测试）, ApprovalReplyFailure
 // @pos:    根层/core - 审批域（O7b 2026-10-15 自 bridge.ts 拆出：挂起槽、等待/
 //          裁决、跨重启恢复、自然语言决策解析、菜单格式化、中断态落盘）
+import { storageFile } from "./storage.js"
 import { existsSync, readFileSync, writeFileSync } from "fs"
-import { join } from "path"
-import { homedir } from "os"
 import type { MessageContext } from "../qq/types.js"
 import type { OpencodeClient, PermissionDecision, PermissionRequest } from "../opencode/client.js"
 import { truncate } from "./util.js"
@@ -124,7 +123,7 @@ export function classifyApprovalReplyError(error: unknown): ApprovalReplyFailure
 // O2（2026-10-15，P2-4a）：审批中断态落盘——重启前挂起的审批重启后仍可
 // 处置（直连 reply 或明确回执），不再出现"回复允许灌进会话当普通消息"的
 // 误导路径。与 greeted/watch.json 同款风格（损坏即空）。
-const PENDING_PERM_FILE = join(homedir(), ".openqq", "pending-permissions.json")
+const PENDING_PERM_FILE = storageFile("pending-permissions.json")
 
 export type PersistedPermission = {
   request: PermissionRequest
@@ -134,10 +133,10 @@ export type PersistedPermission = {
   origin?: PermOrigin
 }
 
-function loadPendingPermMap(): Record<string, PersistedPermission> {
+function loadPendingPermMap(file: string = PENDING_PERM_FILE): Record<string, PersistedPermission> {
   try {
-    if (existsSync(PENDING_PERM_FILE)) {
-      const raw = readFileSync(PENDING_PERM_FILE, "utf-8")
+    if (existsSync(file)) {
+      const raw = readFileSync(file, "utf-8")
       const obj = JSON.parse(raw)
       if (obj && typeof obj === "object" && !Array.isArray(obj)) {
         const out: Record<string, PersistedPermission> = {}
@@ -154,7 +153,7 @@ function loadPendingPermMap(): Record<string, PersistedPermission> {
   return {}
 }
 
-function savePendingPermMap(m: ReadonlyMap<string, PendingPermission>): void {
+function savePendingPermMap(m: ReadonlyMap<string, PendingPermission>, file: string = PENDING_PERM_FILE): void {
   try {
     const out: Record<string, PersistedPermission> = {}
     for (const [uid, e] of m) {
@@ -167,7 +166,7 @@ function savePendingPermMap(m: ReadonlyMap<string, PendingPermission>): void {
         ...(e.origin ? { origin: e.origin } : {}),
       }
     }
-    writeFileSync(PENDING_PERM_FILE, JSON.stringify(out))
+    writeFileSync(file, JSON.stringify(out))
   } catch (error) {
     console.warn("[perm] 审批态落盘失败:", error instanceof Error ? error.message : error)
   }
@@ -190,8 +189,10 @@ export interface PermissionGateDeps {
   onDecision?: (userId: string) => void
   /** 10min 无裁决告警间隔（测试注入小值；缺省 PERM_NUDGE_MS） */
   nudgeMs?: number
-  /** 跨重启恢复读盘入口（测试注入；缺省读 ~/.openqq/pending-permissions.json） */
+  /** 跨重启恢复读盘入口（测试注入；缺省读 legacy 全局 pending-permissions.json） */
   loadPending?: () => Record<string, PersistedPermission>
+  /** 多角色：落盘文件（缺省 legacy 全局 pending-permissions.json） */
+  persistFile?: string
   /** DEF-qqbot-20261112-1：按用户查会话项目目录——裁决/超时拒答 reply 的
    *  x-opencode-directory（引擎待审按 location 实例分仓；bridge 注入 sessions 映射） */
   directoryOf?: (userId: string) => string | undefined
@@ -218,6 +219,8 @@ export interface PermissionGate {
 
 // 审批域门面：挂起槽 + 等待/裁决 + 跨重启恢复。所有状态与文件读写收在本域。
 export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
+  // 多角色（2026-11-17）：审批态落盘文件可按角色注入；缺省 legacy 全局路径
+  const PERSIST_FILE = deps.persistFile ?? PENDING_PERM_FILE
   const { client, sendReply, safeDeliver } = deps
   const pendingPermissions = new Map<string, PendingPermission>()
   // DEF-qqbot-20261112-5（2026-11-12 ZERO4 实测卡风暴实证）：同一回合并联发起多个
@@ -290,7 +293,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         adopted.timer = setTimeout(() => {
           if (pendingPermissions.get(ctx.userId)?.request.id === request.id) {
             pendingPermissions.delete(ctx.userId)
-            savePendingPermMap(pendingPermissions)
+            savePendingPermMap(pendingPermissions, PERSIST_FILE)
             deps.onDecision?.(ctx.userId) // TTL 自动拒绝也要唤醒被守卫挡回的队列
             resolve("reject")
             void safeDeliver(ctx, "审批超时（30 分钟），已自动拒绝该权限请求").catch(() => {})
@@ -298,7 +301,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         }, PERM_PROMPT_TTL_MS)
         adopted.timer.unref?.()
         pendingPermissions.set(ctx.userId, adopted)
-        savePendingPermMap(pendingPermissions)
+        savePendingPermMap(pendingPermissions, PERSIST_FILE)
         console.log(`[perm] 同请求收养既有审批槽（不重复推卡）user=${ctx.userId.slice(0, 8)}… request=${request.id}`)
         return
       }
@@ -313,7 +316,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       const timer = setTimeout(() => {
         if (pendingPermissions.get(ctx.userId)?.request.id === request.id) {
           pendingPermissions.delete(ctx.userId)
-          savePendingPermMap(pendingPermissions)
+          savePendingPermMap(pendingPermissions, PERSIST_FILE)
           deps.onDecision?.(ctx.userId) // TTL 自动拒绝也要唤醒被守卫挡回的队列
           resolve("reject")
           // 2026-11-04 修复（DEF-qqbot-20261104-3）：超时回执改走 safeDeliver——
@@ -334,7 +337,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         origin: "bot", // 机器人自己回合的权限（bridge onPermission 直答路径）
         directory: deps.directoryOf?.(ctx.userId),
       })
-      savePendingPermMap(pendingPermissions) // O2：落盘，重启不丢
+      savePendingPermMap(pendingPermissions, PERSIST_FILE) // O2：落盘，重启不丢
       // A 项（2026-10-29）：卡片按钮优先，发送失败降级文字菜单；两者都失败
       // 不 reject promise（用户仍可能稍后主动回复）。DEF-5：同步认领制——已推过
       // 的请求（并发异请求覆写场景被其他路径推过）不再重复推卡。
@@ -358,7 +361,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     if (!entry) return
     clearTimers(entry)
     pendingPermissions.delete(userId)
-    savePendingPermMap(pendingPermissions)
+    savePendingPermMap(pendingPermissions, PERSIST_FILE)
     deps.onDecision?.(userId) // 裁决即唤醒队列（drainQueue 的 pendingPerm 守卫此刻已放行）
     if (entry.restored) {
       // O2（P2-4a）：跨重启——原 waiter 已随进程消失，直连 POST reply 争取
@@ -415,7 +418,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       const timer = setTimeout(() => {
         if (pendingPermissions.get(uid)?.request.id === e.request.id) {
           pendingPermissions.delete(uid)
-          savePendingPermMap(pendingPermissions)
+          savePendingPermMap(pendingPermissions, PERSIST_FILE)
           void client.permission
             .reply({
               path: { sessionID: e.request.sessionID, requestID: e.request.id },
@@ -478,7 +481,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     const timer = setTimeout(() => {
       if (pendingPermissions.get(userId)?.request.id !== request.id) return
       pendingPermissions.delete(userId)
-      savePendingPermMap(pendingPermissions)
+      savePendingPermMap(pendingPermissions, PERSIST_FILE)
       deps.onDecision?.(userId) // 外部审批 TTL 拒绝也要唤醒队列
       void client.permission
         .reply({ path: { sessionID: request.sessionID, requestID: request.id }, body: { decision: "reject" }, directory })
@@ -499,7 +502,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       origin, // DEF-qqbot-20261110-4：来源按回合归属传入（bot=QQ 回合 / external=桌面回合），不再一律桌面
       directory,
     })
-    savePendingPermMap(pendingPermissions)
+    savePendingPermMap(pendingPermissions, PERSIST_FILE)
     console.log(`[perm] 外部审批已推送 user=${userId.slice(0, 8)}… request=${request.id} action=${request.action} origin=${origin}`)
     // 推送失败不撤槽（用户仍可能文字裁决）。DEF-5：同步认领制，防并发异请求覆写
     // 场景下本请求已被他路推过而重复推卡。
@@ -540,7 +543,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       const e = entry
       clearTimers(e)
       pendingPermissions.delete(uid)
-      savePendingPermMap(pendingPermissions)
+      savePendingPermMap(pendingPermissions, PERSIST_FILE)
       deps.onDecision?.(uid) // 槽清空即唤醒该用户队列（与裁决/TTL 同口径）
       const label =
         reply === "allow" || reply === "once"

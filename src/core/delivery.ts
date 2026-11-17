@@ -1,11 +1,11 @@
-// @input:  ../config, ../qq/types, ../qq/api, ../qq/sender, fs/path/os
+﻿// @input:  ../config, ../qq/types, ../qq/api, ../qq/sender, fs/path/os
 // @output: createDelivery
 // @pos:    根层/core - 投递域（O7c 2026-10-15 自 bridge.ts 拆出：统一投递
 //          被动→主动降级、日配额记账与落盘、观察推送节流队列、主动/被动通道发送）
+import { storageFile } from "./storage.js"
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, openSync, closeSync, unlinkSync, statSync } from "fs"
 import { join } from "path"
 import { createHash } from "node:crypto"
-import { homedir } from "os"
 import type { Config } from "../config.js"
 import type { MessageContext } from "../qq/types.js"
 import { getAccessToken, sendC2CMessage, sendGroupMessage, getNextMsgSeq } from "../qq/api.js"
@@ -23,12 +23,14 @@ interface PushQueue {
 }
 
 // O5（2026-10-15，P2-4b）：主动配额落盘——跨重启不归零，防日配额轻微超发。
-const QUOTA_FILE = join(homedir(), ".openqq", "quota.json")
+// 多角色（2026-11-17）：配额文件可按角色注入（createDelivery 第 4 参），
+// 缺省 legacy 全局路径（storageFile("quota.json")，值不变）。
+const DEFAULT_QUOTA_FILE = storageFile("quota.json")
 
-function loadQuotaMap(): Record<string, { day: string; count: number; warned: boolean }> {
+function loadQuotaMap(file: string): Record<string, { day: string; count: number; warned: boolean }> {
   try {
-    if (existsSync(QUOTA_FILE)) {
-      const raw = readFileSync(QUOTA_FILE, "utf-8")
+    if (existsSync(file)) {
+      const raw = readFileSync(file, "utf-8")
       const obj = JSON.parse(raw)
       if (obj && typeof obj === "object" && !Array.isArray(obj)) {
         const out: Record<string, { day: string; count: number; warned: boolean }> = {}
@@ -47,9 +49,9 @@ function loadQuotaMap(): Record<string, { day: string; count: number; warned: bo
   return {}
 }
 
-function saveQuotaMap(m: ReadonlyMap<string, { day: string; count: number; warned: boolean }>): void {
+function saveQuotaMap(file: string, m: ReadonlyMap<string, { day: string; count: number; warned: boolean }>): void {
   try {
-    writeFileSync(QUOTA_FILE, JSON.stringify(Object.fromEntries(m)))
+    writeFileSync(file, JSON.stringify(Object.fromEntries(m)))
   } catch (error) {
     console.warn("[bridge] 配额落盘失败:", error instanceof Error ? error.message : error)
   }
@@ -101,7 +103,7 @@ export const DELIVERY_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
 // P0 同族修复（2026-11-03）：原 const 在模块加载期捕获 QQ_DELIVERY_DEDUPE_FILE，
 // .env 运行时才注入——测试/多目录重定向永远不生效。改惰性函数。
 function deliveryDedupeFile(): string {
-  return process.env.QQ_DELIVERY_DEDUPE_FILE || join(homedir(), ".openqq", "delivery-dedupe.json")
+  return process.env.QQ_DELIVERY_DEDUPE_FILE || storageFile("delivery-dedupe.json")
 }
 
 function deliveryAttemptKey(userId: string, text: string): string {
@@ -241,6 +243,7 @@ export function createDelivery(
   config: Config,
   lastCtx: ReadonlyMap<string, MessageContext>,
   pushGate?: (userId: string, anchorSessionId: string) => boolean,
+  quotaFile?: string,
 ): Delivery {
   const PUSH_MIN_GAP_MS = 2000      // 用户级节流：最快 2 秒一批
   const PUSH_MAX_LINES = 6          // 队列上限：洪峰丢最旧，防积压
@@ -274,7 +277,8 @@ export function createDelivery(
   // 记账点在 sendReply 成功路径（统一出口，bridge 直调与 deliver 共用）。
   const passiveLimiter = new ReplyLimiter()
   // O5：恢复落盘配额（非当日条目由 deliver 按 day 字段自然重置）
-  for (const [uid, q] of Object.entries(loadQuotaMap())) activeQuota.set(uid, q)
+  const QUOTA_FILE = quotaFile ?? DEFAULT_QUOTA_FILE
+  for (const [uid, q] of Object.entries(loadQuotaMap(QUOTA_FILE))) activeQuota.set(uid, q)
 
   function enqueuePush(userId: string, line: string, anchorSessionId?: string): void {
     let q = pushQueues.get(userId)
@@ -406,7 +410,7 @@ export function createDelivery(
     if (q.count >= ACTIVE_DAILY_LIMIT) {
       if (!q.warned) {
         q.warned = true
-        saveQuotaMap(activeQuota) // O5：告警态也落盘
+        saveQuotaMap(QUOTA_FILE, activeQuota) // O5：告警态也落盘
         console.warn(`[bridge] 用户 ${ctx.userId} 今日主动推送配额用尽，窗口外消息无法送达`)
         try {
           await sendActive(ctx, "⚠️ 今日主动推送配额已用尽（QQ 限制），窗口外消息明日恢复送达")
@@ -419,7 +423,7 @@ export function createDelivery(
     const activeIds = await sendActive(ctx, text)
     for (const id of activeIds) recordMessage(scopeKeyOf(ctx), id, text)
     q.count++
-    saveQuotaMap(activeQuota) // O5：计数落盘，跨重启不归零
+    saveQuotaMap(QUOTA_FILE, activeQuota) // O5：计数落盘，跨重启不归零
   }
 
   async function safeDeliver(c: MessageContext, text: string): Promise<boolean> {

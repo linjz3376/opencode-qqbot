@@ -1,4 +1,4 @@
-// HC2（2026-10-26）：运行中链路自愈巡检。
+﻿// HC2（2026-10-26）：运行中链路自愈巡检。
 // 复盘3 教训：bot 与 opencode 平时零流量 + 看门狗只验进程心跳 → 下游死亡
 // 不可观测（2026-10-26 实证：端口漂移后黑暗 3 天，直到用户消息撞上）。
 // 本模块给链路装独立心跳：
@@ -11,9 +11,8 @@
 // @input:  client（healthCheck/rebase）、discoverOpencode、alarm 回调、fs
 // @output: startLinkWatch, LinkWatchDeps, IncidentRecord, incidentPath
 // @pos:    core - 链路巡检（HC2）
+import { storageFile } from "./storage.js"
 import { existsSync, readFileSync, writeFileSync } from "fs"
-import { join } from "path"
-import { homedir } from "os"
 import { discoverOpencode, persistDiscovery, type OpencodeDiscovery } from "./discovery.js"
 import { healthCheck, type OpencodeClient } from "../opencode/client.js"
 
@@ -40,7 +39,7 @@ export interface IncidentRecord {
 }
 
 export function incidentPath(): string {
-  return join(homedir(), ".openqq", "incident.json")
+  return storageFile("incident.json")
 }
 
 function saveIncident(path: string, rec: IncidentRecord): void {

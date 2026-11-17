@@ -1,10 +1,11 @@
-// @input:  fs/path/os/crypto + ../qq/types（MessageContext）
+﻿// @input:  fs/path/os/crypto + ../qq/types（MessageContext）
 // @output: createOutbox 及 Outbox 公共类型、保留/退避常量、pruneOutboxEntries
 // @pos:    core - 独立持久化出站 Outbox（先落账后发送，至少一次恢复）
 //
 // 文件格式：{ "version": 1, "entries": OutboxEntry[] }。所有 mutation 都在
 // <outbox>.lock 短文件锁内重新读盘，再经临时文件 + rename 原子替换。
 // 网络 handler 不持文件锁；sending + leaseOwner/leaseUntil 防跨进程并发双发。
+import { storageFile } from "./storage.js"
 import {
   closeSync,
   existsSync,
@@ -16,8 +17,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs"
-import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname } from "node:path"
 import { randomUUID } from "node:crypto"
 import type { MessageContext } from "../qq/types.js"
 
@@ -208,7 +208,7 @@ export function pruneOutboxEntries(entries: OutboxEntry[], now = Date.now()): Ou
 }
 
 export function createOutbox(options: OutboxOptions = {}): Outbox {
-  const filePath = options.filePath ?? process.env.QQ_OUTBOX_FILE ?? join(homedir(), ".openqq", "outbox.json")
+  const filePath = options.filePath ?? process.env.QQ_OUTBOX_FILE ?? storageFile("outbox.json")
   const pollIntervalMs = nonNegative(options.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, "pollIntervalMs")
   const retryBaseMs = nonNegative(options.retryBaseMs, OUTBOX_DEFAULT_RETRY_BASE_MS, "retryBaseMs")
   const retryMaxMs = nonNegative(options.retryMaxMs, OUTBOX_DEFAULT_RETRY_MAX_MS, "retryMaxMs")

@@ -302,9 +302,23 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 `inflight.json`（在途台账）、`forms.json`、`gateway-state.json`、`supervisor.json`（重启强度账）、
 `heartbeat`、`*.lock`、`watchdog.log`、`bot.out.log`（+ 进程内双写；detached 拉起默认 `~/.openqq/openqq.log`，`QQ_LOG_FILE` 可覆盖）、`outbox.json`、`last-discovered.json`。
 
+### 5.1 多角色（单进程多 QQ bot 身份，2026-11-17 owner 裁定）
+
+参考 openclaw-qqbot 具名账号表：`QQ_BOTS`（JSON 数组）配置多个角色，单进程同时挂全部
+appId——每角色独立 token 刷新/会话映射/bridge/网关连接/白名单，互不互踢（连接按 appId
+独立）。角色运行时数据物理隔离在 `~/.openqq/roles/<appId>/`（台账/审批/表单/配额/
+观察/问候/sessions/gateway-state），进程级文件（heartbeat/日志/supervisor）保持全局一份。
+单实例锁本就按 appId 分文件（`openqq-<appId>.lock`），多角色各持各锁。未配置 `QQ_BOTS`
+= legacy 单角色，全部路径与行为零变化。运维面（watchdog/CLI 探活）暂为单 appId 口径，
+多角色探活为已知待办。
+
+- 形态：`QQ_BOTS=[{"appId":"…","secret":"…","sandbox":false,"name":"开发角色","allowedUsers":["openid…"]}]`
+- 失效模式备忘：两角色事件循环同进程互卡（loop-lag 遥测覆盖）；token 缓存/底座按 appId
+  分槽（api.ts registry）；显式传参替代 AsyncLocalStorage（ALS 丢上下文=静默写错角色文件）。
+
 `.env` 主要键（等号后=缺省口径；完整调优表见 README「环境变量（可选调优）」）：
 
-- 凭据/接入：`QQ_APP_ID` / `QQ_APP_SECRET`、`OPENCODE_BASE_URL`（缺省自动发现）/ `OPENCODE_PASSWORD`、`ALLOWED_USERS`、`QQ_SANDBOX=false`
+- 凭据/接入：`QQ_APP_ID` / `QQ_APP_SECRET`、`OPENCODE_BASE_URL`（缺省自动发现）/ `OPENCODE_PASSWORD`、`ALLOWED_USERS`、`QQ_SANDBOX=false`；多角色时以 `QQ_BOTS`（见 §5.1）为准，上述单角色键仅作 legacy 兜底
 - 工作区：`QQBOT_DEFAULT_CWD`（缺省=bot 进程 cwd）
 - 可调阈值：`QQ_WATCHDOG_INTERVAL_MS=300000`、`QQ_ORPHAN_MS=90000`（合法 5s 至 60min）、`QQ_REDISPATCH_MAX_AGE_MS=7200000`（0=关）、`OPENCODE_TURN_TIMEOUT_MINUTES=30`、`QQ_PERM_DEFER_MS=500`（0 至 10s）、`QQ_ACTIVE_DAILY_LIMIT=100`、`QQ_PASSIVE_RIDE_WINDOW_MS=300000`、`QQ_STREAM_STAGGER_MS=300`、`QQ_REAPER_SCAN_SECONDS=60`、`QQ_REAPER_MIN_AGE_MS=2400000`（僵尸收割年龄门）、`QQ_REAPER_SILENCE_MS=1800000`（僵尸收割静默门）
 - 开关/路径：`QQ_ACK_RECEIPT`（默认关）、`QQ_QUEUE_RECEIPTS`（默认关）、`QQ_EVENT_PROBE`（默认关）、`QQ_LOG_FILE`（默认 openqq.log）、`QQ_INSTANCE_LOCK`（默认开）

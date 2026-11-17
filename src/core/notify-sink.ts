@@ -7,8 +7,7 @@
 //          设计文档：Desktop `opencode-qqbot-feature-request.md` Part 1（0.3.14 现存缺口：
 //          `opencode run` 新会话无 QQ 映射 → 镜像「无映射主人」跳过 → 结果推不到 QQ）。
 //          交付层不换实现：deliver 内含配额记账/被动→主动降级/分条/24h 同文去重。
-import { homedir } from "node:os"
-import { join } from "node:path"
+import { storageFile } from "./storage.js"
 import type { Config } from "../config.js"
 import type { MessageContext } from "../qq/types.js"
 import { createOutbox } from "./outbox.js"
@@ -90,5 +89,5 @@ export function resolveNotifyRecipients(
 
 /** 默认 outbox 文件路径（CLI 与 bot 共用；env 已由 createOutbox 内处理，这里供 CLI dry-judge）。 */
 export function defaultOutboxPath(): string {
-  return join(homedir(), ".openqq", "outbox.json")
+  return storageFile("outbox.json")
 }

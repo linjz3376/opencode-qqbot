@@ -1,9 +1,9 @@
-// @input:  ./client (OpencodeClient)
+﻿// @input:  ./client (OpencodeClient)
 // @output: SessionManager, UserSession
 // @pos:    opencode层 - QQ用户<->OpenCode Session 映射管理（持久化到 ~/.openqq/sessions.json）
+import { storageFile } from "../core/storage.js"
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs"
-import { dirname, join } from "path"
-import { homedir } from "os"
+import { dirname } from "path"
 import type { OpencodeClient } from "./client.js"
 
 interface UserSession {
@@ -16,8 +16,7 @@ interface UserSession {
   directory?: string
 }
 
-const STORE_DIR = join(homedir(), ".openqq")
-const STORE_FILE = join(STORE_DIR, "sessions.json")
+const STORE_FILE = storageFile("sessions.json")
 
 export class SessionManager {
   private sessions = new Map<string, UserSession>()

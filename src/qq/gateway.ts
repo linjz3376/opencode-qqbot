@@ -1,9 +1,9 @@
-// @input:  ws, ./api (getAccessToken, getGatewayUrl, acknowledgeInteraction), ./types (MessageContext, InteractionEvent)
+﻿// @input:  ws, ./api (getAccessToken, getGatewayUrl, acknowledgeInteraction), ./types (MessageContext, InteractionEvent)
 // @output: startGateway, MessageHandler
 // @pos:    qq层 - QQ Bot WebSocket Gateway 状态机 (心跳/重连/消息分发)
 import WebSocket from "ws"
 import { acknowledgeInteraction, clearTokenCache, getAccessToken, getGatewayUrl } from "./api.js"
-import { clearGatewayState, loadGatewayState, saveGatewayState } from "../core/gateway-state.js"
+import { clearGatewayState, loadGatewayState, saveGatewayState, GATEWAY_STATE_FILE } from "../core/gateway-state.js"
 import type {
   C2CMessageEvent,
   GatewayHelloData,
@@ -33,6 +33,8 @@ export type MessageHandler = (msg: MessageContext) => Promise<void>
 export interface GatewayOptions {
   appId: string
   clientSecret: string
+  /** 多角色（2026-11-17）：RESUME 状态文件按角色隔离；缺省 legacy 全局路径 */
+  stateFile?: string
   onMessage: MessageHandler
   onReady?: () => void
   /** A 项（2026-10-29）：按钮互动回调（INTERACTION_CREATE）——卡片审批的入口 */
@@ -52,13 +54,15 @@ interface GatewayState {
   heartbeatAcked: boolean
   /** 仅拦截活跃并发/重入；处理完成后释放，同 msgId 可显式重投 */
   activeMsgIds: Set<string>
+  /** 多角色：RESUME 状态文件（每角色隔离） */
+  stateFile: string
 }
 
 interface GatewayControl {
   stop: () => void
 }
 
-function createInitialState(): GatewayState {
+function createInitialState(stateFile: string): GatewayState {
   const state: GatewayState = {
     ws: null,
     stopped: false,
@@ -71,11 +75,12 @@ function createInitialState(): GatewayState {
     seq: null,
     heartbeatAcked: true,
     activeMsgIds: new Set(),
+    stateFile,
   }
   // 修复②：从磁盘恢复 session/seq——重启优先 RESUME（服务端只补断线窗口的
   // 事件），不再 IDENTIFY 从零重放 backlog。超龄/缺损/RESUME 被拒（op9）时
   // 自动回退 IDENTIFY，无死循环。加载失败静默走老路径，不阻塞启动。
-  const saved = loadGatewayState()
+  const saved = loadGatewayState(stateFile)
   if (saved) {
     state.sessionId = saved.session_id
     state.seq = saved.seq
@@ -164,7 +169,7 @@ function resetResumeState(state: GatewayState): void {
   state.seq = null
   // 修复②：服务端明确作废会话（op9 不可恢复/Resume 失效码）→ 持久化状态同步清账，
   // 下次启动不得再拿已作废的 session 去 RESUME。
-  clearGatewayState()
+  clearGatewayState(state.stateFile)
 }
 
 // QQ 表情实体剥离（2026-11-06 UAT 实证 DEF-P1）：`<faceType=1,faceId="0",ext="…">`
@@ -308,7 +313,7 @@ async function handleDispatchEvent(
       const readyData = payload.d as GatewayReadyData
       state.sessionId = readyData.session_id
       // 修复②：新会话确立即落盘（含 RESUME 失败回退 IDENTIFY 后的新会话）
-      if (state.seq !== null) saveGatewayState(state.sessionId, state.seq)
+      if (state.seq !== null) saveGatewayState(state.sessionId, state.seq, state.stateFile)
       // R 项诊断增强（2026-10-30）：首连/重连分界可见——重连后的 READY 打日志，
       // 下次"消息静默丢失"类事故可直接从日志定位断链窗口
       if (state.reconnectAttempt > 0) {
@@ -322,7 +327,7 @@ async function handleDispatchEvent(
     case "RESUMED": {
       console.log("[gateway] 会话已恢复（RESUMED，断线期间事件已回补）")
       // 修复②：心跳延续，落盘一次刷新 savedAt（防窗口使用过期源）
-      if (state.sessionId && state.seq !== null) saveGatewayState(state.sessionId, state.seq)
+      if (state.sessionId && state.seq !== null) saveGatewayState(state.sessionId, state.seq, state.stateFile)
       state.reconnectAttempt = 0
       return
     }
@@ -411,7 +416,7 @@ async function handlePayload(
       if (prevSeq !== null && payload.s > prevSeq + 1) {
         console.log(`[gateway] seq 回补 ${payload.s - prevSeq - 1} 帧（${prevSeq} → ${payload.s}）——断线期间载荷已重放`)
       }
-      saveGatewayState(state.sessionId, payload.s)
+      saveGatewayState(state.sessionId, payload.s, state.stateFile)
     }
   }
 
@@ -467,7 +472,7 @@ async function handlePayload(
 }
 
 export async function startGateway(options: GatewayOptions): Promise<GatewayControl> {
-  const state = createInitialState()
+  const state = createInitialState(options.stateFile ?? GATEWAY_STATE_FILE)
 
   const stop = (): void => {
     state.stopped = true

@@ -1,4 +1,4 @@
-// @input:  fs/path/os（台账落盘）
+﻿// @input:  fs/path/os（台账落盘）
 // @output: claimInflight, recordInflight, settleInflight, pendingInflight, classifyInflight（纯函数供测试）,
 //          markInflightStage, listInflightView, pruneInflightEntries（保留策略纯函数）, newInflightAttemptId,
 //          resetInflightJournal（测试用）,
@@ -8,9 +8,9 @@
 // 事故背景（2026-10-30，用户实证）：bot 重启/网关静默死亡窗口内到达的 QQ 消息
 // 丢失无反馈——在途回合状态全在内存，进程换代即蒸发。本模块把"派发→送达"责任
 // 落盘到 ~/.openqq/inflight.json，启动时对账恢复（bridge.recoverInflightRounds）。
+import { storageFile } from "./storage.js"
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, openSync, closeSync, unlinkSync, statSync } from "fs"
 import { join } from "path"
-import { homedir } from "os"
 import { admissionDecision } from "./inbound-dedupe.js"
 
 export interface InflightEntry {
@@ -111,16 +111,17 @@ export function redispatchMaxAgeMs(): number {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 7_200_000
 }
 
-// 测试可经 QQ_INFLIGHT_FILE 指向临时文件
-function journalPath(): string {
-  return process.env.QQ_INFLIGHT_FILE || join(homedir(), ".openqq", "inflight.json")
+// 路径解析：显式注入（多角色 createInflightJournal(file)）> env 覆盖（测试）> legacy 全局。
+function journalPath(file?: string): string {
+  return file || process.env.QQ_INFLIGHT_FILE || storageFile("inflight.json")
 }
 
-function load(): InflightEntry[] {
+function load(file?: string): InflightEntry[] {
   let entries: InflightEntry[] = []
+  const path = journalPath(file)
   try {
-    if (existsSync(journalPath())) {
-      const raw = JSON.parse(readFileSync(journalPath(), "utf-8"))
+    if (existsSync(path)) {
+      const raw = JSON.parse(readFileSync(path, "utf-8"))
       if (Array.isArray(raw)) entries = raw
     }
   } catch {
@@ -130,8 +131,8 @@ function load(): InflightEntry[] {
   return pruneInflightEntries(entries)
 }
 
-function save(entries: InflightEntry[]): void {
-  const path = journalPath()
+function save(file: string | undefined, entries: InflightEntry[]): void {
+  const path = journalPath(file)
   mkdirSync(join(path, ".."), { recursive: true })
   const retained = pruneInflightEntries(entries)
   // 临时文件带进程与随机后缀：并发执行体不会互相覆盖对方的 tmp。
@@ -151,8 +152,8 @@ const JOURNAL_LOCK_STALE_MS = 30_000
 const JOURNAL_LOCK_WAIT_MS = 5_000
 const sleepArray = new Int32Array(new SharedArrayBuffer(4))
 
-function withJournalLock<T>(fn: () => T): T {
-  const path = journalPath()
+function withJournalLock<T>(file: string | undefined, fn: () => T): T {
+  const path = journalPath(file)
   mkdirSync(join(path, ".."), { recursive: true })
   const lockPath = `${path}.lock`
   const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`
@@ -187,11 +188,11 @@ function withJournalLock<T>(fn: () => T): T {
   }
 }
 
-function mutate<T>(fn: (entries: InflightEntry[]) => T): T {
-  return withJournalLock(() => {
-    const entries = load()
+function mutate<T>(file: string | undefined, fn: (entries: InflightEntry[]) => T): T {
+  return withJournalLock(file, () => {
+    const entries = load(file)
     const result = fn(entries)
-    save(entries)
+    save(file, entries)
     return result
   })
 }
@@ -209,8 +210,8 @@ export type ClaimOutcome = "ok" | "duplicate-msgid" | "duplicate-intent"
  * attemptId；未传则生成新代次）；不另建去重文件。
  * 被 24h/20 条保留策略裁掉的旧 msgId 也可正常认领。
  */
-export function claimInflightDetailed(entry: Omit<InflightEntry, "state">, opts?: { fingerprint?: string }): ClaimOutcome {
-  return mutate((entries) => {
+export function claimInflightDetailed(entry: Omit<InflightEntry, "state">, opts?: { fingerprint?: string; file?: string }): ClaimOutcome {
+  return mutate(opts?.file, (entries) => {
     const fingerprint = opts?.fingerprint ?? entry.fingerprint ?? ""
     const decision = admissionDecision({
       hasSameMsgIdInflight: entries.some((e) => e.msgId === entry.msgId && e.state === "inflight"),
@@ -248,8 +249,8 @@ export function claimInflightDetailed(entry: Omit<InflightEntry, "state">, opts?
 }
 
 /** 兼容旧布尔签名的认领（测试与既有调用方） */
-export function claimInflight(entry: Omit<InflightEntry, "state">): boolean {
-  return claimInflightDetailed(entry) === "ok"
+export function claimInflight(entry: Omit<InflightEntry, "state">, file?: string): boolean {
+  return claimInflightDetailed(entry, { file }) === "ok"
 }
 
 /**
@@ -259,8 +260,8 @@ export function claimInflight(entry: Omit<InflightEntry, "state">): boolean {
  * - 已 settled：显式重投重新激活（换新代次与新的 at/user/session/text）；
  * - 无记录：新增在途。
  */
-export function recordInflight(entry: Omit<InflightEntry, "state">): void {
-  mutate((entries) => {
+export function recordInflight(entry: Omit<InflightEntry, "state">, file?: string): void {
+  mutate(file, (entries) => {
     const now = Date.now()
     const existing = entries.find((e) => e.msgId === entry.msgId)
     if (existing) {
@@ -303,8 +304,8 @@ export function recordInflight(entry: Omit<InflightEntry, "state">): void {
  * 旧代次的迟到 settle 不得把新在途回合误销。返回是否实际销账。
  * reason 记录"为什么结束"，供 /ledger 区分 answered 与 rejected。
  */
-export function settleInflight(msgId: string, attemptId?: string, reason: SettleReason = "answered"): boolean {
-  return mutate((entries) => {
+export function settleInflight(msgId: string, attemptId?: string, reason: SettleReason = "answered", file?: string): boolean {
+  return mutate(file, (entries) => {
     const entry = entries.find(
       (e) => e.msgId === msgId && e.state === "inflight" && (!attemptId || !e.attemptId || e.attemptId === attemptId),
     )
@@ -318,13 +319,13 @@ export function settleInflight(msgId: string, attemptId?: string, reason: Settle
 }
 
 /** 待对账清单（启动恢复用） */
-export function pendingInflight(): InflightEntry[] {
-  return load().filter((e) => e.state === "inflight")
+export function pendingInflight(file?: string): InflightEntry[] {
+  return load(file).filter((e) => e.state === "inflight")
 }
 
 /** 台账快照（/queue 与 /ledger 派生视图的数据源；不做用户过滤） */
-export function listInflightView(): InflightView {
-  const entries = load()
+export function listInflightView(file?: string): InflightView {
+  const entries = load(file)
   return {
     inflight: entries.filter((e) => e.state === "inflight").sort((a, b) => a.at - b.at),
     settled: entries.filter((e) => e.state === "settled").sort((a, b) => b.at - a.at),
@@ -340,7 +341,7 @@ export function markInflightStage(
   msgId: string,
   stage: InflightStage,
   patch?: Partial<Pick<InflightEntry, "queueId" | "enqueuedAt" | "sessionId" | "promptId" | "lastError">>,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; file?: string },
 ): boolean {
   const rank: Record<InflightStage, number> = {
     claimed: 0,
@@ -350,7 +351,7 @@ export function markInflightStage(
     background: 4,
     settled: 5,
   }
-  return mutate((entries) => {
+  return mutate(opts?.file, (entries) => {
     const entry = entries.find((e) => e.msgId === msgId && e.state === "inflight")
     if (!entry) return false
     if (opts?.force || !entry.stage || rank[stage] >= rank[entry.stage]) entry.stage = stage
@@ -369,9 +370,9 @@ export function markInflightStage(
  * 需要「这是哪个回合」的边界锚点，taskId 台账是跨进程唯一可靠载体。
  * 2026-11-05：同时把 stage 推进到 running（可观测性）。
  */
-export function markInflightPromptId(msgId: string, promptId: string): void {
+export function markInflightPromptId(msgId: string, promptId: string, file?: string): void {
   if (!promptId) return
-  mutate((entries) => {
+  mutate(file, (entries) => {
     const entry = entries.find((e) => e.msgId === msgId && e.state === "inflight")
     if (!entry) return
     if (!entry.promptId) entry.promptId = promptId
@@ -381,8 +382,8 @@ export function markInflightPromptId(msgId: string, promptId: string): void {
 }
 
 /** 测试用：清空台账文件状态 */
-export function resetInflightJournal(): void {
-  withJournalLock(() => save([]))
+export function resetInflightJournal(file?: string): void {
+  withJournalLock(file, () => save(file, []))
 }
 
 // —— 对账分类（纯函数）——
@@ -504,4 +505,36 @@ export function classifyInflight(
     if (answer) return { kind: "answered", answer }
   }
   return { kind: "running" }
+}
+
+// ── 多角色绑定实例（2026-11-17，owner 裁定单进程多 bot 身份）──
+// 单进程多角色时，各角色的台账必须物理隔离（否则重启对账跨角色误补/误派）。
+// createInflightJournal(file) 返回绑定到指定文件的实例；模块级具名导出 =
+// 默认实例（路径解析照旧：env 覆盖 > legacy 全局），既有调用方/测试零改动。
+export interface InflightJournal {
+  readonly file: string
+  claim: typeof claimInflight
+  claimDetailed: typeof claimInflightDetailed
+  record: typeof recordInflight
+  settle: typeof settleInflight
+  pending: typeof pendingInflight
+  view: typeof listInflightView
+  markStage: typeof markInflightStage
+  markPromptId: typeof markInflightPromptId
+  reset: typeof resetInflightJournal
+}
+
+export function createInflightJournal(file?: string): InflightJournal {
+  return {
+    file: journalPath(file),
+    claim: (entry) => claimInflight(entry, file),
+    claimDetailed: (entry, opts) => claimInflightDetailed(entry, { ...opts, file }),
+    record: (entry) => recordInflight(entry, file),
+    settle: (msgId, attemptId, reason) => settleInflight(msgId, attemptId, reason, file),
+    pending: () => pendingInflight(file),
+    view: () => listInflightView(file),
+    markStage: (msgId, stage, patch, opts) => markInflightStage(msgId, stage, patch, { ...opts, file }),
+    markPromptId: (msgId, promptId) => markInflightPromptId(msgId, promptId, file),
+    reset: () => resetInflightJournal(file),
+  }
 }

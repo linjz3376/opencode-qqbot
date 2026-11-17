@@ -1,18 +1,19 @@
 // @input:  ./config, ./opencode/*, ./qq/*, ./bridge, @opencode-ai/sdk (createOpencodeServer)
 // @output: (side-effect) 启动 Bot 进程
 // @pos:    根层 - 入口: 启动编排 + 优雅关闭
-import { loadConfig, ensureConfig } from "./config.js"
+import { loadConfig, ensureConfig, loadRoles, type Config } from "./config.js"
+import { storageFile } from "./core/storage.js"
 import { mkdirSync, writeFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
 import { createClient, healthCheck, type OpencodeClient } from "./opencode/client.js"
 import { discoverOpencode, persistDiscovery } from "./core/discovery.js"
 import { startLinkWatch } from "./core/linkwatch.js"
-import { getAccessToken, sendC2CMessage, getNextMsgSeq } from "./qq/api.js"
+import { getAccessToken, sendC2CMessage, getNextMsgSeq, registerAppEnv } from "./qq/api.js"
 import { SessionManager } from "./opencode/sessions.js"
 import { startGateway } from "./qq/gateway.js"
 import { startBackgroundTokenRefresh, stopBackgroundTokenRefresh } from "./qq/api.js"
-import { createBridge } from "./bridge.js"
+import { createBridge, type Bridge } from "./bridge.js"
 import { waitInstanceLock, acquireInstanceLock, INSTANCE_LOCK_DISABLED_ENV, type InstanceLock } from "./core/instance-lock.js"
 
 // O1（2026-10-15）：开机竞态退避等待——桌面服务未就绪时 20s 重试、15 分钟
@@ -82,25 +83,41 @@ async function main(): Promise<void> {
     }
   }
   await ensureConfig()
-  const config = loadConfig()
+  const baseConfig = loadConfig()
+
+  // 多角色（2026-11-17 owner 裁定，参考 openclaw-qqbot 具名账号表）：
+  // env QQ_BOTS=[{appId,secret,sandbox,name,allowedUsers}] 存在时单进程挂全部角色，
+  // 角色数据落 ~/.openqq/roles/<appId>/ 物理隔离；未配置 = legacy 单角色，零变化。
+  const roles = loadRoles()
+  const multiRole = !!(process.env.QQ_BOTS ?? "").trim()
+  const roleConfigOf = (r: (typeof roles)[number]): Config => ({
+    qq: { appId: r.appId, clientSecret: r.clientSecret, sandbox: r.sandbox },
+    opencode: baseConfig.opencode,
+    allowedUsers: r.allowedUsers,
+  })
 
   // M 项（2026-10-30，吸收竞品 proper-lockfile 方案零依赖手写）：单实例锁防多开——
   // 双实例同 bot 会被 QQ 网关互踢。后到实例待命轮询，宿主退出/暴毙（30s 僵尸判定）
   // 后自动接管。QQ_INSTANCE_LOCK=false 关闭；=try 则抢不到即退出（插件引导器拉起
   // 场景：多 location 并发拉起时防待命实例堆积）。
-  let instanceLock: InstanceLock | null = null
+  // 多角色：锁文件按 appId 隔离（openqq-<appId>.lock），每角色各持各锁、互不阻塞。
+  const instanceLocks: InstanceLock[] = []
   const lockMode = process.env[INSTANCE_LOCK_DISABLED_ENV] ?? ""
   if (lockMode === "try") {
-    instanceLock = acquireInstanceLock(config.qq.appId)
-    if (!instanceLock) {
-      console.log("[index] 已有实例在运行（try 模式），本实例退出")
-      process.exit(0)
+    for (const r of roles) {
+      const lock = acquireInstanceLock(r.appId)
+      if (!lock) {
+        console.log(`[index] 角色 ${r.appId} 已有实例在运行（try 模式），本实例退出`)
+        for (const l of instanceLocks) l.release()
+        process.exit(0)
+      }
+      instanceLocks.push(lock)
     }
   } else if (lockMode !== "false") {
-    instanceLock = await waitInstanceLock(config.qq.appId)
+    for (const r of roles) instanceLocks.push(await waitInstanceLock(r.appId))
   }
 
-  if (!config.opencode.baseUrl) {
+  if (!baseConfig.opencode.baseUrl) {
     throw new Error("缺少 OPENCODE_BASE_URL，指向 OpenCode 桌面版 API（如 http://127.0.0.1:<端口>/api；2.1.x 端口动态，失联时启动流程会自动发现）")
   }
 
@@ -136,28 +153,24 @@ async function main(): Promise<void> {
 
   let client: OpencodeClient
   try {
-    client = await waitForOpencode((u) => createClient(u), config.opencode.baseUrl)
+    client = await waitForOpencode((u) => createClient(u), baseConfig.opencode.baseUrl)
   } catch (error) {
     // 启动失败立即交还锁，缩短下一次接管的等待（否则锁要等 30s 过期才回收）
     clearInterval(heartbeatTimer)
     clearInterval(lagTimer)
-    instanceLock?.release()
+    for (const l of instanceLocks) l.release()
     throw error
   }
-
-  startBackgroundTokenRefresh(config.qq.appId, config.qq.clientSecret)
-
-  const sessions = new SessionManager(client)
-  const bridge = createBridge(config, client, sessions)
-  const { eventStream } = bridge
 
   // HC2（2026-10-26）：运行中链路自愈巡检 + QQ 告警。
   // 告警走主动消息（allowlist 首个用户），markdown 失败回退纯文本；
   // 去重由 linkwatch 状态机保证（每事故 open + fixed 各 ≤1 条）。
+  // 多角色：告警用首个角色的凭据与首用户（告警是进程级事故，一份足够）。
+  const alarmRole = roles[0]
   const alarm = async (text: string): Promise<void> => {
-    const uid = config.allowedUsers[0]
+    const uid = alarmRole.allowedUsers[0]
     if (!uid) return
-    const token = await getAccessToken(config.qq.appId, config.qq.clientSecret)
+    const token = await getAccessToken(alarmRole.appId, alarmRole.clientSecret)
     const seq = getNextMsgSeq("")
     try {
       await sendC2CMessage(token, uid, text, undefined, seq, true)
@@ -166,23 +179,41 @@ async function main(): Promise<void> {
       await sendC2CMessage(token, uid, text, undefined, seq, false)
     }
   }
-  const linkWatch = startLinkWatch({ client, onRebase: (url) => eventStream.rebase(url), alarm })
 
-  const gateway = await startGateway({
-    appId: config.qq.appId,
-    clientSecret: config.qq.clientSecret,
-    onMessage: bridge.handleMessage,
-    onInteraction: (event) => bridge.handleInteraction(event),
-    onReady: () => {
-      console.log("[index] QQ Gateway 已就绪")
-    },
-  })
+  // ── 角色装配：每角色一套 token 刷新 / 会话映射 / bridge / 网关 ──
+  const roleBridges: Bridge[] = []
+  const roleGateways: Array<{ stop: () => void }> = []
+  for (const role of roles) {
+    registerAppEnv(role.appId, role.sandbox)
+    startBackgroundTokenRefresh(role.appId, role.clientSecret)
+    const roleConfig = roleConfigOf(role)
+    // 多角色：会话映射按角色分文件；legacy 模式缺省路径零变化
+    const sessions = new SessionManager(
+      client,
+      multiRole ? storageFile("sessions.json", role.appId) : undefined,
+    )
+    const bridge = createBridge(roleConfig, client, sessions, multiRole ? role.appId : undefined)
+    roleBridges.push(bridge)
+    const gateway = await startGateway({
+      appId: role.appId,
+      clientSecret: role.clientSecret,
+      stateFile: multiRole ? storageFile("gateway-state.json", role.appId) : undefined,
+      onMessage: bridge.handleMessage,
+      onInteraction: (event) => bridge.handleInteraction(event),
+      onReady: () => {
+        console.log(`[index] QQ Gateway 已就绪（角色 ${role.name}/${role.appId}）`)
+      },
+    })
+    roleGateways.push(gateway)
+    console.log(`[index] 角色已装配：${role.name}（appId=${role.appId}，sandbox=${role.sandbox}）`)
+  }
+  const linkWatch = startLinkWatch({ client, onRebase: (url) => roleBridges[0].eventStream.rebase(url), alarm })
 
-  console.log("[index] OpenCode QQ Bot 已启动")
+  console.log(`[index] OpenCode QQ Bot 已启动（${roles.length} 个角色）`)
 
   // R 项（2026-10-30）：启动对账——恢复重启窗口内"已派发未回答"的在途回合
-  //（补投答案/重挂后台等待/重派丢失消息）。异步执行不阻塞心跳建立。
-  void bridge.recoverInflightRounds()
+  //（补投答案/重挂后台等待/重派丢失消息）。异步执行不阻塞心跳建立。每角色各自对账。
+  for (const b of roleBridges) void b.recoverInflightRounds()
 
   let shuttingDown = false
   const shutdown = (signal: string): void => {
@@ -191,9 +222,9 @@ async function main(): Promise<void> {
     console.log(`[index] 收到 ${signal}，开始退出...`)
     clearInterval(heartbeatTimer)
     clearInterval(lagTimer)
-    instanceLock?.release()
+    for (const l of instanceLocks) l.release()
     linkWatch.stop()
-    gateway.stop()
+    for (const g of roleGateways) g.stop()
     stopBackgroundTokenRefresh()
     setTimeout(() => process.exit(0), 0)
   }

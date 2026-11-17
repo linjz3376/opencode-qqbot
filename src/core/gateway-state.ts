@@ -1,4 +1,4 @@
-// @input:  fs/path/os（落盘）、env（窗口可调）
+﻿// @input:  fs/path/os（落盘）、env（窗口可调）
 // @output: loadGatewayState, saveGatewayState, clearGatewayState, GATEWAY_STATE_FILE
 // @pos:    core - QQ 网关 session/seq 持久化（修复②：重启不再 IDENTIFY 失忆重刷 backlog）
 //
@@ -8,9 +8,9 @@
 // op9 InvalidSession 回退 IDENTIFY（gateway 已有该处理路径，无死循环）。
 // 风控：文件只存 session_id/seq/时间戳，无凭据；损坏/超龄一律作废不阻塞启动；
 // 保存走临时文件原子 rename，与台账同风格。
+import { storageFile } from "./storage.js"
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from "fs"
 import { join } from "path"
-import { homedir } from "os"
 
 export interface GatewayPersistState {
   session_id: string
@@ -18,7 +18,7 @@ export interface GatewayPersistState {
   savedAt: number
 }
 
-export const GATEWAY_STATE_FILE = join(homedir(), ".openqq", "gateway-state.json")
+export const GATEWAY_STATE_FILE = storageFile("gateway-state.json")
 
 /**
  * RESUME 尝试窗口：QQ 网关断线会话 TTL 观测约 1h（427 每小时 RESUMED 实证）。

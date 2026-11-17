@@ -19,6 +19,91 @@ export interface Config {
   allowedUsers: string[]
 }
 
+/**
+ * 多角色（2026-11-17 owner 裁定：单进程挂多个 QQ bot 身份，参考 openclaw-qqbot
+ * 具名账号表）。一个 Role = 一个 appId 身份：自己的凭证/沙箱开关/白名单/
+ * 网关连接/数据分桶（~/.openqq/roles/<appId>/）。openid 按 app 隔离，
+ * 因此各角色的用户体系天然不相交。
+ */
+export interface RoleConfig {
+  /** 角色名（日志前缀用，可选） */
+  name: string
+  appId: string
+  clientSecret: string
+  sandbox: boolean
+  allowedUsers: string[]
+}
+
+/**
+ * 解析多角色配置。来源：env QQ_BOTS（JSON 数组，见 parseRolesJson）。
+ * 未配置时回退 legacy 单角色（QQ_APP_ID/QQ_APP_SECRET/QQ_SANDBOX/ALLOWED_USERS），
+ * 行为与 2026-11-17 之前完全一致——存量部署零迁移。
+ * 多角色模式下 ALLOWED_USERS/QQ_SANDBOX/QQ_APP_* 只作兜底缺项，不再单独生效。
+ */
+export function loadRoles(): RoleConfig[] {
+  const raw = (process.env.QQ_BOTS ?? "").trim()
+  if (raw) {
+    const roles = parseRolesJson(raw)
+    if (roles.length > 0) return roles
+    console.warn("[config] QQ_BOTS 配置存在但解析结果为空，回退 legacy 单角色模式")
+  }
+  const single = loadConfig()
+  return [{
+    name: single.qq.appId,
+    appId: single.qq.appId,
+    clientSecret: single.qq.clientSecret,
+    sandbox: single.qq.sandbox,
+    allowedUsers: single.allowedUsers,
+  }]
+}
+
+/**
+ * QQ_BOTS JSON 解析与校验（纯函数）。形态：
+ * [{"appId":"...","secret":"...","sandbox":false,"name":"开发角色","allowedUsers":["..."]}]
+ * 校验规则：必须是数组、每项必含非空 appId/secret；sandbox 默认 false；
+ * allowedUsers 默认 []; name 默认 appId。非法项跳过并 warn，全非法返回 []。
+ */
+export function parseRolesJson(raw: string): RoleConfig[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    console.warn("[config] QQ_BOTS 不是合法 JSON，已忽略")
+    return []
+  }
+  if (!Array.isArray(parsed)) {
+    console.warn("[config] QQ_BOTS 必须是数组，已忽略")
+    return []
+  }
+  const roles: RoleConfig[] = []
+  for (const [i, item] of parsed.entries()) {
+    const r = item as Partial<Record<"appId" | "secret" | "sandbox" | "name" | "allowedUsers", unknown>>
+    const appId = typeof r?.appId === "string" ? r.appId.trim() : ""
+    const secret = typeof r?.secret === "string" ? r.secret.trim() : ""
+    if (!appId || !secret) {
+      console.warn(`[config] QQ_BOTS[${i}] 缺少 appId/secret，已跳过`)
+      continue
+    }
+    const allowedUsers = Array.isArray(r?.allowedUsers)
+      ? r.allowedUsers.filter((u): u is string => typeof u === "string" && !!u.trim()).map((u) => u.trim())
+      : []
+    roles.push({
+      name: typeof r?.name === "string" && r.name.trim() ? r.name.trim() : appId,
+      appId,
+      clientSecret: secret,
+      sandbox: r?.sandbox === true,
+      allowedUsers,
+    })
+  }
+  // 同 appId 重复=配置错误，后者覆盖前者（日志可见），防双连接互踢
+  const seen = new Map<string, RoleConfig>()
+  for (const role of roles) {
+    if (seen.has(role.appId)) console.warn(`[config] QQ_BOTS 中 appId=${role.appId} 重复，后者覆盖前者`)
+    seen.set(role.appId, role)
+  }
+  return [...seen.values()]
+}
+
 const CONFIG_DIR = join(homedir(), ".openqq")
 export const ENV_FILE = join(CONFIG_DIR, ".env")
 

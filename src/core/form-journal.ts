@@ -1,9 +1,10 @@
-// @input:  fs/path/os, ../opencode/client (FormInfo), ../qq/types (MessageContext)
+﻿// @input:  fs/path/os, ../opencode/client (FormInfo), ../qq/types (MessageContext)
 // @output: FormJournalEntry, FormJournal, createFormJournal, defaultFormJournalPath
 // @pos:    core - 表单交互恢复台账（同步落盘、原子替换、跨进程短临界区锁）
 //
 // 只保存恢复所需数据：表单定义、最小路由 ctx、答案与回显文本。QQ 原事件、附件、
 // 引用内容和被动回复 msgId 一律不落盘；恢复后的通知必须使用主动消息语义。
+import { storageFile } from "./storage.js"
 import {
   closeSync,
   existsSync,
@@ -15,8 +16,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "fs"
-import { dirname, join } from "path"
-import { homedir } from "os"
+import { dirname } from "path"
 import type { FormInfo } from "../opencode/client.js"
 import type { MessageContext } from "../qq/types.js"
 
@@ -53,7 +53,7 @@ const sleepArray = new Int32Array(new SharedArrayBuffer(4))
 const STATES = new Set<FormLifecycleState>(["pending", "clickReceived", "submitting", "replied", "cancelled", "expired"])
 
 export function defaultFormJournalPath(): string {
-  return process.env.QQ_FORM_JOURNAL_FILE || join(homedir(), ".openqq", "forms.json")
+  return process.env.QQ_FORM_JOURNAL_FILE || storageFile("forms.json")
 }
 
 /** 只保留恢复路由；空 msgId 明确表达重启后使用主动消息，而非复用过期被动窗口。 */
