@@ -184,6 +184,8 @@ async function main(): Promise<void> {
   const roleBridges: Bridge[] = []
   const roleGateways: Array<{ stop: () => void }> = []
   for (const role of roles) {
+    // §2.3 失效模式：单角色启动失败不拖垮其余角色（降级=该角色不在线，日志明示）
+    try {
     registerAppEnv(role.appId, role.sandbox)
     startBackgroundTokenRefresh(role.appId, role.clientSecret)
     const roleConfig = roleConfigOf(role)
@@ -206,6 +208,9 @@ async function main(): Promise<void> {
     })
     roleGateways.push(gateway)
     console.log(`[index] 角色已装配：${role.name}（appId=${role.appId}，sandbox=${role.sandbox}）`)
+    } catch (error) {
+      console.error(`[index] 角色 ${role.name}（${role.appId}）装配失败，其余角色不受影响:`, error)
+    }
   }
   const linkWatch = startLinkWatch({ client, onRebase: (url) => roleBridges[0].eventStream.rebase(url), alarm })
 

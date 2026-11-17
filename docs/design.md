@@ -27,8 +27,8 @@
         ▲ 拉起（detached, windowsHide）                │ HTTP/SSE 127.0.0.1:28894
         │                                              ▼
 ┌──────────────────────────── bot 独立进程 (openqq-bot.js) ─────────────────────────┐
-│ index.ts  启动编排：锁 → 心跳 → 连接检查 → bridge → gateway                        │
-│   ├─ bridge.ts        核心桥接（调度/队列/投递/审批/表单/镜像/对账）               │
+│ index.ts  启动编排：锁 → 心跳 → 连接检查 → 角色装配（1..N 个，QQ_BOTS）→ gateway   │
+│   ├─ bridge.ts        核心桥接（调度/队列/投递/审批/表单/镜像/对账），每角色一套     │
 │   ├─ commands.ts      / 命令面（/new /stop /status /sessions /queue /ledger …）   │
 │   ├─ qq/              QQ 接入层（gateway 状态机 + REST API + 发送）               │
 │   ├─ opencode/        OpenCode 对接层（REST 客户端 + SSE + 回合运行器 + 会话映射）│
@@ -54,6 +54,47 @@
 | QQ 接入层 | qq/* | Gateway 状态机、REST 鉴权、收发与渲染 |
 | OpenCode 层 | opencode/* | REST 客户端、回合运行器、SSE 事件、会话映射、项目归属 |
 | 领域核心 | core/* | 管道、台账、锁、看门狗、审批卡片、表单、媒体、镜像、去重 |
+
+### 2.3 隔离模型（角色 × 用户 × 会话三级，2026-11-17 owner 裁定）
+
+> owner 原话为设计硬约束：「全部数据以及队列，至少用户级隔离，可配置用户+会话隔离」。
+> 本节是整份文档的隔离权威口径；模块章节出现隔离语义时以本节为准。
+
+**术语**：
+
+- **角色（Role）**：一个 QQ bot 应用身份 = appId。QQ 平台侧完全独立（独立申请/凭据/白名单/连接）。
+- **用户（User）**：QQ openid。**openid 按 app 签发**——同一个 QQ 号在不同角色下是两个不相交的用户身份，这是平台语义，是本设计的第一块基石。
+- **会话（Session）**：引擎 sessionId；一个用户同一时间绑定一个当前会话（/sessions 可切、/new 可建）。
+- **lane**：并发调度与排队的隔离单位，粒度由 `QQ_LANE_SCOPE` 决定（见下）。
+
+**三级隔离矩阵**：
+
+| 层 | 隔离键 | 机制 | 数据落点 | 配置性 |
+|---|---|---|---|---|
+| 角色 | appId | 独立网关连接、独立 token 槽与 API 底座（沙箱/生产 per role）、独立白名单、独立启动对账；单实例锁本就按 appId 分文件 | `~/.openqq/roles/<appId>/` 物理分目录（§5.1） | `QQ_BOTS` 成员即隔离，不可关闭 |
+| 用户 | openid | 会话映射、在途台账、审批挂起、表单日志、日配额、入队票号、问候/观察集合——全部按 userId 分桶 | 角色目录内文件名不变、键 = openid | **恒隔离**（owner 硬要求，fail-closed 白名单是第一道闸） |
+| 会话 | (userId, sessionId) | busy 锁、队列 lane、僵尸收割作用范围、入队锚定与出站推送门 | 内存 lane 键，不落盘 | **`QQ_LANE_SCOPE` 可配**（见下） |
+
+**会话隔离两档语义（`QQ_LANE_SCOPE`）**：
+
+- `user+session`（默认，owner 2026-11-14 裁定）：每 (用户,会话) 一条 lane 串行；同用户多会话可并行（引擎本就按会话实例路由、桌面端本就允许多会话并行）；僵尸/长回合只堵所在 lane；入队锚定 sessionId 快照、出站推送门按锚定判定。
+- `user`（官方 per-peer 原教旨，对齐官方 SDK concurrencyGuard）：每用户全局串行——busy 锁/draining/队列 lane 键全部退化为 userId；同用户第二个会话的消息排在第一会话回合之后；推送门语义不变（仍锚定=绑定）。供保守部署/对照实验用，不是默认。
+
+**档位切换影响面清单**（实现 `QQ_LANE_SCOPE` 时逐点核对）：`laneKeyOf/userIdOfLane/sessionIdOfLane`（message-queue）、`busyUsers`/`draining` 键、MessageQueue lane 键与重启重建分 lane、zombie-reaper 的 lane 匹配、queue-view 展示与 `/queue clear|drop` 语义。配置只改 lane **粒度**，不引入也不消除任何跨用户并行。
+
+**不变量（任何档位、任何角色数都成立）**：
+
+1. 用户 A 永不可见/不可操作用户 B 的任何数据（台账/审批/会话/配额/文件）——用户级以下不设任何共享捷径；
+2. 角色间数据物理分离——同机单进程亦不共享一个数据文件（`roles/<appId>/` 分桶）；
+3. 出站推送门恒按「锚定会话 = 当前绑定」判定，与会话隔离档位无关；
+4. lane 串行是 lane **内**保证；档位从 `user+session` 收到 `user` 是收紧并行度，不是放松隔离。
+
+**已知失效模式（设计层承认并观测）**：
+
+- 单进程多角色共享一个事件循环：一角色重度阻塞会拖慢全角色（已有 loop-lag 遥测直出证据）；仅在此物证出现时才有理由拆进程回退为「一进程一角色」。
+- 单进程 = 角色同生共死：一个角色未捕获异常带倒全部角色——装配循环按角色隔离 try/catch，单角色启动失败不拖垮其余角色（降级=该角色不在线，日志明示）。
+- `QQ_BOTS` 与 legacy 单角色键（`QQ_APP_ID` 等）并存时 `QQ_BOTS` 优先；legacy 键仅作未配 `QQ_BOTS` 的兜底，混用不会产生双角色。
+- 运维面（watchdog/CLI 探活）当前按单 appId 口径实现，多角色探活为显式待办（§5.1）。
 
 ## 3. 功能模块
 
@@ -92,7 +133,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 | 功能域 | 机制 |
 |---|---|
-| 调度 | 每(用户,会话) 串行（per-lane；DEF-qqbot-20261112-01 修法=官方 per-peer 的会话级细腻化）；`pendingSelections`（/sessions /model 序号选择，TTL 60s）；首条消息问候；队列完成回执开关制（`QQ_QUEUE_RECEIPTS`，默认关） |
+| 调度 | 每 lane 串行（lane 粒度可配，见 §2.3；DEF-qqbot-20261112-01 修法=官方 per-peer 的会话级细腻化）；`pendingSelections`（/sessions /model 序号选择，TTL 60s）；首条消息问候；队列完成回执开关制（`QQ_QUEUE_RECEIPTS`，默认关） |
 | 回合边界 | prompt API 受理返回 promptId 精确锚定；前台直答/后台等待/补投共用 `turnStateOf` 判定，不依赖"下一条 user 消息"启发式 |
 | 后台等待 | `bgWait`：回合转后台后继续等结果（SSE + 1min 轮询兜底，P0-1 收紧自 5min）；停滞提醒（30min 节奏，stallSnapshot 纯函数先取快照再重置，闲置分钟/执行时长跨重启不丢）；后台 15min 进度心跳（BG_HEARTBEAT）；missingIdleDone 完成兜底判定；finalAnswerText 工作稿防误投 |
 | 引用上下文 | context-buffer：引用解析 LRU 缓存（QQ 103 内嵌被引内容权威 + 本地缓存兜底）+ 出站回复登记（供"引用 AI 答案"命中） |
@@ -114,7 +155,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | K1 | msgId 原子认领（跨进程文件锁） | 同一 msgId 重复受理 → 静默拒（QQ 重推/重放不产生二次执行） |
 | K2 | 内容指纹（稳定尾段随机段） | 窗口内同内容 → 短提示拒；窗口外重投按重发处理 |
 
-**队列（message-queue）**：每 (用户,会话) 一条 lane 的 FIFO（owner 2026-11-14 裁定=官方 per-peer 串行的会话级细腻化），每 lane 上限 20；僵尸/长回合只堵所在 lane。**入队即锚定 sessionId 快照，drain 按锚定会话派发**——排队期间绑定切走，消息仍回锚定会话执行（跟原会话，不跟漂移的绑定）；无绑定消息落 null lane，派发时经 getOrCreate 解析并按解析结果补锁。两条独立语义同时呈现——
+**队列（message-queue）**：每 lane 一条 FIFO（lane 粒度 = `QQ_LANE_SCOPE`，见 §2.3；owner 2026-11-14 裁定缺省 `(用户,会话)` = 官方 per-peer 串行的会话级细腻化），每 lane 上限 20；僵尸/长回合只堵所在 lane。**入队即锚定 sessionId 快照，drain 按锚定会话派发**——排队期间绑定切走，消息仍回锚定会话执行（跟原会话，不跟漂移的绑定）；无绑定消息落 null lane，派发时经 getOrCreate 解析并按解析结果补锁。两条独立语义同时呈现——
 
 | 概念 | 语义 | 复用规则 |
 |---|---|---|
@@ -309,16 +350,16 @@ appId——每角色独立 token 刷新/会话映射/bridge/网关连接/白名�
 独立）。角色运行时数据物理隔离在 `~/.openqq/roles/<appId>/`（台账/审批/表单/配额/
 观察/问候/sessions/gateway-state），进程级文件（heartbeat/日志/supervisor）保持全局一份。
 单实例锁本就按 appId 分文件（`openqq-<appId>.lock`），多角色各持各锁。未配置 `QQ_BOTS`
-= legacy 单角色，全部路径与行为零变化。运维面（watchdog/CLI 探活）暂为单 appId 口径，
-多角色探活为已知待办。
+= legacy 单角色，全部路径与行为零变化。**三级隔离模型与失效模式见 §2.3（隔离权威口径）**。
 
 - 形态：`QQ_BOTS=[{"appId":"…","secret":"…","sandbox":false,"name":"开发角色","allowedUsers":["openid…"]}]`
-- 失效模式备忘：两角色事件循环同进程互卡（loop-lag 遥测覆盖）；token 缓存/底座按 appId
-  分槽（api.ts registry）；显式传参替代 AsyncLocalStorage（ALS 丢上下文=静默写错角色文件）。
+- 实现要点：token 缓存/API 底座按 appId 分槽（token→appId 反查免全链穿参）；在途台账
+  工厂化 `createInflightJournal(file)` 按角色绑定；显式传参替代 AsyncLocalStorage
+  （ALS 丢上下文 = 静默写错角色文件，失效模式不可接受）。
 
 `.env` 主要键（等号后=缺省口径；完整调优表见 README「环境变量（可选调优）」）：
 
-- 凭据/接入：`QQ_APP_ID` / `QQ_APP_SECRET`、`OPENCODE_BASE_URL`（缺省自动发现）/ `OPENCODE_PASSWORD`、`ALLOWED_USERS`、`QQ_SANDBOX=false`；多角色时以 `QQ_BOTS`（见 §5.1）为准，上述单角色键仅作 legacy 兜底
+- 凭据/接入：`QQ_APP_ID` / `QQ_APP_SECRET`、`OPENCODE_BASE_URL`（缺省自动发现）/ `OPENCODE_PASSWORD`、`ALLOWED_USERS`、`QQ_SANDBOX=false`；多角色时以 `QQ_BOTS`（见 §5.1）为准，上述单角色键仅作 legacy 兜底；`QQ_LANE_SCOPE=user+session|user`（会话隔离粒度，见 §2.3，缺省 `user+session`）
 - 工作区：`QQBOT_DEFAULT_CWD`（缺省=bot 进程 cwd）
 - 可调阈值：`QQ_WATCHDOG_INTERVAL_MS=300000`、`QQ_ORPHAN_MS=90000`（合法 5s 至 60min）、`QQ_REDISPATCH_MAX_AGE_MS=7200000`（0=关）、`OPENCODE_TURN_TIMEOUT_MINUTES=30`、`QQ_PERM_DEFER_MS=500`（0 至 10s）、`QQ_ACTIVE_DAILY_LIMIT=100`、`QQ_PASSIVE_RIDE_WINDOW_MS=300000`、`QQ_STREAM_STAGGER_MS=300`、`QQ_REAPER_SCAN_SECONDS=60`、`QQ_REAPER_MIN_AGE_MS=2400000`（僵尸收割年龄门）、`QQ_REAPER_SILENCE_MS=1800000`（僵尸收割静默门）
 - 开关/路径：`QQ_ACK_RECEIPT`（默认关）、`QQ_QUEUE_RECEIPTS`（默认关）、`QQ_EVENT_PROBE`（默认关）、`QQ_LOG_FILE`（默认 openqq.log）、`QQ_INSTANCE_LOCK`（默认开）
