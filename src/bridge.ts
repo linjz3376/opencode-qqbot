@@ -38,7 +38,7 @@ import {
   type WatchApi,
 } from "./commands.js"
 import { createMirror } from "./core/mirror.js"
-import { MessageQueue, laneKeyOf, sessionIdOfLane, userIdOfLane, previewText, agoLabel, intentKeyOf } from "./core/message-queue.js"
+import { MessageQueue, laneKeyOf, laneScope, sessionIdOfLane, userIdOfLane, previewText, agoLabel, intentKeyOf } from "./core/message-queue.js"
 import { classifyProviderError, rescueText } from "./core/error-rescue.js"
 
 const QUEUE_MAX = 20 // Q1：忙碌队列上限（学习 pi-qqbot queue.max 默认）
@@ -1091,17 +1091,26 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     for (const lane of [...busyUsers]) {
       if (budget <= 0) break
       const uid = userIdOfLane(lane)
-      const sid = sessionIdOfLane(lane)
-      // null lane=派发窗口极短不收割；bgWait 会话有自带 giveup/停滞保险网
-      if (!sid || bgWaits.has(sid)) continue
+      const laneSid = sessionIdOfLane(lane)
+      // QQ_LANE_SCOPE=user（design §2.3）：lane 退化为 per-user 与 null lane 同形，
+      // 不能按「无 sid 不收割」跳过——真实会话从在途账回填。
+      const userScoped = laneScope() === "user"
+      // null lane=派发窗口极短不收割（仅 user+session 档；user 档 lane 恒为 per-user 形）
+      if (!userScoped && !laneSid) continue
       // 账已不在但 lane 忙=纯悬挂标志（27min 实证形态），清锁放行即完成使命
-      const entry = inflight.pending().find((e) => e.userId === uid && e.sessionId === sid && e.state === "inflight")
+      const entry = inflight.pending().find(
+        (e) => e.userId === uid && e.state === "inflight" && (userScoped || e.sessionId === laneSid),
+      )
       if (!entry) {
         busyUsers.delete(lane)
-        console.log(`[reaper] 悬挂标志清理（无在途账）user=${uid.slice(0, 8)}… lane=${shortId(sid)}`)
-        void drainQueue(uid, sid)
+        console.log(`[reaper] 悬挂标志清理（无在途账）user=${uid.slice(0, 8)}… lane=${laneSid ? shortId(laneSid) : "per-user"}`)
+        void drainQueue(uid, laneSid)
         continue
       }
+      // user 档：探针/abort/补投一律用账的真实会话（lane 键里没有会话信息）
+      const sid = entry.sessionId
+      // bgWait 会话有自带 giveup/停滞保险网
+      if (!sid || bgWaits.has(sid)) continue
       // 引擎探针：会话消息列表 + turnStateOf（与 bgWait finish 同判据）；失败=本轮不动手
       const probe = await client.session.messages({ path: { id: sid } }).catch(() => undefined)
       const msgs = probe?.data
@@ -1686,33 +1695,36 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       }
       for (const [lk, list] of byLane) {
         const uid = userIdOfLane(lk)
-        const sid = sessionIdOfLane(lk)
         list.sort((a, b) => (a.enqueuedAt ?? a.at) - (b.enqueuedAt ?? b.at))
         const jobs = list.map((e) => ({
           ...(e.queueId !== undefined ? { id: e.queueId } : {}),
+          // 锚定取条目自身会话（QQ_LANE_SCOPE=user 时同 lane 混多会话，lane 级 sid 为空会丢锚）
+          ...(e.sessionId ? { sessionId: e.sessionId } : {}),
           ctx: {
             type: "c2c" as const,
             userId: uid,
             msgId: e.msgId,
             content: e.text,
             timestamp: String(e.at),
-            ...(sid ? { anchorSessionId: sid } : {}),
+            ...(e.sessionId ? { anchorSessionId: e.sessionId } : {}),
           },
           text: e.text,
           enqueuedAt: e.enqueuedAt ?? e.at,
         }))
-        const restored = msgQueue.restore(lk, uid, sid, jobs)
+        const restored = msgQueue.restore(lk, uid, sessionIdOfLane(lk), jobs)
         if (restored > 0) {
           const restoredJobs = msgQueue.list(lk).slice(-restored)
           for (const job of restoredJobs) {
             // drain 重入必须跳过重复认领，否则 duplicate-msgid 会把恢复条目静默丢掉。
             claimedContexts.add(job.ctx)
             // force：旧 stage（如 dispatched 空账）在进程换代后不再可信，恢复即回到 queued。
-            inflight.markStage(job.ctx.msgId, "queued", { queueId: job.id, enqueuedAt: job.enqueuedAt, ...(sid ? { sessionId: sid } : {}) }, { force: true })
+            // 会话回填取 job 锚定（QQ_LANE_SCOPE=user 时 lane 级 sid 为空，锚在 job 上）
+            const jobSid = job.sessionId
+            inflight.markStage(job.ctx.msgId, "queued", { queueId: job.id, enqueuedAt: job.enqueuedAt, ...(jobSid ? { sessionId: jobSid } : {}) }, { force: true })
             restorable.add(job.ctx.msgId)
           }
           console.log(
-            `[queue] restore user=${uid.slice(0, 8)}… lane=${sid ? shortId(sid) : "∅"} count=${restored} window=${Math.round(restoreWindow / 60_000)}m`,
+            `[queue] restore user=${uid.slice(0, 8)}… lane=${sessionIdOfLane(lk) ? shortId(sessionIdOfLane(lk)!) : "∅"} count=${restored} window=${Math.round(restoreWindow / 60_000)}m`,
           )
           await deliver(
             ctxForUser(uid),

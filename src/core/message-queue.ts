@@ -10,6 +10,12 @@
 // 队列按 (userId, sessionId) 分 lane——官方 per-peer 串行的会话级细腻化。
 // 僵尸/长回合只堵所在 lane；入队即锚定 sessionId 快照，drain 按锚定会话派发。
 // 票号仍按用户单调递增（#N 是用户可见身份键，跨 lane 不复用）。
+//
+// 会话隔离粒度可配（owner 2026-11-17 裁定，design §2.3）：QQ_LANE_SCOPE=
+//   - "user+session"（缺省）：现状语义，每 (用户,会话) 一条 lane，同用户多会话可并行；
+//   - "user"（官方 per-peer 原教旨）：lane 退化为 per-user，用户消息全局串行，
+//     busy/队列/僵尸收割/重启重建全线随 laneKeyOf 收敛（队列本身对 laneKey 不透明）。
+// 判定走惰性函数：.env 由 ensureConfig() 运行时才注入 process.env（同 apiBase 教训）。
 import type { MessageContext } from "../qq/types.js"
 
 export interface QueuedJob {
@@ -22,9 +28,21 @@ export interface QueuedJob {
   enqueuedAt: number
 }
 
-/** lane 键 = userId|sessionId；无绑定消息落 null lane（sessionId 段为空串）。 */
+/** 会话隔离粒度（design §2.3）。缺省 user+session=per-session-peer。 */
+export type LaneScope = "user+session" | "user"
+
+export function laneScope(): LaneScope {
+  return (process.env.QQ_LANE_SCOPE ?? "").trim() === "user" ? "user" : "user+session"
+}
+
+/**
+ * lane 键 = userId|sessionId；无绑定消息落 null lane（sessionId 段为空串）。
+ * QQ_LANE_SCOPE=user 时带会话也退化为 `${userId}|`（per-user 全局串行）——
+ * 与 null lane 同形，userIdOfLane/sessionIdOfLane 解析不受影响。
+ */
 export function laneKeyOf(userId: string, sessionId: string | null | undefined): string {
-  return `${userId}|${sessionId ?? ""}`
+  if (!sessionId || laneScope() === "user") return `${userId}|`
+  return `${userId}|${sessionId}`
 }
 
 export function userIdOfLane(laneKey: string): string {
@@ -158,7 +176,7 @@ export class MessageQueue {
     laneKey: string,
     userId: string,
     sessionId: string | undefined,
-    jobs: Array<{ ctx: MessageContext; text: string; enqueuedAt: number; id?: number }>,
+    jobs: Array<{ ctx: MessageContext; text: string; enqueuedAt: number; id?: number; sessionId?: string }>,
   ): number {
     const list = this.jobs.get(laneKey) ?? []
     let restored = 0
@@ -167,7 +185,9 @@ export class MessageQueue {
       const explicit = Number.isInteger(item.id) && (item.id ?? 0) > 0 ? (item.id as number) : 0
       const id = explicit > 0 ? explicit : this.issueId(userId)
       if (id >= (this.nextIds.get(userId) ?? 1)) this.nextIds.set(userId, id + 1)
-      list.push({ id, userId, ctx: item.ctx, text: item.text, enqueuedAt: item.enqueuedAt, ...(sessionId ? { sessionId } : {}) })
+      // 锚定会话取条目自身（QQ_LANE_SCOPE=user 时同 lane 可混多会话，lane 级 sid 会丢锚）
+      const jobSid = item.sessionId ?? sessionId
+      list.push({ id, userId, ctx: item.ctx, text: item.text, enqueuedAt: item.enqueuedAt, ...(jobSid ? { sessionId: jobSid } : {}) })
       restored++
     }
     if (list.length > 0) this.jobs.set(laneKey, list)
