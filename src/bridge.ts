@@ -667,6 +667,11 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   }
 
   // O7b：审批域门面（挂起槽/等待/裁决/跨重启恢复全在 core/permission.ts）
+  // ★ 结合部契约（2026-11-17 固化）：onPermission（回合内即时推送，SSE permission.asked）
+  // 与常驻交互监听（桌面端源审批 pushExternal）是同一挂起槽的两个入口——裁决/TTL/
+  // 清槽必须两入口等价；clearIfResolved 保证桌面先决时 QQ 卡自动关闭（不双发）。
+  // 多角色：本 gate 绑本角色 storageAppId（pending 落 roles/<appId>/），
+  // 跨角色审批隔离=文件级+槽位 userId 级双保险，改造时不得合并。
   const perm = createPermissionGate({
     client,
     sendReply,

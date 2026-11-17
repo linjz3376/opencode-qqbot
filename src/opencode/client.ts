@@ -64,7 +64,11 @@ export interface PromptAndWaitOptions extends PromptOptions {
   // 「baseline 后第一条 assistant」会抓到别回合的产物）。
   onAccepted?: (info: { promptId: string; baseline: number }) => void
   // DEF-qqbot-20261112-1：本回合会话的项目目录——权限轮询 list 与裁决 reply 的
-  // x-opencode-directory 值；引擎待审按 location 实例分仓，不带必查空/404
+  // x-opencode-directory 值；引擎待审按 location 实例分仓，不带必查空/404。
+  // ★ 头链路边界（2026-11-17 固化）：全链仅本文件 4 处注入（list/reply ×2 组），
+  // 新增引擎调用若涉权限/待审数据，必须评估是否带 directory——「漏带」的失效
+  // 模式是静默查空（404 被 catch 吞），不留痕——审计靠 grep 本字段的全量命中点。
+  // 锚定≠绑定时目录必须来自锚定会话服务端回读（bridge.ts 1461-1466），禁沿用绑定缓存。
   directory?: string
   // 轮询中发现待审批权限时调用；返回用户的审批决策后，promptAndWait 负责
   // POST reply 并继续等待 idle。审批等待时间不计入 5 分钟超时。

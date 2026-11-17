@@ -4,6 +4,17 @@
 //          classifyApprovalReplyError, formatPermissionConflictNotice（纯函数供测试）, ApprovalReplyFailure
 // @pos:    根层/core - 审批域（O7b 2026-10-15 自 bridge.ts 拆出：挂起槽、等待/
 //          裁决、跨重启恢复、自然语言决策解析、菜单格式化、中断态落盘）
+//
+// ★ 链路契约（2026-11-17 owner 批注固化——改动本文件前必读）：
+// 引擎对【所有连接客户端】SSE 广播 permission.asked（桌面端弹原生窗，bot 走本域）；
+// 全生命周期四不变量：①挂起槽 per-userId 单槽，跨角色/跨用户物理隔离
+//   （pending-permissions.json 按 roles/<appId>/ 分桶，多角色改造后不得回退共享）；
+// ②轮询/裁决必带会话项目目录头（DEF-qqbot-20261112-1：x-opencode-directory 快照于建槽，
+//   裸查/裸 reply=404 失明）；③裁决先 ACK 引擎 deferred 再清槽（reject=DeclinedError 自释放）；
+// ④桌面端先决时 QQ 侧自动关槽（clearIfResolved，双向同步不双发）。
+// 失效模式锚点：11-13 DEF-20261113-P1（引擎 fail-open 不发 ask=本域无事件可收，
+//   非本域缺陷）；11-17 20:17 实测全生命周期 ✅（Remove-Item 触发→卡→QQ 裁决→回验）。
+// 双实证日：2026-11-17（17:29 桌面源裁决同步 / 20:17 QQ 源全生命周期）。
 import { storageFile } from "./storage.js"
 import { existsSync, readFileSync, writeFileSync } from "fs"
 import type { MessageContext } from "../qq/types.js"

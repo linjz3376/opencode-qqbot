@@ -11,6 +11,13 @@
 // 与文字菜单并行不互拆：卡片优先，发送失败自动降级文字；文字通道原样保留。
 // 安全基线（fail-closed）：忽略按钮=不决策（权限保持挂起至 TTL）；
 // button_data 内嵌 request.id，槽位已被新请求替换时旧按钮点击直接拒识。
+//
+// ★ 卡片层契约（2026-11-17 固化）：本层只负责「渲染+收发」，决策语义全在
+// permission.ts（挂起/裁决/持久化）——两层不得互渗：卡片发送失败降级文字菜单时
+// 决策通道不变（文字回复走 parsePermissionDecision 同一入口）；
+// 互动 ACK 必须 3 秒内先 ack 再业务（平台同 id 只受理一次，失败 ACK 可安全重试一次）。
+// 多角色：卡片发送用本角色 token/底座（getAccessToken 按 appId 分槽自动路由），
+// 不得跨角色代发。实测锚点：2026-11-17 20:17 测试角色审批卡全生命周期 ✅。
 import { getAccessToken, sendC2CMessage, sendGroupMessage, type InlineKeyboard, type KeyboardButton } from "../qq/api.js"
 import type { InteractionEvent, MessageContext } from "../qq/types.js"
 import type { PermissionDecision, PermissionRequest } from "../opencode/client.js"
