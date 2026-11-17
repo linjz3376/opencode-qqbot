@@ -1092,14 +1092,14 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       if (budget <= 0) break
       const uid = userIdOfLane(lane)
       const laneSid = sessionIdOfLane(lane)
-      // QQ_LANE_SCOPE=user（design §2.3）：lane 退化为 per-user 与 null lane 同形，
+      // QQ_LANE_SCOPE=per-peer（design §2.3）：lane 退化为 per-user 与 null lane 同形，
       // 不能按「无 sid 不收割」跳过——真实会话从在途账回填。
-      const userScoped = laneScope() === "user"
-      // null lane=派发窗口极短不收割（仅 user+session 档；user 档 lane 恒为 per-user 形）
-      if (!userScoped && !laneSid) continue
+      const perPeer = laneScope() === "per-peer"
+      // null lane=派发窗口极短不收割（仅 per-session-peer 档；per-peer 档 lane 恒为 per-peer 形）
+      if (!perPeer && !laneSid) continue
       // 账已不在但 lane 忙=纯悬挂标志（27min 实证形态），清锁放行即完成使命
       const entry = inflight.pending().find(
-        (e) => e.userId === uid && e.state === "inflight" && (userScoped || e.sessionId === laneSid),
+        (e) => e.userId === uid && e.state === "inflight" && (perPeer || e.sessionId === laneSid),
       )
       if (!entry) {
         busyUsers.delete(lane)
@@ -1107,7 +1107,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         void drainQueue(uid, laneSid)
         continue
       }
-      // user 档：探针/abort/补投一律用账的真实会话（lane 键里没有会话信息）
+      // per-peer 档：探针/abort/补投一律用账的真实会话（lane 键里没有会话信息）
       const sid = entry.sessionId
       // bgWait 会话有自带 giveup/停滞保险网
       if (!sid || bgWaits.has(sid)) continue
@@ -1698,7 +1698,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         list.sort((a, b) => (a.enqueuedAt ?? a.at) - (b.enqueuedAt ?? b.at))
         const jobs = list.map((e) => ({
           ...(e.queueId !== undefined ? { id: e.queueId } : {}),
-          // 锚定取条目自身会话（QQ_LANE_SCOPE=user 时同 lane 混多会话，lane 级 sid 为空会丢锚）
+          // 锚定取条目自身会话（QQ_LANE_SCOPE=per-peer 时同 lane 混多会话，lane 级 sid 为空会丢锚）
           ...(e.sessionId ? { sessionId: e.sessionId } : {}),
           ctx: {
             type: "c2c" as const,

@@ -75,10 +75,10 @@
 | 用户 | openid | 会话映射、在途台账、审批挂起、表单日志、日配额、入队票号、问候/观察集合——全部按 userId 分桶 | 角色目录内文件名不变、键 = openid | **恒隔离**（owner 硬要求，fail-closed 白名单是第一道闸） |
 | 会话 | (userId, sessionId) | busy 锁、队列 lane、僵尸收割作用范围、入队锚定与出站推送门 | 内存 lane 键，不落盘 | **`QQ_LANE_SCOPE` 可配**（见下） |
 
-**会话隔离两档语义（`QQ_LANE_SCOPE`）**：
+**会话隔离两档语义（`QQ_LANE_SCOPE`，行内通用 lock-scope 枚举风格，细→粗；命名依据：peer=QQ 平台官方术语「单关系/concurrencyGuard 按 peer 串行」，session=引擎会话）**：
 
-- `user+session`（默认，owner 2026-11-14 裁定）：每 (用户,会话) 一条 lane 串行；同用户多会话可并行（引擎本就按会话实例路由、桌面端本就允许多会话并行）；僵尸/长回合只堵所在 lane；入队锚定 sessionId 快照、出站推送门按锚定判定。
-- `user`（官方 per-peer 原教旨，对齐官方 SDK concurrencyGuard）：每用户全局串行——busy 锁/draining/队列 lane 键全部退化为 userId；同用户第二个会话的消息排在第一会话回合之后；推送门语义不变（仍锚定=绑定）。供保守部署/对照实验用，不是默认。
+- `per-session-peer`（缺省，owner 2026-11-14 裁定）：每 (对端,会话) 一条 lane 串行；同用户多会话可并行（引擎本就按会话实例路由、桌面端本就允许多会话并行）；僵尸/长回合只堵所在 lane；入队锚定 sessionId 快照、出站推送门按锚定判定。
+- `per-peer`（官方 SDK concurrencyGuard 同构）：每对端（C2C=用户）全局串行——busy 锁/draining/队列 lane 键全部退化为 per-peer；同用户第二个会话的消息排在第一会话回合之后；推送门语义不变（仍锚定=绑定）。供保守部署/对照实验用，不是缺省。
 
 **档位切换影响面清单**（实现 `QQ_LANE_SCOPE` 时逐点核对）：`laneKeyOf/userIdOfLane/sessionIdOfLane`（message-queue）、`busyUsers`/`draining` 键、MessageQueue lane 键与重启重建分 lane、zombie-reaper 的 lane 匹配、queue-view 展示与 `/queue clear|drop` 语义。配置只改 lane **粒度**，不引入也不消除任何跨用户并行。
 
@@ -87,7 +87,7 @@
 1. 用户 A 永不可见/不可操作用户 B 的任何数据（台账/审批/会话/配额/文件）——用户级以下不设任何共享捷径；
 2. 角色间数据物理分离——同机单进程亦不共享一个数据文件（`roles/<appId>/` 分桶）；
 3. 出站推送门恒按「锚定会话 = 当前绑定」判定，与会话隔离档位无关；
-4. lane 串行是 lane **内**保证；档位从 `user+session` 收到 `user` 是收紧并行度，不是放松隔离。
+4. lane 串行是 lane **内**保证；档位从 `per-session-peer` 收到 `per-peer` 是收紧并行度，不是放松隔离。
 
 **已知失效模式（设计层承认并观测）**：
 
@@ -155,7 +155,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | K1 | msgId 原子认领（跨进程文件锁） | 同一 msgId 重复受理 → 静默拒（QQ 重推/重放不产生二次执行） |
 | K2 | 内容指纹（稳定尾段随机段） | 窗口内同内容 → 短提示拒；窗口外重投按重发处理 |
 
-**队列（message-queue）**：每 lane 一条 FIFO（lane 粒度 = `QQ_LANE_SCOPE`，见 §2.3；owner 2026-11-14 裁定缺省 `(用户,会话)` = 官方 per-peer 串行的会话级细腻化），每 lane 上限 20；僵尸/长回合只堵所在 lane。**入队即锚定 sessionId 快照，drain 按锚定会话派发**——排队期间绑定切走，消息仍回锚定会话执行（跟原会话，不跟漂移的绑定）；无绑定消息落 null lane，派发时经 getOrCreate 解析并按解析结果补锁。两条独立语义同时呈现——
+**队列（message-queue）**：每 lane 一条 FIFO（lane 粒度 = `QQ_LANE_SCOPE`，见 §2.3；owner 2026-11-14 裁定缺省 `per-session-peer` = 官方 per-peer 串行的会话级细腻化），每 lane 上限 20；僵尸/长回合只堵所在 lane。**入队即锚定 sessionId 快照，drain 按锚定会话派发**——排队期间绑定切走，消息仍回锚定会话执行（跟原会话，不跟漂移的绑定）；无绑定消息落 null lane，派发时经 getOrCreate 解析并按解析结果补锁。两条独立语义同时呈现——
 
 | 概念 | 语义 | 复用规则 |
 |---|---|---|
@@ -359,7 +359,7 @@ appId——每角色独立 token 刷新/会话映射/bridge/网关连接/白名�
 
 `.env` 主要键（等号后=缺省口径；完整调优表见 README「环境变量（可选调优）」）：
 
-- 凭据/接入：`QQ_APP_ID` / `QQ_APP_SECRET`、`OPENCODE_BASE_URL`（缺省自动发现）/ `OPENCODE_PASSWORD`、`ALLOWED_USERS`、`QQ_SANDBOX=false`；多角色时以 `QQ_BOTS`（见 §5.1）为准，上述单角色键仅作 legacy 兜底；`QQ_LANE_SCOPE=user+session|user`（会话隔离粒度，见 §2.3，缺省 `user+session`）
+- 凭据/接入：`QQ_APP_ID` / `QQ_APP_SECRET`、`OPENCODE_BASE_URL`（缺省自动发现）/ `OPENCODE_PASSWORD`、`ALLOWED_USERS`、`QQ_SANDBOX=false`；多角色时以 `QQ_BOTS`（见 §5.1）为准，上述单角色键仅作 legacy 兜底；`QQ_LANE_SCOPE=per-session-peer|per-peer`（会话隔离粒度，见 §2.3，缺省 `per-session-peer`）
 - 工作区：`QQBOT_DEFAULT_CWD`（缺省=bot 进程 cwd）
 - 可调阈值：`QQ_WATCHDOG_INTERVAL_MS=300000`、`QQ_ORPHAN_MS=90000`（合法 5s 至 60min）、`QQ_REDISPATCH_MAX_AGE_MS=7200000`（0=关）、`OPENCODE_TURN_TIMEOUT_MINUTES=30`、`QQ_PERM_DEFER_MS=500`（0 至 10s）、`QQ_ACTIVE_DAILY_LIMIT=100`、`QQ_PASSIVE_RIDE_WINDOW_MS=300000`、`QQ_STREAM_STAGGER_MS=300`、`QQ_REAPER_SCAN_SECONDS=60`、`QQ_REAPER_MIN_AGE_MS=2400000`（僵尸收割年龄门）、`QQ_REAPER_SILENCE_MS=1800000`（僵尸收割静默门）
 - 开关/路径：`QQ_ACK_RECEIPT`（默认关）、`QQ_QUEUE_RECEIPTS`（默认关）、`QQ_EVENT_PROBE`（默认关）、`QQ_LOG_FILE`（默认 openqq.log）、`QQ_INSTANCE_LOCK`（默认开）

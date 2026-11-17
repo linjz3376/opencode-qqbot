@@ -12,10 +12,15 @@
 // 票号仍按用户单调递增（#N 是用户可见身份键，跨 lane 不复用）。
 //
 // 会话隔离粒度可配（owner 2026-11-17 裁定，design §2.3）：QQ_LANE_SCOPE=
-//   - "user+session"（缺省）：现状语义，每 (用户,会话) 一条 lane，同用户多会话可并行；
-//   - "user"（官方 per-peer 原教旨）：lane 退化为 per-user，用户消息全局串行，
+//   - "per-session-peer"（缺省）：每 (对端,会话) 一条 lane——官方 per-peer 的会话级
+//     细腻化（owner 11-14 裁定），同用户多会话可并行；
+//   - "per-peer"（行内通用名，对齐官方 SDK concurrencyGuard 口径）：lane 退化为
+//     每对端（C2C=用户）一条，用户消息全局串行；
 //     busy/队列/僵尸收割/重启重建全线随 laneKeyOf 收敛（队列本身对 laneKey 不透明）。
 // 判定走惰性函数：.env 由 ensureConfig() 运行时才注入 process.env（同 apiBase 教训）。
+// 命名依据（2026-11-17 检索）：peer=QQ 平台官方术语（单关系配额/concurrencyGuard
+// 按 peer 串行）；session=引擎会话；vercel/chat 等通用框架同款 lock-scope 枚举风格
+// （"thread"|"channel" = 细→粗两档）。
 import type { MessageContext } from "../qq/types.js"
 
 export interface QueuedJob {
@@ -28,20 +33,24 @@ export interface QueuedJob {
   enqueuedAt: number
 }
 
-/** 会话隔离粒度（design §2.3）。缺省 user+session=per-session-peer。 */
-export type LaneScope = "user+session" | "user"
+/**
+ * 并发 lane 粒度（design §2.3，行内通用 lock-scope 枚举风格，细→粗）：
+ * - per-session-peer：每 (对端,会话) 一条 lane（缺省）；
+ * - per-peer：每对端一条 lane（官方 SDK concurrencyGuard 同构）。
+ */
+export type LaneScope = "per-session-peer" | "per-peer"
 
 export function laneScope(): LaneScope {
-  return (process.env.QQ_LANE_SCOPE ?? "").trim() === "user" ? "user" : "user+session"
+  return (process.env.QQ_LANE_SCOPE ?? "").trim().toLowerCase() === "per-peer" ? "per-peer" : "per-session-peer"
 }
 
 /**
  * lane 键 = userId|sessionId；无绑定消息落 null lane（sessionId 段为空串）。
- * QQ_LANE_SCOPE=user 时带会话也退化为 `${userId}|`（per-user 全局串行）——
+ * QQ_LANE_SCOPE=per-peer 时带会话也退化为 `${userId}|`（对端全局串行）——
  * 与 null lane 同形，userIdOfLane/sessionIdOfLane 解析不受影响。
  */
 export function laneKeyOf(userId: string, sessionId: string | null | undefined): string {
-  if (!sessionId || laneScope() === "user") return `${userId}|`
+  if (!sessionId || laneScope() === "per-peer") return `${userId}|`
   return `${userId}|${sessionId}`
 }
 
