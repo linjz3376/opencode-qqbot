@@ -342,7 +342,19 @@ async function handleDispatchEvent(
         console.log("[gateway] 附件载荷:", JSON.stringify(briefAttachments(message.attachments)))
       }
       if (!message.content && !message.attachments?.length) {
-        releaseActive(state.activeMsgIds, event.id)
+        if (event.content?.trim()) {
+          // DEF-qqbot-20261111-P2 补漏（2026-11-17 实证）：face 实体剥离后 content 为空的
+          // 纯表情消息原先在此静默丢弃——平台有投递、bot 零日志，owner 质疑后定位。
+          // 改为放行给 bridge 的 emojiOnly 有据提示路径（bridge.ts:1284-1288）。
+          try {
+            await options.onMessage(message)
+          } finally {
+            releaseActive(state.activeMsgIds, event.id)
+          }
+        } else {
+          releaseActive(state.activeMsgIds, event.id)
+          console.log("[gateway] 空消息丢弃（无内容无附件）:", event.id)
+        }
         return
       }
       try {
@@ -362,7 +374,17 @@ async function handleDispatchEvent(
         console.log("[gateway] 附件载荷:", JSON.stringify(briefAttachments(message.attachments)))
       }
       if (!message.content && !message.attachments?.length) {
-        releaseActive(state.activeMsgIds, event.id)
+        if (event.content?.trim()) {
+          // 同 C2C 分支：face 实体剥离后为空的纯表情放行给 bridge 有据提示，不静默丢
+          try {
+            await options.onMessage(message)
+          } finally {
+            releaseActive(state.activeMsgIds, event.id)
+          }
+        } else {
+          releaseActive(state.activeMsgIds, event.id)
+          console.log("[gateway] 空群消息丢弃（无内容无附件）:", event.id)
+        }
         return
       }
       try {
