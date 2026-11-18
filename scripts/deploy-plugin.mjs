@@ -23,7 +23,27 @@ const tgz = pack.stdout.trim().split("\n").pop()
 console.log(`打包完成：${tgz}`)
 
 // 2. 清空目标目录（含旧单文件/双 bundle 形态残留）并重建
-rmSync(targetDir, { recursive: true, force: true })
+// 2026-11-19 加固（owner 当轮授权）：整树 rm 遇 EBUSY（运行中实例驻留目录/宿主 watcher
+// 持目录节点锁）时降级为逐子项清理——Windows 对目录节点的独占锁通常不阻塞子项删除
+// （实证：空壳事故中 rmdir 删光了子项、只对目录节点失败；文件创建/探测正常）。
+// 清理不净的残留由第 5 步哈希对账闸兜底（不一致即中止，绝不带病部署）。
+try {
+  rmSync(targetDir, { recursive: true, force: true })
+} catch (error) {
+  const code = error && error.code ? error.code : ""
+  console.warn(`整树清理失败（${code}），降级为逐子项清理：${(error && error.message) || error}`)
+  try {
+    for (const name of readdirSync(targetDir)) {
+      try {
+        rmSync(join(targetDir, name), { recursive: true, force: true })
+      } catch (childError) {
+        console.warn(`  子项清理跳过（占用中，交给哈希对账闸）：${name} — ${(childError && childError.code) || childError}`)
+      }
+    }
+  } catch {
+    /* 目录不可读则交给后续 mkdir/tar 报错 */
+  }
+}
 mkdirSync(targetDir, { recursive: true })
 
 // 3. 解包（-C 目标目录本身 + strip package/ 前缀；tar=系统 bsdtar，Win10+ 自带）
