@@ -205,18 +205,27 @@ export function missingIdleDone(
 // bot 观测不到「模型是否还在生成」——昨夜 BG101A 实证：首 token 后 3 秒流停止，
 // 90 分钟零产出无终结，心跳却在如实报「还在执行」。本层补上判别器：
 // 判死 = 锚定边界内 assistant 最后活动（streamed 或 created）超阈值
-//        且无任何运行中工具（tool state=running——长 shell 执行期间 streamed
-//        必然冻结，靠 running 工具豁免，防误杀 2100s 睡眠类长任务）
 //        且回合未终结（idle/全部 completed 归完成判据管）。
+// 工具豁免（有界）：工具执行中（tool state=running）streamed 必然冻结是健康形态——
+// 但卡死的工具 part 同样恒 running（BG101A 实证：question 工具悬挂 2.5h），故豁免
+// 只保活到 QQ_BG_TOOL_GRACE_MS（默认 60min，覆盖 2100s 睡眠类长工具），超时照样判死。
 // 处置（owner 裁定「先关而后断点继续」）：session.abort 死回合 →
-// expired 结清 + 可见交代 + drain 放行队列（断点继续）。
+// 续作（同会话新回合重发原 prompt，单任务上限 3 次）/ 超限 expired 结清 + 放行队列。
 // 阈值 env QQ_BG_STREAM_DEAD_MS（合法域 1min~60min），默认 15min——
 // 须大于健康工具调用间隙、小于僵尸收割 40min 年龄门。
 export const BG_STREAM_DEAD_MS_DEFAULT = 15 * 60_000
+export const BG_TOOL_GRACE_MS_DEFAULT = 60 * 60_000
 
 export function resolveStreamDeadMs(envValue: string | undefined): number {
   const raw = Number(envValue ?? "")
   return Number.isFinite(raw) && raw >= 60_000 && raw <= 3_600_000 ? Math.floor(raw) : BG_STREAM_DEAD_MS_DEFAULT
+}
+
+/** 工具豁免窗解析（纯函数供测试）：默认 60min，合法域 5min 至 4h；不得小于健康长工具实测（2100s 睡眠）。 */
+export function resolveToolGraceMs(envValue: string | undefined): number {
+  if (envValue === undefined || envValue.trim() === "") return BG_TOOL_GRACE_MS_DEFAULT
+  const raw = Number(envValue)
+  return Number.isFinite(raw) && raw >= 300_000 && raw <= 14_400_000 ? Math.floor(raw) : BG_TOOL_GRACE_MS_DEFAULT
 }
 
 export type StreamLiveness = "alive" | "dead" | "none"
@@ -245,6 +254,8 @@ export function streamLiveness(
   baseline: number,
   now: number,
   deadMs: number,
+  /** 工具豁免窗（默认 60min）：工具执行中 streamed 冻结属健康，但卡死工具 part 也恒 running——豁免有界。 */
+  toolGraceMs: number = BG_TOOL_GRACE_MS_DEFAULT,
 ): StreamLiveness {
   const turn = turnStateOf(msgs, promptId, baseline)
   // 完成判据优先：有 idle 或全部 assistant 已终结 → 不归活性监督
@@ -282,7 +293,9 @@ export function streamLiveness(
   }
   if (latestActivity === 0) return "none"
   if (!anyUncompleted) return "alive"
-  if (anyRunningTool) return "alive" // 工具执行中：streamed 冻结是正常形态
+  // 工具豁免（有界）：running 工具只在豁免窗内保活；窗外与无工具同口径按流陈旧度判死
+  //（卡死工具 part 恒 running——BG101A 实证 question 工具悬挂 2.5h，无界豁免=永远假活）。
+  if (anyRunningTool && now - latestActivity < toolGraceMs) return "alive"
   return now - latestActivity >= deadMs ? "dead" : "alive"
 }
 
@@ -507,6 +520,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     bgWaits.get(sessionId)?.cancel()
     // 流活性监督阈值（env 惰性读取：.env 运行时才注入；owner 2026-11-19 裁定层）
     const STREAM_DEAD_MS = resolveStreamDeadMs(process.env.QQ_BG_STREAM_DEAD_MS)
+    const TOOL_GRACE_MS = resolveToolGraceMs(process.env.QQ_BG_TOOL_GRACE_MS)
     // 死回合自动续作上限（owner 2026-11-19 裁定：单任务续作不能超过三次；0=关闭）
     const MAX_RESUME = resolveResumeMax(process.env.QQ_BG_RESUME_MAX)
     let resumeCount = resumeCountInitial
@@ -755,7 +769,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         // 流活性监督（owner 2026-11-19 裁定：与后台探知同 tick、同一拉取结果）——
         // 死回合与长跑任务在「无进展」信号上同形（昨夜 BG101A 实证：流停 3s 后
         // 90 分钟假活）。判死 → 先关（abort 死回合）后断点继续（finishDead）。
-        const live = streamLiveness(msgs, promptId, baseline, now, STREAM_DEAD_MS)
+        const live = streamLiveness(msgs, promptId, baseline, now, STREAM_DEAD_MS, TOOL_GRACE_MS)
         if (live === "dead") {
           // 先关（owner 裁定）：abort 死回合，幂等容忍失败
           await client.session.abort({ path: { id: sessionId } }).catch(() => undefined)
