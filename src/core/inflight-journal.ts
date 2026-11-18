@@ -50,6 +50,8 @@ export interface InflightEntry {
   ownerPid?: number
   /** 最近一次失败摘要（截 200 字） */
   lastError?: string
+  /** 死回合自动续作已消耗次数（2026-11-19 owner 裁定：单任务续作上限 3 次，落盘防重启洗白） */
+  resumeCount?: number
 }
 
 export type InflightStage = "claimed" | "queued" | "dispatched" | "running" | "background" | "settled"
@@ -381,6 +383,22 @@ export function markInflightPromptId(msgId: string, promptId: string, file?: str
   })
 }
 
+/**
+ * 续作锚点更新（2026-11-19 死回合自动续作）：新回合的 promptId 必须强制覆盖旧锚点
+ * （markPromptId/markStage 的「只补空」语义不适用——旧锚点已存在），
+ * resumeCount 同步落盘：bot 重启后启动对账重挂按已消耗次数续算，上限不洗白。
+ */
+export function markInflightResume(msgId: string, promptId: string, resumeCount: number, file?: string): void {
+  if (!promptId) return
+  mutate(file, (entries) => {
+    const entry = entries.find((e) => e.msgId === msgId && e.state === "inflight")
+    if (!entry) return
+    entry.promptId = promptId
+    entry.resumeCount = resumeCount
+    entry.updatedAt = Date.now()
+  })
+}
+
 /** 测试用：清空台账文件状态 */
 export function resetInflightJournal(file?: string): void {
   withJournalLock(file, () => save(file, []))
@@ -521,6 +539,7 @@ export interface InflightJournal {
   view: typeof listInflightView
   markStage: typeof markInflightStage
   markPromptId: typeof markInflightPromptId
+  markResume: typeof markInflightResume
   reset: typeof resetInflightJournal
 }
 
@@ -535,6 +554,7 @@ export function createInflightJournal(file?: string): InflightJournal {
     view: () => listInflightView(file),
     markStage: (msgId, stage, patch, opts) => markInflightStage(msgId, stage, patch, { ...opts, file }),
     markPromptId: (msgId, promptId) => markInflightPromptId(msgId, promptId, file),
+    markResume: (msgId, promptId, resumeCount) => markInflightResume(msgId, promptId, resumeCount, file),
     reset: () => resetInflightJournal(file),
   }
 }

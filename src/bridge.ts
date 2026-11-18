@@ -221,6 +221,19 @@ export function resolveStreamDeadMs(envValue: string | undefined): number {
 
 export type StreamLiveness = "alive" | "dead" | "none"
 
+/** 续作上限解析（纯函数供测试）：env QQ_BG_RESUME_MAX，默认 3 次；0=关闭自动续作；合法域 0 至 5。 */
+export function resolveResumeMax(envValue: string | undefined): number {
+  // 注意 Number("")===0——必须先判空再 Number（resolvePermDeferMs 同款陷阱注释）
+  if (envValue === undefined || envValue.trim() === "") return 3
+  const raw = Number(envValue)
+  return Number.isFinite(raw) && raw >= 0 && raw <= 5 ? Math.floor(raw) : 3
+}
+
+/** 续作决策（纯函数供测试）：已消耗次数 < 上限 → 续作；否则 giveup 交 finishDead。 */
+export function resumeDecision(resumeCount: number, max: number): "resume" | "giveup" {
+  return max > 0 && resumeCount < max ? "resume" : "giveup"
+}
+
 /**
  * 流活性判定（纯函数供测试）。msgs=同一次后台探知的拉取结果；
  * promptId/baseline=本回合锚点（与 turnStateOf 同口径）。
@@ -478,11 +491,25 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   const STALL_NUDGE_INTERVAL_MS = 30 * 60 * 1000
   const STALL_NUDGE_MAX = 3
 
-  function startBackgroundWait(sessionId: string, ctx: MessageContext, baseline: number, trackId?: string, promptId = "", turnStartedAt?: number): void {
+  function startBackgroundWait(
+    sessionId: string,
+    ctx: MessageContext,
+    baseline: number,
+    trackId?: string,
+    promptId = "",
+    turnStartedAt?: number,
+    /** DEF-20261112-1 权限链目录：续作重派 promptAndWait 的 x-opencode-directory（缺省=裸查旧行为） */
+    anchorDirectory?: string,
+    /** 续作次数初值：启动对账重挂时从台账 resumeCount 续算（重启不洗白 owner 上限裁定） */
+    resumeCountInitial = 0,
+  ): void {
     // 同会话只允许一个后台等待：恢复多条在途账/超时重挂不得留下多个完成回调重复投递。
     bgWaits.get(sessionId)?.cancel()
     // 流活性监督阈值（env 惰性读取：.env 运行时才注入；owner 2026-11-19 裁定层）
     const STREAM_DEAD_MS = resolveStreamDeadMs(process.env.QQ_BG_STREAM_DEAD_MS)
+    // 死回合自动续作上限（owner 2026-11-19 裁定：单任务续作不能超过三次；0=关闭）
+    const MAX_RESUME = resolveResumeMax(process.env.QQ_BG_RESUME_MAX)
+    let resumeCount = resumeCountInitial
     let cancelled = false
     let finished = false
     const startedAt = Date.now()
@@ -612,9 +639,63 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       void drainQueue(ctx.userId, sessionId)
       await safeDeliver(
         ctx,
-        "⚠️ 后台任务底层执行已失去响应（模型输出流中断），已自动中止并结清；队列已放行。如仍需要该结果请重新发送",
+        `⚠️ 后台任务底层执行多次失去响应（已自动续作 ${resumeCount} 次仍失败），停止自动跟进；队列已放行。如仍需要该结果请重新发送`,
       ).catch(() => {})
-      console.log(`[bridge] 后台回合流活性丧失：abort+expired 结清 session=${sessionId} msg=${shortId(trackId)}`)
+      console.log(`[bridge] 后台回合流活性丧失：续作${resumeCount}次仍死，expired 结清 session=${sessionId} msg=${shortId(trackId)}`)
+    }
+
+    /**
+     * 死回合自动续作（owner 2026-11-19 裁定：单任务续作上限 3 次）——
+     * 「继续」的落地形态=同会话注入新回合重发原 prompt，模型读会话历史接着做；
+     * 不是断点续跑（LLM 回合执行体已随 abort 销毁，无从续起）。
+     * 本 bgWait 不换班：onAccepted 切换锚点后继续盯梢新回合，盯到完成/再死/被取代。
+     * 副作用口径：模型从历史可见死前已执行的动作，自行决定去重——与人工「重发」等价。
+     */
+    async function resumeDead(): Promise<void> {
+      if (cancelled || finished) return
+      resumeCount += 1
+      console.log(`[bridge] 后台死回合自动续作 #${resumeCount}/${MAX_RESUME} session=${sessionId} msg=${shortId(trackId)}`)
+      await safeDeliver(ctx, `⚠️ 后台任务底层执行失去响应，已自动中止并续作（第 ${resumeCount}/${MAX_RESUME} 次）；继续后台跟踪，完成自动回传`).catch(() => {})
+      try {
+        const prepared = ctx.preparedAttachments ?? await prepareQQAttachments(ctx.attachments, () =>
+          getAccessToken(config.qq.appId, config.qq.clientSecret),
+        )
+        const { text: promptBody, files } = augmentPromptWithAttachments(ctx.content, prepared)
+        const promptText =
+          (ctx.quoteText ? `> 引用上文：${ctx.quoteText}\n\n${promptBody}` : promptBody) + QQ_LIST_FORMAT_HINT
+        // 不阻塞 tick：promptAndWait 异步跑，onAccepted 切换锚点后由本 bgWait 的
+        // 既有 tick（完成/停滞/流活性/superseded 全判据）继续监督新回合。
+        void client.promptAndWait(sessionId, promptText, {
+          files: files.length ? files : undefined,
+          directory: anchorDirectory,
+          onAccepted: (info) => {
+            promptId = info.promptId
+            baseline = info.baseline
+            if (trackId) inflight.markResume(trackId, info.promptId, resumeCount)
+            lastProgressAt = Date.now()
+            lastHeartbeatAt = Date.now()
+            lastMarker = ""
+            console.log(`[bridge] 续作新回合已受理 msg=${shortId(trackId)} prompt=${shortId(info.promptId)}`)
+          },
+          onPermission: (req) => perm.waitForDecision(ctx, req, sessionId),
+          onPermissionReplied: (d) => {
+            const text = d === "reject" ? "已拒绝，该操作不会执行；AI 将继续其余步骤" : `已${DECISION_LABELS[d]}，AI 将继续执行…`
+            void safeDeliver(ctx, text)
+          },
+          // 续作路径降级：冲突即时告警保留，10 分钟零进展保险网不再叠加
+          // （原 dispatch 路径的完整保险网不受影响）。
+          onPermissionConflict: (decision) => {
+            const notice = formatPermissionConflictNotice(decision)
+            if (notice) void safeDeliver(ctx, notice)
+          },
+        }).catch((error) => {
+          console.error("[bridge] 续作重派失败:", error)
+          // 续作本身失败：计一次消耗并交下轮判死/续作或 giveup（不静默）
+          void safeDeliver(ctx, `⚠️ 续作重派失败：${toErrorMessage(error)}；后台监督继续，将再次尝试或按上限停止`).catch(() => {})
+        })
+      } catch (error) {
+        console.error("[bridge] 续作 prompt 构造失败:", error)
+      }
     }
 
     async function tick(): Promise<void> {
@@ -676,8 +757,14 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         // 90 分钟假活）。判死 → 先关（abort 死回合）后断点继续（finishDead）。
         const live = streamLiveness(msgs, promptId, baseline, now, STREAM_DEAD_MS)
         if (live === "dead") {
+          // 先关（owner 裁定）：abort 死回合，幂等容忍失败
           await client.session.abort({ path: { id: sessionId } }).catch(() => undefined)
-          await finishDead()
+          // 后断点继续：续作上限内自动重发原 prompt（新回合），超限才 expired 放弃
+          if (resumeDecision(resumeCount, MAX_RESUME) === "resume") {
+            await resumeDead()
+          } else {
+            await finishDead()
+          }
           return
         }
 
@@ -1553,6 +1640,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       let turnStart = 0
       let trackId = "" // R 项：在途台账跟踪键（try/catch 跨块可见）
       let promptId = "" // 修复⑧：本回合 user 消息 id（直答归属锚点）
+      let anchorDirectory: string | undefined = undefined // 权限链目录（catch 转后台续作也要用，随 try 内赋值）
       try {
         // 会话隔离：派发跟锚定不跟漂移——锚定会话直发（哪怕绑定已切走）；
         // 无锚定（null lane，从未绑定）才 getOrCreate 解析并落新绑定。
@@ -1566,7 +1654,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         sessionLastActivity.set(sessionId, Date.now())
         // DEF-qqbot-20261112-1 同口径：权限链目录必须是「锚定会话自身」的目录——
         // 锚定≠绑定时映射缓存指向错会话，从服务端回读锚定会话目录（失败回落绑定缓存）。
-        let anchorDirectory: string | undefined = sessions.getSession(ctx.userId)?.directory
+        anchorDirectory = sessions.getSession(ctx.userId)?.directory
         if (sessions.getSession(ctx.userId)?.sessionId !== sessionId) {
           anchorDirectory =
             (await client.session.get({ path: { id: sessionId } }).catch(() => undefined))?.data?.location?.directory ??
@@ -1731,7 +1819,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
             ctx,
             "⏳ 回合超过前台时限，已转后台等待：任务继续执行，完成即回传结果（最长 24 小时）。期间可用 /history 查看进展。",
           )
-          startBackgroundWait(sessionId, ctx, turnStart, trackId, promptId, turnStart)
+          startBackgroundWait(sessionId, ctx, turnStart, trackId, promptId, turnStart, anchorDirectory)
         } else if (isSessionBusyError(error)) {
           // 会话被占用（-32603，可能来自桌面端/他端并发）。不再把 Internal error 原样
           // 甩给用户，给可操作路径；每用户串行队列已挡掉我方自撞，这条只兜他端占用。
@@ -1911,7 +1999,17 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           // 重启后 RESUME 重放的完成事件同样被身份守卫拦下。
           if (entry.promptId) mirror.markQqPrompt(entry.sessionId, entry.promptId)
           // 不单独发“仍在执行”通知；完成时统一回传最终答案，避免通知也占一条回复。
-          startBackgroundWait(entry.sessionId, ctx, entry.at, entry.msgId, entry.promptId ?? "", entry.at)
+          // 续作次数从台账 resumeCount 续算（重启不洗白 owner「单任务续作≤3次」裁定）。
+          startBackgroundWait(
+            entry.sessionId,
+            ctx,
+            entry.at,
+            entry.msgId,
+            entry.promptId ?? "",
+            entry.at,
+            sessions.getSession(entry.userId)?.directory,
+            entry.resumeCount ?? 0,
+          )
           console.log(`[bridge] 启动对账：在途任务已重挂后台等待 msgId=${entry.msgId}`)
         } else if (ageMs <= redispatchMaxAgeMs()) {
           inflight.settle(entry.msgId, undefined, "redispatch") // 旧账结清，重派回合走新账（合成 trackId）
