@@ -200,6 +200,79 @@ export function missingIdleDone(
   return !turn.hasIdle && Boolean(turn.text) && now - lastProgressAt >= graceMs
 }
 
+// ===== 后台流活性监督（2026-11-19 owner 裁定：与后台探知同 tick 执行）=====
+// 背景：死回合（SSE 断连/提供商悬挂）与长跑任务在「消息无进展」信号上同形，
+// bot 观测不到「模型是否还在生成」——昨夜 BG101A 实证：首 token 后 3 秒流停止，
+// 90 分钟零产出无终结，心跳却在如实报「还在执行」。本层补上判别器：
+// 判死 = 锚定边界内 assistant 最后活动（streamed 或 created）超阈值
+//        且无任何运行中工具（tool state=running——长 shell 执行期间 streamed
+//        必然冻结，靠 running 工具豁免，防误杀 2100s 睡眠类长任务）
+//        且回合未终结（idle/全部 completed 归完成判据管）。
+// 处置（owner 裁定「先关而后断点继续」）：session.abort 死回合 →
+// expired 结清 + 可见交代 + drain 放行队列（断点继续）。
+// 阈值 env QQ_BG_STREAM_DEAD_MS（合法域 1min~60min），默认 15min——
+// 须大于健康工具调用间隙、小于僵尸收割 40min 年龄门。
+export const BG_STREAM_DEAD_MS_DEFAULT = 15 * 60_000
+
+export function resolveStreamDeadMs(envValue: string | undefined): number {
+  const raw = Number(envValue ?? "")
+  return Number.isFinite(raw) && raw >= 60_000 && raw <= 3_600_000 ? Math.floor(raw) : BG_STREAM_DEAD_MS_DEFAULT
+}
+
+export type StreamLiveness = "alive" | "dead" | "none"
+
+/**
+ * 流活性判定（纯函数供测试）。msgs=同一次后台探知的拉取结果；
+ * promptId/baseline=本回合锚点（与 turnStateOf 同口径）。
+ * none=边界内无 assistant 消息（等待模型开始，归停滞提醒管）。
+ */
+export function streamLiveness(
+  msgs: SessionMessage[],
+  promptId: string,
+  baseline: number,
+  now: number,
+  deadMs: number,
+): StreamLiveness {
+  const turn = turnStateOf(msgs, promptId, baseline)
+  // 完成判据优先：有 idle 或全部 assistant 已终结 → 不归活性监督
+  if (turn.hasIdle) return "alive"
+  const ordered = [...msgs].sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
+  // 回合边界（与 turnStateOf 同构：promptId 精确锚 > 200ms 时间锚）
+  let startIdx = 0
+  if (turn.anchored) {
+    let userIdx = ordered.findIndex((m) => m.type === "user" && m.id === promptId)
+    if (userIdx < 0 && baseline > 0) {
+      let best = -1
+      let bestDelta = Number.POSITIVE_INFINITY
+      for (let i = ordered.length - 1; i >= 0; i--) {
+        if (ordered[i].type !== "user") continue
+        const delta = Math.abs((ordered[i].time?.created ?? 0) - baseline)
+        if (delta < bestDelta) { bestDelta = delta; best = i }
+      }
+      if (best >= 0 && bestDelta <= 200) userIdx = best
+    }
+    startIdx = userIdx >= 0 ? userIdx + 1 : 0
+  }
+  let latestActivity = 0
+  let anyUncompleted = false
+  let anyRunningTool = false
+  for (let i = startIdx; i < ordered.length; i++) {
+    const m = ordered[i]
+    if (m.type !== "assistant") continue
+    if (!turn.anchored && (m.time?.created ?? 0) < baseline) continue
+    const activity = m.time?.streamed ?? m.time?.created ?? 0
+    if (activity > latestActivity) latestActivity = activity
+    if (!m.time?.completed) anyUncompleted = true
+    for (const p of [...(m.parts ?? []), ...(m.content ?? [])] as Array<{ type?: string; state?: { status?: string } }>) {
+      if ((p.type === "tool" || p.type === undefined) && p.state?.status === "running") anyRunningTool = true
+    }
+  }
+  if (latestActivity === 0) return "none"
+  if (!anyUncompleted) return "alive"
+  if (anyRunningTool) return "alive" // 工具执行中：streamed 冻结是正常形态
+  return now - latestActivity >= deadMs ? "dead" : "alive"
+}
+
 // ===== 终稿提取（2026-11-10 工作稿误投事故根修）=====
 // 事故：owner 收到「📤…结果如下：更新测试（新文案+missingIdleDone 用例）：」——那是被打断回合
 // 的【工作稿】（同消息文本段后带工具段），不是答案。口径：同消息含工具段=工作稿，不作答案投递；
@@ -408,6 +481,8 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   function startBackgroundWait(sessionId: string, ctx: MessageContext, baseline: number, trackId?: string, promptId = "", turnStartedAt?: number): void {
     // 同会话只允许一个后台等待：恢复多条在途账/超时重挂不得留下多个完成回调重复投递。
     bgWaits.get(sessionId)?.cancel()
+    // 流活性监督阈值（env 惰性读取：.env 运行时才注入；owner 2026-11-19 裁定层）
+    const STREAM_DEAD_MS = resolveStreamDeadMs(process.env.QQ_BG_STREAM_DEAD_MS)
     let cancelled = false
     let finished = false
     const startedAt = Date.now()
@@ -527,6 +602,21 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       }
     }
 
+    /** 死回合处置（owner 2026-11-19「先关而后断点继续」）：abort 由调用方发出，此处结清+交代+放行队列。 */
+    async function finishDead(): Promise<void> {
+      if (cancelled || finished) return
+      finished = true
+      if (trackId) inflight.settle(trackId, undefined, "expired")
+      cleanup()
+      // 断点继续：释放 lane 后立即 drain——队列里排在后面的消息接着执行
+      void drainQueue(ctx.userId, sessionId)
+      await safeDeliver(
+        ctx,
+        "⚠️ 后台任务底层执行已失去响应（模型输出流中断），已自动中止并结清；队列已放行。如仍需要该结果请重新发送",
+      ).catch(() => {})
+      console.log(`[bridge] 后台回合流活性丧失：abort+expired 结清 session=${sessionId} msg=${shortId(trackId)}`)
+    }
+
     async function tick(): Promise<void> {
       if (cancelled || finished) return
       try {
@@ -579,6 +669,16 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           const hbAction = hbSt?.lastTool && hbSt?.lastAt ? `${hbSt.lastTool}（${agoLabel(hbSt.lastAt)}）` : undefined
           console.log(`[bridge] 后台任务进度心跳 session=${sessionId} execMin=${hbExecMin} idleMin=${hbIdleMin}`)
           void safeDeliver(ctx, heartbeatText(hbExecMin, hbIdleMin, hbAction)).catch(() => {})
+        }
+
+        // 流活性监督（owner 2026-11-19 裁定：与后台探知同 tick、同一拉取结果）——
+        // 死回合与长跑任务在「无进展」信号上同形（昨夜 BG101A 实证：流停 3s 后
+        // 90 分钟假活）。判死 → 先关（abort 死回合）后断点继续（finishDead）。
+        const live = streamLiveness(msgs, promptId, baseline, now, STREAM_DEAD_MS)
+        if (live === "dead") {
+          await client.session.abort({ path: { id: sessionId } }).catch(() => undefined)
+          await finishDead()
+          return
         }
 
         if (turn.superseded) {

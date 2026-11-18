@@ -90,7 +90,7 @@ export interface MessagePart {
 export interface SessionMessage {
   id?: string
   type?: string
-  time?: { created?: number; completed?: number }
+  time?: { created?: number; firstToken?: number; streamed?: number; completed?: number }
   content?: MessagePart[]
   /** 运行时工具段（REST 实际返回 tool parts；类型补录 2026-11-10 终稿提取用） */
   parts?: Array<{ type?: string; tool?: string; state?: { status?: string } }>
