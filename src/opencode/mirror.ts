@@ -22,6 +22,16 @@ function answerClipLimit(): number {
 
 // 逻辑回合并发幂等键：同一用户消息 + 最终 assistant。不同 location 的
 // execution.succeeded 事件 ID 可以不同，但同一逻辑回合仍只应镜像一次。
+// 摘要锚定用户消息 id（DEF-20261118-P6 来源身份守卫用）：与 digestTurnKey 同一
+// 锚点口径——时间序最后的 user 消息。无 user 消息返回 undefined（守卫放行给既有逻辑）。
+export function digestAnchorUserId(messages: SessionMessage[]): string | undefined {
+  const ordered = [...messages].reverse()
+  for (let i = ordered.length - 1; i >= 0; i--) {
+    if (ordered[i].type === "user") return ordered[i].id ?? undefined
+  }
+  return undefined
+}
+
 export function digestTurnKey(messages: SessionMessage[]): string | null {
   const ordered = [...messages].reverse()
   let lastUserIdx = -1

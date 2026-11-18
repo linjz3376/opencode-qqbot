@@ -1519,6 +1519,9 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           onAccepted: (info) => {
             promptId = info.promptId
             inflight.markPromptId(trackId, info.promptId)
+            // DEF-20261118-P6 来源身份守卫：promptId=用户消息 id，入镜像 QQ 派发册——
+            // 网关 RESUME 迟到重放的完成事件穿透时序锁后，仍被身份核对拦下（不重复摘要）。
+            mirror.markQqPrompt(sessionId, info.promptId)
             console.log(`[journal] running msg=${shortId(trackId)} prompt=${shortId(info.promptId)}`)
           },
           onPermission: (req) => perm.waitForDecision(ctx, req, sessionId),
@@ -1804,6 +1807,9 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           }
           // 跨重启也要保持 QQ 回合同一身份：后台直答完成时，镜像不得再投摘要。
           mirror.beginTurn(entry.sessionId)
+          // DEF-20261118-P6：重挂的后台回合同属 QQ 派发来源，promptId 一并入册——
+          // 重启后 RESUME 重放的完成事件同样被身份守卫拦下。
+          if (entry.promptId) mirror.markQqPrompt(entry.sessionId, entry.promptId)
           // 不单独发“仍在执行”通知；完成时统一回传最终答案，避免通知也占一条回复。
           startBackgroundWait(entry.sessionId, ctx, entry.at, entry.msgId, entry.promptId ?? "", entry.at)
           console.log(`[bridge] 启动对账：在途任务已重挂后台等待 msgId=${entry.msgId}`)
@@ -1829,12 +1835,25 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   // 排队期间绑定切走也按入队锚定派发（消息跟原会话，不跟漂移的绑定）。
   async function drainQueue(userId: string, sessionId?: string): Promise<void> {
     const lane = laneOf(userId, sessionId)
-    if (draining.has(lane) || busyUsers.has(lane)) return
+    // DEF-20261118-P5 可观测性补强（19:02–19:33 实证：lane「卡住」19 分钟零日志，
+    // 事后归因只能靠读码——三道守卫静默 return 是排障黑洞）。守卫跳过分级打印：
+    // draining=同 lane 排水未结束（正常并发，debug 级）；busy/pending=真阻塞信号。
+    if (draining.has(lane)) {
+      console.log(`[queue] drain-skip reason=draining user=${userId.slice(0, 8)}… lane=${sessionId ? shortId(sessionId) : "∅"}`)
+      return
+    }
+    if (busyUsers.has(lane)) {
+      console.log(`[queue] drain-skip reason=busy user=${userId.slice(0, 8)}… lane=${sessionId ? shortId(sessionId) : "∅"}`)
+      return
+    }
     // 审批挂起时不出队：此时出队只会被 handleMessage 的 pendingPerm 早退吞掉并结清
     // （消息白排队）。等挂起审批的回合走完 finally 自然会再次 drain。
     // 会话隔离：只有挂起审批属于本 lane 的会话才挡本 lane（其他会话的审批不挡）。
     const pending = perm.getPending(userId)
-    if (pending && (!sessionId || pending.request.sessionID === sessionId)) return
+    if (pending && (!sessionId || pending.request.sessionID === sessionId)) {
+      console.log(`[queue] drain-skip reason=pending-perm user=${userId.slice(0, 8)}… lane=${sessionId ? shortId(sessionId) : "∅"} request=${pending.request.id}`)
+      return
+    }
     const job = msgQueue.shift(lane)
     if (!job) return
     draining.add(lane)

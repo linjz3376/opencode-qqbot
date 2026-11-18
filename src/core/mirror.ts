@@ -7,7 +7,7 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs"
 import type { MessageContext } from "../qq/types.js"
 import type { OpencodeClient } from "../opencode/client.js"
 import { createEventStream } from "../opencode/eventstream.js"
-import { buildDigest, digestTurnKey } from "../opencode/mirror.js"
+import { buildDigest, digestAnchorUserId, digestTurnKey } from "../opencode/mirror.js"
 import { laneKeyOf } from "./message-queue.js"
 import type { SessionManager } from "../opencode/sessions.js"
 import type { MirrorApi } from "../commands.js"
@@ -66,6 +66,9 @@ export interface Mirror {
   api: MirrorApi
   ensureSubs: () => void
   beginTurn: (sessionId: string) => void // 新 QQ 回合：补挂订阅 + 在途标记
+  /** DEF-20261118-P6 来源身份守卫：QQ 派发回合的 promptId（=用户消息 id）入册，
+   *  镜像前核对锚定用户消息 id 命中即跳过——SSE 重放再迟也穿透不了身份核对。 */
+  markQqPrompt: (sessionId: string, promptId: string) => void
   scheduleUnlock: (sessionId: string) => void
 }
 
@@ -73,6 +76,26 @@ export function createMirror(deps: MirrorDeps): Mirror {
   const { sessions, eventStream, client, lastCtx, safeDeliver, bgWaits, busyUsers } = deps
   const mirrorUnsubs = new Map<string, () => void>() // 摘要镜像订阅（独立于 /watch）
   const qqTurnActive = new Set<string>() // QQ 发起的轮次在途（镜像跳过防重复）
+  // DEF-20261118-P6（2026-11-18 晚 owner 拍板「判断信息来源非常重要」）：
+  // 时序锁（qqTurnActive + 5s 宽限）只能防毫秒级竞态；网关 RESUME 会把断线期间的
+  // execution.succeeded 迟到重放（21:23 实证穿透误发摘要——QQ 直答过的回合又收一张
+  // 冗余摘要卡）。来源身份守卫不看快慢：派发时把 promptId（=引擎侧用户消息 id）记入
+  // 本册，镜像前核对摘要锚定的用户消息 id 是否命中——重放再迟也改变不了消息来源。
+  const qqPromptIds = new Map<string, Set<string>>() // sessionId -> QQ 派发过的 promptId 环
+  const QQ_PROMPT_ID_CAP = 200
+  function markQqPrompt(sessionId: string, promptId: string): void {
+    if (!promptId) return
+    let set = qqPromptIds.get(sessionId)
+    if (!set) {
+      set = new Set()
+      qqPromptIds.set(sessionId, set)
+    }
+    if (set.size >= QQ_PROMPT_ID_CAP) {
+      const first = set.values().next().value
+      if (first !== undefined) set.delete(first)
+    }
+    set.add(promptId)
+  }
   const mirroredTurns = new Map<string, string>() // 逻辑回合幂等：多 location/重复完成事件只投一次
   const mirrorState = { enabled: loadMirrorEnabled(deps.settingsFile) }
 
@@ -132,6 +155,15 @@ export function createMirror(deps: MirrorDeps): Mirror {
         console.log(`[mirror] 跳过：逻辑回合已镜像 session=${sessionID} turn=${turnKey}`)
         return
       }
+      // 来源身份守卫（DEF-20261118-P6）：锚定用户消息 id 命中 QQ 派发册 = 本回合由
+      // QQ 直答，无论完成事件是实时还是 RESUME 重放，一律不重复镜像。登记幂等键防
+      // 同回合被后续重放反复评估。
+      const anchorId = digestAnchorUserId(messages)
+      if (anchorId && qqPromptIds.get(sessionID)?.has(anchorId)) {
+        console.log(`[mirror] 跳过：QQ 直答回合（来源身份核对命中）session=${sessionID} prompt=${anchorId}`)
+        if (turnKey) mirroredTurns.set(sessionID, turnKey)
+        return
+      }
       const digest = buildDigest(messages)
       if (!digest) {
         console.log(`[mirror] 跳过：无可摘要内容（空轮/纯工具轮）session=${sessionID}`)
@@ -184,6 +216,7 @@ export function createMirror(deps: MirrorDeps): Mirror {
       ensureMirrorSubs()
       qqTurnActive.add(sessionId)
     },
+    markQqPrompt,
     scheduleUnlock: scheduleMirrorUnlock,
   }
 }
