@@ -712,6 +712,9 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     config,
     deliver: (ctx, text) => deliver(ctx, text),
     ...(process.env.QQ_OUTBOX_FILE ? { filePath: process.env.QQ_OUTBOX_FILE } : {}),
+    // 多角色（2026-11-18 补漏）：outbox 按角色分文件——此前 multibot 改造漏了 notify 通道，
+    // 两角色 sink 共享 legacy 全局 outbox.json 会互相代发/抢发。
+    ...(storageAppId && !process.env.QQ_OUTBOX_FILE ? { filePath: roleFile("outbox.json") } : {}),
   })
 
   // L 项（2026-10-30）：表单桥（选择弹窗 A/B/C/D 的 QQ 同步与作答回传）。
