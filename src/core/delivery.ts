@@ -94,6 +94,36 @@ export function qqListNormalize(text: string): string {
   return lines.join("\n")
 }
 
+/** 主动限额解析（纯函数，导出供测试）：空值/非法/非正数回退 fallback（测试逃生门=显式 env）。 */
+export function resolveActiveLimit(envValue: string | undefined, fallback: number): number {
+  const n = Number(envValue ?? "")
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback
+}
+
+/**
+ * 滚动分钟窗准入（纯函数，导出供测试）：给定该用户最近主动发送时刻表，
+ * 返回需等待的毫秒数（0 = 立即可发）。窗口满时不拒发——等到最老记录滑出窗口，
+ * 严格按官方 20/min 节奏放行，避免触发 40034100。
+ */
+export function minuteWindowWaitMs(
+  timestamps: readonly number[],
+  now: number,
+  limit: number,
+  windowMs = 60_000,
+): number {
+  const recent = timestamps.filter((t) => now - t < windowMs)
+  if (recent.length < limit) return 0
+  const oldest = Math.min(...recent)
+  return Math.max(0, oldest + windowMs - now)
+}
+
+/** 记录一次主动发送并裁剪窗口（只保留窗内时刻）。 */
+function logActiveSend(log: Map<string, number[]>, userId: string, now: number, windowMs = 60_000): void {
+  const arr = (log.get(userId) ?? []).filter((t) => now - t < windowMs)
+  arr.push(now)
+  log.set(userId, arr)
+}
+
 export interface DeliveryAttempt {
   text: string
   at: number
@@ -247,10 +277,17 @@ export function createDelivery(
 ): Delivery {
   const PUSH_MIN_GAP_MS = 2000      // 用户级节流：最快 2 秒一批
   const PUSH_MAX_LINES = 6          // 队列上限：洪峰丢最旧，防积压
-  // 债务D4（2026-10-13 官方文档查证）：主动消息频控 = 单关系 1000 条/天 + 20/qpm，
-  // Bot 维度认证 10/qps（超限报 40034100）。原自设 15/天过度保守 → 默认 100 留
-  // 余量，可用 env QQ_ACTIVE_DAILY_LIMIT 覆盖。
-  const ACTIVE_DAILY_LIMIT = Number(process.env.QQ_ACTIVE_DAILY_LIMIT ?? 100)
+  // 主动配额（2026-11-18 owner 裁定「严格依据 QQ 官方执行，测试除外」）：
+  // 官方口径 = 单关系 1000 条/天 + 20 条/分钟（Bot 维度另有 10 次/秒，超限报 40034100；
+  // 官方事实见文件头 D4 注释）。据此拆两维执行——
+  // ① 日预算默认对齐官方 1000（不再自设 1/10 软预算），耗尽拒发 + 告警一次；
+  // ② 分钟维滚动窗口节流（20/min）：超限不拒发，睡到最老记录滑出窗口再发——
+  //    把官方 40034100 拒绝消灭在出发前。
+  // env 逃生门保留（测试造小配额/运维调整）：QQ_ACTIVE_DAILY_LIMIT / QQ_ACTIVE_MINUTE_LIMIT。
+  const ACTIVE_DAILY_LIMIT = resolveActiveLimit(process.env.QQ_ACTIVE_DAILY_LIMIT, 1000)
+  const ACTIVE_MINUTE_LIMIT = resolveActiveLimit(process.env.QQ_ACTIVE_MINUTE_LIMIT, 20)
+  // 该用户最近主动发送时刻（滚动 60s 窗，内存态——重启即清空，天预算仍落盘兜底）
+  const activeMinuteLog = new Map<string, number[]>()
 
   // B-msgid（2026-10-29，吸收自 dsh-qqbot 的 msgid 缓存机制）：主动降级前尝试让发送
   // "骑"该用户最近的被动 msg_id——平台窗口内接受则按被动计（不耗主动配额）。
@@ -411,14 +448,14 @@ export function createDelivery(
       if (!q.warned) {
         q.warned = true
         saveQuotaMap(QUOTA_FILE, activeQuota) // O5：告警态也落盘
-        console.warn(`[bridge] 用户 ${ctx.userId} 今日主动推送配额用尽，窗口外消息无法送达`)
+        console.warn(`[bridge] 用户 ${ctx.userId} 今日主动消息达 QQ 官方日上限（${ACTIVE_DAILY_LIMIT} 条/关系），窗口外消息无法送达`)
         try {
-          await sendActive(ctx, "⚠️ 今日主动推送配额已用尽（QQ 限制），窗口外消息明日恢复送达")
+          await sendActive(ctx, `⚠️ 今日主动消息已达 QQ 官方上限（单关系 ${ACTIVE_DAILY_LIMIT} 条/天），窗口外消息明日恢复送达`)
         } catch {
           // 告警也发不出去就静默
         }
       }
-      throw new Error("主动消息配额已用尽，本条无法送达")
+      throw new Error("主动消息已达 QQ 官方日上限，本条无法送达")
     }
     const activeIds = await sendActive(ctx, text)
     for (const id of activeIds) recordMessage(scopeKeyOf(ctx), id, text)
@@ -440,27 +477,41 @@ export function createDelivery(
   // passiveMsgId（B-msgid 2026-10-29）："骑"被动窗口时传入，平台接受则按被动计。
   // 返回服务端回执消息 id 列表（引用解析缓存登记用）。
   async function sendActive(ctx: MessageContext, text: string, passiveMsgId?: string): Promise<string[]> {
+    // 分钟维节流（官方 20 条/分钟，2026-11-18 严格官方化）：滚动窗满 → 睡到窗口滑动再发。
+    // 骑被动窗口的投递（passiveMsgId 非空）平台按被动计，不占主动分钟窗。
+    if (!passiveMsgId) {
+      const waitMs = minuteWindowWaitMs(activeMinuteLog.get(ctx.userId) ?? [], Date.now(), ACTIVE_MINUTE_LIMIT)
+      if (waitMs > 0) {
+        console.log(`[bridge] 主动消息分钟窗已满（${ACTIVE_MINUTE_LIMIT}/min），等待 ${Math.ceil(waitMs / 1000)}s 后发送 user=${ctx.userId.slice(0, 8)}…`)
+        await new Promise((r) => setTimeout(r, waitMs))
+      }
+    }
     const token = await getAccessToken(config.qq.appId, config.qq.clientSecret)
     const seq = getNextMsgSeq(passiveMsgId ?? "")
     const isGroup = ctx.type === "group" && ctx.groupId
     // 主动 markdown 同样走围栏归一（与被动回复同口径，防未闭合/空围栏对渲染成空卡片）
     const mdText = normalizeOutboundMarkdown(text)
+    const record = (ids: string[]): string[] => {
+      // 发送成功才记主动分钟窗（失败不计，同被动限额器口径）
+      if (!passiveMsgId && ids.length > 0) logActiveSend(activeMinuteLog, ctx.userId, Date.now())
+      return ids
+    }
     try {
       if (isGroup) {
         const r = await sendGroupMessage(token, ctx.groupId!, mdText, passiveMsgId, seq, true)
-        return r?.id ? [r.id] : []
+        return record(r?.id ? [r.id] : [])
       }
       const r = await sendC2CMessage(token, ctx.userId, mdText, passiveMsgId, seq, true)
-      return r?.id ? [r.id] : []
+      return record(r?.id ? [r.id] : [])
     } catch (error) {
       console.error("[bridge] 主动 markdown 发送失败，回退纯文本:", error)
     }
     if (isGroup) {
       const r = await sendGroupMessage(token, ctx.groupId!, text, passiveMsgId, seq, false)
-      return r?.id ? [r.id] : []
+      return record(r?.id ? [r.id] : [])
     }
     const r = await sendC2CMessage(token, ctx.userId, text, passiveMsgId, seq, false)
-    return r?.id ? [r.id] : []
+    return record(r?.id ? [r.id] : [])
   }
 
   async function sendReply(ctx: MessageContext, text: string): Promise<void> {
