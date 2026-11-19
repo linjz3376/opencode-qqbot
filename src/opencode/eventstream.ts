@@ -29,13 +29,24 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-export class EventStream {
+export // DEF-20261119-P12：SSE 事件洪峰饿死事件循环——超长输出回合（实测 2 万整数任务）
+// 的事件洪流使同步 handleFrame 独占事件循环：转后台 deadline/心跳/日志全停摆
+// 17 分钟（10:23-10:40 实证）。修法=帧队列化：读循环只入队（快），处理器按批
+// 消化（每批 DRAIN_BATCH 帧让出一次事件循环），超 MAX_PENDING 背压丢弃并计数。
+const DRAIN_BATCH = 100
+const MAX_PENDING_FRAMES = 20_000
+
+class EventStream {
   private base: string
   private headers: Record<string, string>
   private listeners = new Map<string, Set<EventCallback>>()
   private allListeners = new Set<EventCallback>()
   private running = false
   private backoffMs = RECONNECT_MIN_MS
+  // P12：帧队列与背压计数（读循环入队、drain 批量消化）。
+  private pendingFrames: string[] = []
+  private draining = false
+  private droppedFrames = 0
 
   constructor(baseUrl: string) {
     this.base = baseUrl.replace(/\/+$/, "")
@@ -120,7 +131,7 @@ export class EventStream {
             buf += dec.decode(chunk, { stream: true })
             const frames = buf.split("\n\n")
             buf = frames.pop() ?? "" // 最后一段可能不完整，留待下一块
-            for (const frame of frames) this.handleFrame(frame)
+            for (const frame of frames) this.enqueueFrame(frame)
             if (buf.length > MAX_BUF_BYTES) {
               console.error("[eventstream] 缓冲超限，丢弃积压数据")
               buf = ""
@@ -142,6 +153,36 @@ export class EventStream {
     }
     this.running = false
     console.log("[eventstream] 无订阅者，连接关闭")
+  }
+
+  /** P12：读循环只入队（O(1) 不阻塞）；超背压上限丢弃并计数（洪峰保护）。 */
+  private enqueueFrame(frame: string): void {
+    if (this.pendingFrames.length >= MAX_PENDING_FRAMES) {
+      this.droppedFrames++
+      if (this.droppedFrames % 1000 === 1) {
+        console.error(`[eventstream] 事件洪峰背压：已丢弃 ${this.droppedFrames} 帧（DEF-20261119-P12）`)
+      }
+      return
+    }
+    this.pendingFrames.push(frame)
+    this.kickDrain()
+  }
+
+  /** P12：批量处理器——每批 DRAIN_BATCH 帧后经 setImmediate 让出事件循环，
+   *  保证 deadline 检查/心跳/日志等定时器在洪峰期间仍能运行。 */
+  private kickDrain(): void {
+    if (this.draining) return
+    this.draining = true
+    const drain = (): void => {
+      const batch = this.pendingFrames.splice(0, DRAIN_BATCH)
+      for (const frame of batch) this.handleFrame(frame)
+      if (this.pendingFrames.length > 0) {
+        setImmediate(drain)
+      } else {
+        this.draining = false
+      }
+    }
+    setImmediate(drain)
   }
 
   private handleFrame(frame: string): void {
