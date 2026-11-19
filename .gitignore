@@ -1,4 +1,4 @@
-node_modules/
+﻿node_modules/
 *.log
 .DS_Store
 .tmp/
@@ -6,4 +6,5 @@ test/
 
 dist/
 
-!test/plans/
+
+tests/
