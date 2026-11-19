@@ -81,5 +81,6 @@ A 端 QuickDesk 切 HTTP/SSE 模式并开启 MCP HTTP 服务后，OpenCode 作�
 
 - 对应 AGENTS.md §7 指挥家工作法：A（AI 会话）经局域网驱动目标机 PC QQ 客户端做实操验证（具体机器与网段属环境数据，见项目侧文档，不入本文）。
 - 现役 WinRM `/it` 计划任务链（`exec135.ps1` → `uat-driver.ps1`）是脚本驱动；QuickDesk 是 AI 看屏驱动的增量选项，二者可并存、先判别实验再考虑替换。
+- 现役链的完整操作手册见 `04-winrm-channel.md`（通道配置）与 `05-no-rdp-humanops.md`（无 RDP 拟人操作）。
 - 保留现役链路做兜底，不一次性切换。
 - **可迁移性**：除本节与「项目专属」标注条目外，本文为通用内容，可整体迁移到其他项目使用。
