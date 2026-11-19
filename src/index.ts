@@ -56,6 +56,11 @@ async function waitForOpencode(
       console.log(
         `[index] OpenCode 未就绪（第 ${attempt} 次）：${msg} —20s 后重试`,
       )
+      // DEF-20261119-P9：429 的 Retry-After 优先于固定节奏（UAT SY-004 注入实证：
+      // 服务端暗示 5s，原实现死等 20s×N）。非 429/无头时维持 20s 不变。
+      const ra = msg.match(/\[retry-after:(\d+(?:\.\d+)?)\]/)
+      const waitMs = ra ? Math.max(20_000, Number(ra[1]) * 1000) : 20_000
+      if (ra) console.log(`[index] 按服务端 Retry-After 退避 ${Math.round(waitMs / 1000)}s`)
       if (attempt === 1 || attempt % 3 === 0) {
         const found = await discoverOpencode({ password: process.env.OPENCODE_PASSWORD })
         if (found && found.baseUrl !== url) {
@@ -65,7 +70,7 @@ async function waitForOpencode(
           client = clientFactory(url)
         }
       }
-      await new Promise((r) => setTimeout(r, 20_000))
+      await new Promise((r) => setTimeout(r, waitMs))
     }
   }
 }

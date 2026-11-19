@@ -361,7 +361,12 @@ export function createClient(baseUrl: string): OpencodeClient {
     if (!res.ok) {
       const txt = await res.text().catch(() => "")
       const excerpt = txt.length > 200 ? `${txt.substring(0, 200)}…` : txt
-      throw new Error(`OpenCode API ${res.status}: ${excerpt}`)
+      // DEF-20261119-P9：429 带 Retry-After 时把暗示值透出（机器可读标记），
+      // 让上层退避按服务端节奏走，而非固定 20s（UAT SY-004 注入实证）。
+      const retryAfter = res.status === 429 ? res.headers.get("retry-after") : null
+      throw new Error(
+        `OpenCode API ${res.status}: ${excerpt}${retryAfter ? ` [retry-after:${retryAfter}]` : ""}`,
+      )
     }
     // 204 (如 /model /agent /permission reply) 无 body；res.json() 会抛错。
     if (res.status === 204) return null

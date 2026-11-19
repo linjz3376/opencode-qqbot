@@ -18,6 +18,11 @@ type EventCallback = (event: V2Event) => void
 
 const RECONNECT_MIN_MS = 1000
 const RECONNECT_MAX_MS = 30_000
+// DEF-20261119-P8：SSE 静默死亡阈值。对端断连在部分路径下迭代器不抛错（注入实证），
+// 以「N 秒零字节」判死。120s 是权衡值：远小于「断线无感」的失效时长，闲置期即便
+// 引擎零 keepalive 导致的周期性重连也无副作用（监听器内存映射复用，无需重订阅）。
+// 可用 QQ_SSE_SILENCE_MS 覆盖（测试注入小值验证重连链，生产调大容忍更闲的引擎）。
+const SSE_SILENCE_MS = Number(process.env.QQ_SSE_SILENCE_MS ?? 120_000)
 const MAX_BUF_BYTES = 200_000 // 防御性上限（事件洪峰时丢弃积压而非撑爆内存）
 
 function sleep(ms: number): Promise<void> {
@@ -97,17 +102,34 @@ export class EventStream {
         console.log("[eventstream] 已连接 /api/event")
         const dec = new TextDecoder()
         let buf = ""
-        for await (const chunk of res.body) {
-          buf += dec.decode(chunk, { stream: true })
-          const frames = buf.split("\n\n")
-          buf = frames.pop() ?? "" // 最后一段可能不完整，留待下一块
-          for (const frame of frames) this.handleFrame(frame)
-          if (buf.length > MAX_BUF_BYTES) {
-            console.error("[eventstream] 缓冲超限，丢弃积压数据")
-            buf = ""
+        // DEF-20261119-P8：静默看门狗——SSE 是长连接，对端 FIN/RST 在某些路径下
+        // body 迭代器不抛出也不结束（06:11 注入实证：掐断后 43 分钟零感知零重连）。
+        // 不依赖「迭代器会不会醒」，以「N 秒无任何字节到达」为死亡定义：到点主动
+        // 掐掉本地流并抛错，走既有指数退避重连。心跳间隔大于 45s 的环境可调大。
+        let lastChunkAt = Date.now()
+        const silenceTimer = setInterval(() => {
+          if (Date.now() - lastChunkAt > SSE_SILENCE_MS) {
+            console.error(`[eventstream] ${SSE_SILENCE_MS}ms 无数据，判定连接已死，掐线重连`)
+            res.body?.cancel().catch(() => {})
           }
+        }, 10_000)
+        silenceTimer.unref?.()
+        try {
+          for await (const chunk of res.body) {
+            lastChunkAt = Date.now()
+            buf += dec.decode(chunk, { stream: true })
+            const frames = buf.split("\n\n")
+            buf = frames.pop() ?? "" // 最后一段可能不完整，留待下一块
+            for (const frame of frames) this.handleFrame(frame)
+            if (buf.length > MAX_BUF_BYTES) {
+              console.error("[eventstream] 缓冲超限，丢弃积压数据")
+              buf = ""
+            }
+          }
+          throw new Error("SSE 流意外结束")
+        } finally {
+          clearInterval(silenceTimer)
         }
-        throw new Error("SSE 流意外结束")
       } catch (error) {
         if (this.listeners.size === 0 && this.allListeners.size === 0) break
         console.error(

@@ -13,6 +13,8 @@ import { homedir } from "os"
 
 /** 心跳超过 5 分钟未刷新 = 事件循环僵死（与既有看门狗阈值一致） */
 export const HEARTBEAT_STALE_MS = 5 * 60_000
+/** P10：锁 mtime 新鲜阈值（instance-lock 持锁者 10s 刷新；30s=3 倍周期余量）。 */
+export const LOCK_MTIME_FRESH_MS = 30_000
 /** 锁 mtime 超过 30s 未刷新 = 僵尸锁（与 instance-lock 一致） */
 export const LOCK_STALE_MS = 30_000
 /** 启动宽限：锁刚建立、心跳尚未落盘的窗口 */
@@ -109,9 +111,30 @@ export function decideWatchdog(h: BotHealth, opts?: WatchdogOptions): WatchdogDe
     if (lockAge < startupGraceMs) {
       return { action: "ok", reason: `启动中（心跳未落盘，锁龄 ${Math.round(lockAge / 1000)}s）`, killPid: null }
     }
+    // DEF-20261119-P10 第一层守卫：锁 mtime 由持锁者每 10s 刷新（instance-lock 契约，
+    // index.ts 注释明言「锁活性另由 instance-lock 的 mtime 心跳承担」）。锁新鲜=进程
+    // 必有进展——heartbeat 文件可能因 IO 抖动/启动边缘未落盘，不得据此杀真 holder。
+    // 2026-11-19 实证：CLI/引导器拉起的健康 spawn 被「心跳文件缺失」分支误杀 10+ 次，
+    // 锁 mtime 全程新鲜。阈值对齐僵尸锁口径（30s=3×10s 刷新周期）。
+    if (h.lockAgeMs !== null && h.lockAgeMs < LOCK_MTIME_FRESH_MS) {
+      return {
+        action: "ok",
+        reason: `锁心跳新鲜（${Math.round(h.lockAgeMs / 1000)}s）——进程有进展，heartbeat 文件缺失不杀`,
+        killPid: null,
+      }
+    }
     return { action: "restart", reason: "心跳文件缺失（进程存活但无进展）", killPid: h.lockPid }
   }
   if (h.heartbeatAgeMs > heartbeatStaleMs) {
+    // P10 第二层守卫：同上——heartbeat 文件停滞但锁 mtime 新鲜 = 文件写入链路故障，
+    // 进程实际存活，按「无进展」杀属于误杀。锁也陈旧才真是僵死。
+    if (h.lockAgeMs !== null && h.lockAgeMs < LOCK_MTIME_FRESH_MS) {
+      return {
+        action: "ok",
+        reason: `锁心跳新鲜（${Math.round(h.lockAgeMs / 1000)}s）——heartbeat 文件停滞按写入故障处理，不杀`,
+        killPid: null,
+      }
+    }
     return {
       action: "restart",
       reason: `心跳陈旧 ${Math.round(h.heartbeatAgeMs / 60_000)} 分钟（进程疑似僵死）`,
