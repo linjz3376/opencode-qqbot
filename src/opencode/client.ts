@@ -172,6 +172,13 @@ function turnTimeoutMinutes(): number {
 function responseTimeoutMs(): number {
   return turnTimeoutMinutes() * 60 * 1000
 }
+// DEF-20261119-P11：单 API 调用超时（req 层 AbortSignal.timeout）。须显著小于
+// 回合 deadline，保证「挂起的调用先抛错、deadline 判定仍可达」。env 可覆盖。
+function apiCallTimeoutMs(): number {
+  const n = Number(process.env.QQ_API_CALL_TIMEOUT_MS ?? "30000")
+  return Number.isFinite(n) && n > 0 ? n : 30_000
+}
+const API_CALL_TIMEOUT_MS = apiCallTimeoutMs()
 
 // 取 baseline 之后最后一个有正文的 assistant 消息，丢弃 reasoning/tool 与阶段前导语。
 // 长回合会产生多条“正在检查/进度总结”assistant 文本；全部拼接会把过程包装成多条
@@ -353,6 +360,11 @@ export function createClient(baseUrl: string): OpencodeClient {
   async function req(path: string, init?: RequestInit): Promise<Response> {
     return fetch(base + path, {
       ...init,
+      // DEF-20261119-P11：per-call 超时兜底——引擎挂起时裸 fetch 无限等，把
+      // promptAndWait 的 deadline 判定彻底封死（10:00 实证：/message 挂 33 分钟，
+      // 转后台/停滞提醒/对账全链停摆；亦是 DEF-20261119-P7 僵尸 bgWait 的同根候选）。
+      // 显式 signal 优先；AbortSignal.timeout 缺失（旧运行时）静默降级为原行为。
+      signal: init?.signal ?? AbortSignal.timeout?.(API_CALL_TIMEOUT_MS),
       headers: { ...authHeaders, ...((init?.headers as Record<string, string>) ?? {}) },
     })
   }
@@ -533,6 +545,7 @@ export function createClient(baseUrl: string): OpencodeClient {
       const deadline = Date.now() + responseTimeoutMs()
       let permissionWaitMs = 0 // 审批等待时间不计入 5 分钟超时（用户可能几分钟才回复）
       const handledPermissions = new Set<string>()
+      let consecutivePollFails = 0 // P11：引擎瞬时挂起按次容错，连续 N 次才按超时终态抛
 
       while (Date.now() - permissionWaitMs < deadline) {
         await sleep(1000)
@@ -590,29 +603,43 @@ export function createClient(baseUrl: string): OpencodeClient {
         // 完成却判不出 done，悬挂至 30 分钟超时（11-07 实证 6 分钟悬挂+完整
         // 消息链取证）。显式 limit=200 扩大判定窗口（与 fetchRecoveryMessages
         // 同档；极端长会话由防线 A 的「下一 user 接替」判据兜住边界）。
-        const listJson = await json(await req(`/session/${sessionId}/message?limit=200`))
-        const msgs: SessionMessage[] = listJson?.data ?? []
-        // Completion = the idle marker of THIS turn (修复⑧ 回合边界归属)。
-        // Tool-using turns emit several assistant messages (reasoning+tool) before
-        // the final text one, so "first completed assistant" would return an empty
-        // tool message. 共享会话下别回合的 idle/assistant 都不再计入本回合判定。
-        const turn = turnStateOf(msgs, promptId, baseline)
-        if (turn.hasIdle) {
-          // DEF-qqbot-20261110-9（2026-11-10 回归实证）：anchored=false 回落命中时
-          // 必须校验答案归属——若命中正文属于「最后一条 user 行之前」的更早回合
-          //（本回合 user 尚未落库、回落把邻回合答案亮出来），不得张冠李戴，
-          // 继续等本回合落库；否则该回合会被邻回合答案"假完成"并在去重拦截后
-          // 无声消失。
-          if (!turn.anchored && turn.text && fallbackAnswerStolen(msgs, turn.text)) {
-            console.log(`[opencode] 回落答案归属邻回合，弃用继续等 prompt=${promptId}`)
-          } else {
-            // Aggregate text parts from ALL assistant messages of this turn,
-            // dropping reasoning/tool parts. In practice only the final assistant
-            // carries text; earlier ones are reasoning+tool.
-            return turn.text || "(AI 未返回内容)"
+        // P11（2026-11-19）：整个判定迭代包在容错里——req 层 AbortSignal.timeout
+        // 会抛错，瞬时挂起计入连续失败次数后继续轮询；连续 3 次才按「引擎持续
+        // 无响应」终态抛错（走调用方响应超时→转后台路径接管）。SupersededError
+        // 是正常终态不是故障，必须穿透不计数。
+        try {
+          const listJson = await json(await req(`/session/${sessionId}/message?limit=200`))
+          consecutivePollFails = 0
+          const msgs: SessionMessage[] = listJson?.data ?? []
+          // Completion = the idle marker of THIS turn (修复⑧ 回合边界归属)。
+          // Tool-using turns emit several assistant messages (reasoning+tool) before
+          // the final text one, so "first completed assistant" would return an empty
+          // tool message. 共享会话下别回合的 idle/assistant 都不再计入本回合判定。
+          const turn = turnStateOf(msgs, promptId, baseline)
+          if (turn.hasIdle) {
+            // DEF-qqbot-20261110-9（2026-11-10 回归实证）：anchored=false 回落命中时
+            // 必须校验答案归属——若命中正文属于「最后一条 user 行之前」的更早回合
+            //（本回合 user 尚未落库、回落把邻回合答案亮出来），不得张冠李戴，
+            // 继续等本回合落库；否则该回合会被邻回合答案"假完成"并在去重拦截后
+            // 无声消失。
+            if (!turn.anchored && turn.text && fallbackAnswerStolen(msgs, turn.text)) {
+              console.log(`[opencode] 回落答案归属邻回合，弃用继续等 prompt=${promptId}`)
+            } else {
+              // Aggregate text parts from ALL assistant messages of this turn,
+              // dropping reasoning/tool parts. In practice only the final assistant
+              // carries text; earlier ones are reasoning+tool.
+              return turn.text || "(AI 未返回内容)"
+            }
+          }
+          if (turn.superseded) throw new SupersededError(sessionId)
+        } catch (error) {
+          if (error instanceof SupersededError) throw error
+          consecutivePollFails++
+          console.error(`[opencode] 回合轮询失败(第${consecutivePollFails}次):`, error instanceof Error ? error.message : error)
+          if (consecutivePollFails >= 3) {
+            throw new Error(`AI 响应超时（引擎连续 ${consecutivePollFails} 次无响应）`)
           }
         }
-        if (turn.superseded) throw new SupersededError(sessionId)
       }
       throw new Error(`AI 响应超时（${turnTimeoutMinutes()} 分钟）`)
     },
