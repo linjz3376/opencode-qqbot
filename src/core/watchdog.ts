@@ -7,9 +7,10 @@
 //   锁文件 pid（单实例仲裁的唯一真相）+ process.kill(pid,0) + 心跳文件新鲜度。
 // 约定：锁 mtime 由 bot 每 10s 刷新（instance-lock）；心跳文件由 bot 每 60s 刷新，
 // 且 2026-11-09 起「抢锁后立即写」，因此「进程活但心跳陈旧」= 真僵死，不是启动中。
-import { readFileSync, statSync, unlinkSync, writeFileSync } from "fs"
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
+import { enforceLogBudget, logLimitsFromEnv, rotateLogIfNeeded } from "./log-rotate.js"
 
 /** 心跳超过 5 分钟未刷新 = 事件循环僵死（与既有看门狗阈值一致） */
 export const HEARTBEAT_STALE_MS = 5 * 60_000
@@ -202,11 +203,16 @@ export function readEnvField(envPath: string, key: string): string | null {
   }
 }
 
-/** 追加一行巡检日志到 ~/.openqq/watchdog.log（数据目录，不是代码） */
+/** 追加一行巡检日志到统一日志 ~/.openqq/openqq.log（数据目录，不是代码；
+ *  2026-11-20 合并批：bot 与看门狗同文件，一眼归因全链路） */
 export function appendWatchdogLog(line: string): void {
   try {
-    const dir = join(homedir(), ".openqq")
-    writeFileSync(join(dir, "watchdog.log"), `${new Date().toISOString()} ${line}\n`, { flag: "a" })
+    const logPath = join(homedir(), ".openqq", "openqq.log")
+    const limits = logLimitsFromEnv()
+    if (existsSync(logPath) && statSync(logPath).size > limits.maxBytes) {
+      if (rotateLogIfNeeded(logPath, limits)) enforceLogBudget(logPath, limits)
+    }
+    writeFileSync(logPath, `${new Date().toISOString()} ${line}\n`, { flag: "a" })
   } catch {
     /* 日志失败不阻断巡检 */
   }
@@ -419,7 +425,7 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
       return { action: "yield", detail: action.reason, killedPid: null, spawnedPid: null }
     }
     if (action.kind === "give-up") {
-      const message = `⚠️ QQBot 看门狗已达重启强度上限：${action.restarts} 次/${Math.round(policy.windowMs / 60_000)} 分钟仍不健康（同因反复死亡）。降频重试继续——巡检不会停，强度窗口滑动后自动恢复，引擎/环境自愈即自行好转；若持续收到此告警，请检查 %TEMP%\\opencode 下 bot.out.log 与 ~/.openqq/watchdog.log。`
+      const message = `⚠️ QQBot 看门狗已达重启强度上限：${action.restarts} 次/${Math.round(policy.windowMs / 60_000)} 分钟仍不健康（同因反复死亡）。降频重试继续——巡检不会停，强度窗口滑动后自动恢复，引擎/环境自愈即自行好转；若持续收到此告警，请检查 ~/.openqq/openqq.log（bot 与看门狗统一日志）。`
       audit(`give-up：${message}`)
       log(`[supervisor] give-up：${action.restarts} 次重启仍异常，降频重试继续并上报（不再永动猛拉）`)
       // 告警去抖：30 分钟内只报一次（计划任务每 10 分钟一轮，防止轰炸）

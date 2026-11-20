@@ -195,9 +195,11 @@ export function buildLaunchPlan(runtime: Runtime, entry: string, logPath?: strin
   return { command: resolveRuntimeCommand("node"), args: [entry], env }
 }
 
-/** bot 输出日志（detached 后 stdout/stderr 的唯一去向） */
+/** bot 输出日志（detached 后 stdout/stderr 的唯一去向）。
+ *  2026-11-20 合并批：统一为 ~/.openqq/openqq.log（bot 与看门狗同文件，
+ *  滚动/预算归 core/log-rotate.ts；旧名 bot.out.log 停止写入保留备查）。 */
 export function botLogPath(): string {
-  return join(homedir(), ".openqq", "bot.out.log")
+  return join(homedir(), ".openqq", "openqq.log")
 }
 
 /**

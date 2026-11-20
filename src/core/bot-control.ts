@@ -111,7 +111,7 @@ export interface RestartResult {
  * design §3.9.1 归一：杀/拉唯一权威 = superviseOnce（request=manual-restart）。
  * 复用同一 grace-kill（TERM→宽限→KILL→确认死亡才拉）+ spawn 原语，
  * 受 supervisor.json 强度账（15min/3 次 give-up、2min 冷却）与认领互斥约束，
- * 审计分家（主动杀/验尸拉新）落 watchdog.log——restart 不再有独立杀逻辑。
+ * 审计分家（主动杀/验尸拉新）落统一日志 openqq.log——restart 不再有独立杀逻辑。
  */
 export async function restartBot(opts: RestartOptions): Promise<RestartResult> {
   const log = opts.log ?? (() => {})

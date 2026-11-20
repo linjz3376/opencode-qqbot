@@ -80,7 +80,7 @@ watchdog/restart/autostart 已全部收编为包内 TS（`core/watchdog.ts` + �
    commit message 写根因+证据，不写「修复一些小问题」。规则文件（AGENTS.md/规约文档）变更的
    owner 授权依据一并写入 commit message——变更史以 git log 为单源，文件内不留修订表。
 4. **多会话并行**：两个 opencode 会话同仓作业是常态。动手前 `git status` + 查在途 +
-   看 `~/.openqq/watchdog.log` 尾部三件套；bundle 部署从主工作树构建（worktree 路线已弃用——
+   看 `~/.openqq/openqq.log` 尾部三件套（统一日志，看门狗审计与 bot 输出同文件）；bundle 部署从主工作树构建（worktree 路线已弃用——
    现役 bundle 可能含未提交改动，异源构建会回退线上功能）。
 
 ### 3.3 部署纪律（2026-11-10 四条，上午事故忏悔录立法）
@@ -131,7 +131,7 @@ openqq watchdog --loop --interval-min 10      # 或注册自启：openqq service
 
 ### 4.4 应用者排障入口
 `/status`（服务器/鉴权/会话/队列/日志新鲜度）→ `/queue` `/ledger` → 日志
-`~/.openqq/bot.out.log` 与 `watchdog.log`（看门狗审计分家：`主动杀`/`验尸拉新` 一眼归因）。
+统一日志 `~/.openqq/openqq.log`（bot 输出与看门狗审计同文件：`主动杀`/`验尸拉新`/`装配`/`Gateway 就绪` 一条时间线归因；滚动 20MB×4 代、总预算 100MB）。
 
 ---
 
@@ -146,7 +146,7 @@ openqq watchdog --loop --interval-min 10      # 或注册自启：openqq service
    执行前查在途；有 inflight 回合先告知用户或等待完成。
 3. **部署窗口纪律**：即 §3.3——禁止在长回合（>5min）中反复 restart（心跳陈旧会触发看门狗
    优雅杀，与人工重启叠加成连环死亡）。
-4. **归因义务**：任何死亡后先查 `~/.openqq/watchdog.log`——`主动杀`=看门狗合法动刀（附原因）；
+4. **归因义务**：任何死亡后先查 `~/.openqq/openqq.log`（统一日志）尾部——`主动杀`=看门狗合法动刀（附原因）；
    `验尸拉新`=外部/系统级死因，结合死亡时刻操作记录归因，不得一句「又掉线了」了事。
 5. **多会话协同**：见 §3.2 第 4 条三件套。
 

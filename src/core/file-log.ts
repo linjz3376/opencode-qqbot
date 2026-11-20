@@ -5,13 +5,14 @@
 // 背景（2026-10-30 清债 P2）：插件拉起的 detached bot 无控制台，bun 子进程 fd
 // 重定向实测不落盘（bot.out.log 0 字节）——改为 bot 进程内 console 双写，
 // 不依赖 spawn 侧 fd 语义，跨运行时（bun/node）确定生效。
-// 轮转：超 5MB 改名 .1（单代备份足够排障）。
+// 轮转：2026-11-20 起归 core/log-rotate.ts 统一管辖（20MB/保留 4 代/总预算 100MB，
+// env QQ_LOG_MAX_MB / QQ_LOG_KEEP / QQ_LOG_TOTAL_MB 可调）——与 watchdog 审计写同一
+// 文件 ~/.openqq/openqq.log，一个阈值管全部。
 // 2026-11-05：install 返回卸载函数不变；新增 fileLogStatus() 供 /status 展示
 // 「日志最后写入时间」，堵住"日志 17:17 后无写入却无人发现"的观测缺口。
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from "fs"
+import { appendFileSync, existsSync, mkdirSync, statSync } from "fs"
 import { join } from "path"
-
-const ROTATE_BYTES = 5 * 1024 * 1024
+import { enforceLogBudget, logLimitsFromEnv, rotateLogIfNeeded } from "./log-rotate.js"
 
 interface ActiveLog {
   path: string
@@ -48,10 +49,12 @@ export function installFileLog(logPath: string): () => void {
   }
   const state: ActiveLog = { path: logPath, lastWriteAt: 0 }
   active = state
+  const limits = logLimitsFromEnv()
   const write = (level: string, args: unknown[]): void => {
     try {
-      if (existsSync(logPath) && statSync(logPath).size > ROTATE_BYTES) {
-        renameSync(logPath, `${logPath}.1`)
+      // 轮转+预算闸由 log-rotate 统一管辖；statSync 每行一次沿用既有代价口径
+      if (existsSync(logPath) && statSync(logPath).size > limits.maxBytes) {
+        if (rotateLogIfNeeded(logPath, limits)) enforceLogBudget(logPath, limits)
       }
       const line = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ")
       appendFileSync(logPath, `${formatLocalTimestamp()} [${level}] ${line}\n`, { mode: 0o600 })
