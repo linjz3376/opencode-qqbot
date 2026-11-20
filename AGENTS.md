@@ -79,6 +79,8 @@ watchdog/restart/autostart 已全部收编为包内 TS（`core/watchdog.ts` + �
 3. **提交纪律**：精确路径 `git add`（禁 `git add -A`）；不碰其他会话的在途文件；
    commit message 写根因+证据，不写「修复一些小问题」。规则文件（AGENTS.md/规约文档）变更的
    owner 授权依据一并写入 commit message——变更史以 git log 为单源，文件内不留修订表。
+   **诊断衍生的规程/产物入仓交付须 owner 当轮明确授权——先例不构成授权**（层归口顺序：先问
+   容器属于哪层，再问是否有先例；11-20 误置 playbook 已纠偏撤出实证）。
 4. **多会话并行**：两个 opencode 会话同仓作业是常态。动手前 `git status` + 查在途 +
    看 `~/.openqq/openqq.log` 尾部三件套（统一日志，看门狗审计与 bot 输出同文件）；bundle 部署从主工作树构建（worktree 路线已弃用——
    现役 bundle 可能含未提交改动，异源构建会回退线上功能）。
@@ -156,7 +158,9 @@ openqq watchdog --loop --interval-min 10      # 或注册自启：openqq service
 
 - 组件层：`bun run verify`（tsc + 53 套件测试链；另有 `test:e2e` 5 套件按需）为每日门禁；每修必带测试。
 - 验收层：`tests/reports/` 各轮历史 + `TEST-STATUS-OVERALL.md` 总索引，单轮细节在同目录各轮文件夹；
-  执行纪律以 simulated-user-acceptance 技能（UI 主证/未触归因/台账尾部重读闸）为准。
+  执行纪律以 simulated-user-acceptance 技能（UI 主证/未触归因/台账尾部重读闸）为准；
+  **台账锚定编辑前必须重读文件物理尾部**——mtime 可能滞后于内容（并行会话活跃写入期），
+  以章节内容定权威位，插入式登记视为违规（11-20 指挥台插中部已纠偏实证）。
 - 缺陷编号：`DEF-qqbot-YYYYMMDD-<序号>`；待定性 `-P<序号>`；跨轮台账可达性开工必核。
 
 ---
