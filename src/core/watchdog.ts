@@ -204,6 +204,11 @@ export function readEnvField(envPath: string, key: string): string | null {
   }
 }
 
+/** bot 是否失能（无锁 / 持锁进程已死）——选主让贤的破格判据：bot 失能时任何通道都不许礼貌让贤。 */
+export function isBotDown(health: BotHealth): boolean {
+  return health.lockPid === null || health.pidAlive === false
+}
+
 /** 追加一行巡检日志到统一日志 ~/.openqq/openqq.log（数据目录，不是代码；
  *  2026-11-20 合并批：bot 与看门狗同文件，一眼归因全链路） */
 export function appendWatchdogLog(line: string): void {

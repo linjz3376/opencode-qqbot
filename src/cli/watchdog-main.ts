@@ -10,7 +10,7 @@
 //
 // 2026-11-09 重构：裸 healOnce 升级为 superviseOnce——优雅杀（TERM→宽限→KILL）、
 // 冷却（防互踢）、重启强度（超限 give-up 并告警，不当永动机）、监督者认领互斥。
-import { botWatchdogPaths, appendWatchdogLog, superviseOnce } from "../core/watchdog.js"
+import { botWatchdogPaths, appendWatchdogLog, superviseOnce, readBotHealth, isBotDown } from "../core/watchdog.js"
 import { readAppId, startBot } from "../core/bot-control.js"
 import { electSupervisor } from "../core/supervisor-election.js"
 import { runNotifyCli } from "./notify.js"
@@ -39,14 +39,19 @@ function alert(message: string): void {
 }
 
 async function tick(appId: string): Promise<void> {
-  // 双触发器归一（2026-11-20 owner 批）：service 与 plugin 两通道租约选主，
-  // plugin 持租约时本通道整轮让贤（不进 superviseOnce，零干扰）；租约过期自动夺回。
+  const paths = botWatchdogPaths(appId)
+  // 双触发器归一（2026-11-20 owner 批）：service 与 plugin 两通道租约选主。
+  // 破格条款（11-20 灵魂不在线复发实证）：让贤仅当 bot 健康——bot 失能时无人
+  // 监督的空窗比双触发干扰致命（14:56-15:07 bot 死而两通道互相让贤实录）。
   if (!electSupervisor("service")) {
-    console.log("[supervisor] 让贤：plugin 通道持监督租约中，本轮跳过")
-    return
+    if (!isBotDown(readBotHealth(paths, Date.now()))) {
+      appendWatchdogLog("[supervisor] 让贤：plugin 通道持监督租约中，本轮跳过")
+      return
+    }
+    appendWatchdogLog("[supervisor] 破格接管：plugin 持租约但 bot 失能——让贤条款不适用")
   }
   const result = await superviseOnce({
-    paths: botWatchdogPaths(appId),
+    paths,
     spawn: () => startBot(import.meta.url, (line) => console.log(line)),
     log: (line) => console.log(line),
     alert,
@@ -67,7 +72,10 @@ async function main(): Promise<void> {
   await tick(appId)
   if (!args.loop) return
   const timer = setInterval(() => {
-    void tick(appId).catch((error) => console.error("[watchdog] 巡检失败:", error instanceof Error ? error.message : error))
+    void tick(appId).catch((error) => {
+      appendWatchdogLog(`[watchdog] 巡检失败: ${error instanceof Error ? error.message : String(error)}`)
+      console.error("[watchdog] 巡检失败:", error instanceof Error ? error.message : error)
+    })
   }, args.intervalMin * 60_000)
   const stop = (): void => {
     clearInterval(timer)
@@ -78,6 +86,7 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error) => {
+  appendWatchdogLog(`[watchdog] 致命错误: ${error instanceof Error ? error.message : String(error)}`)
   console.error("[watchdog] 致命错误:", error instanceof Error ? error.message : error)
   process.exit(1)
 })

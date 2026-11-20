@@ -12,7 +12,7 @@ import { join } from "path"
 import { homedir } from "os"
 import { appendFileSync, existsSync, renameSync, statSync } from "fs"
 import { fileURLToPath } from "url"
-import { botWatchdogPaths, superviseOnce } from "./core/watchdog.js"
+import { botWatchdogPaths, superviseOnce, appendWatchdogLog } from "./core/watchdog.js"
 import { startBot } from "./core/bot-control.js"
 import { runNotifyCli } from "./cli/notify.js"
 import { readDotEnvField } from "./core/bot-launcher.js"
@@ -97,6 +97,8 @@ export default Plugin.define({
             if (result.action === "ok" || result.action === "restart") lastBlocker = null
           })
           .catch((error) => {
+            // 2026-11-20 修：静默消除——巡检失败只进引擎 console 曾造成 6 分钟无人拉活空窗无人知
+            appendWatchdogLog(`[plugin] 巡检失败: ${error instanceof Error ? error.message : String(error)}`)
             console.error("[opencode-qqbot] 巡检失败:", error instanceof Error ? error.message : error)
           })
       } catch (error) {
