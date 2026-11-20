@@ -224,6 +224,55 @@ export function appendWatchdogLog(line: string): void {
   }
 }
 
+/**
+ * 诛杀审计日志（DEF-20261120 墙 owner 当轮令「决策可审计」）：独立文件 ~/.openqq/kills.log。
+ *
+ * 设计判据（审计三问）——每条诛杀记录必须可回答：
+ *   ①判据是什么（为何判死：心跳陈旧 N 分钟/锁死/进程退出，附当时健康度快照）
+ *   ②动作是什么（杀谁：pid；怎么杀：TERM→KILL 升级链；结果：确认死亡/无法终止）
+ *   ③后果是什么（拉起了谁：新 pid；强度账现状：窗口内第几次）
+ *
+ * 与统一日志（openqq.log）的分工：openqq.log=全链路时间线（bot 输出+巡检混排，事后按时间归因）；
+ * kills.log=诛杀决策专线（只有杀戮级动作，事后审计免捞沙）。两处都写不冗余——
+ * 审计场景下 openqq.log 会被 bot 高频输出冲刷稀释（11-20 实证：30 分钟卡死现场被
+ * 后续日志淹没，诛杀归因只能靠 supervisor 片段倒推），kills.log 保证决策记录永不被稀释。
+ */
+export function appendKillLog(entry: KillAuditEntry): void {
+  try {
+    const logPath = join(homedir(), ".openqq", "kills.log")
+    // 单行 JSONL：机器可解析（工具审计）+人类可读（字段名自释）
+    writeFileSync(logPath, `${JSON.stringify(entry)}\n`, { flag: "a" })
+  } catch {
+    /* 审计日志失败不阻断监督主流程——监督本身即最后防线 */
+  }
+}
+
+/** 诛杀审计记录（字段=审计三问的机器形态；@ts 这里的时间一律 epoch ms） */
+export interface KillAuditEntry {
+  /** 记录类型：decision=完整决策审计；liveness-check=拉起后存活确认 */
+  kind: "decision" | "liveness-check"
+  /** ①判据：触发动作的原始原因（如「心跳陈旧 30 分钟」） */
+  reason: string
+  /** ①判据附证：动刀时刻的健康度快照（判死依据的原始数据，审计不复算） */
+  health: {
+    lockPid: number | null
+    pidAlive: boolean | null
+    heartbeatAgeMs: number | null
+    lockAgeMs: number | null
+  }
+  /** ②动作：杀掉的 pid（null=本次为纯拉起/复核类记录） */
+  killedPid: number | null
+  /** ②动作：升级链终点（TERM 快速退出 / KILL 强杀 / 无法终止） */
+  killEscalation: "TERM" | "KILL" | "unterminated" | "n/a"
+  /** ③后果：拉起的新 pid */
+  spawnedPid: number | null
+  /** ③后果：强度账（窗口内重启次数/上限） */
+  restartIntensity: string
+  /** ③后果：拉起后存活复核结论（liveness-check 专用；decision 记录取证时为 null） */
+  livenessVerdict: string | null
+  at: number
+}
+
 // ===== 监督层（2026-11-09 重构，替代裸 healOnce 的「无脑杀旧拉新」）=====
 // 设计对标（当日检索实证）：
 //  - Erlang OTP supervisor：maximum restart intensity——窗口内重启超限 → 放弃并上报，
@@ -322,6 +371,12 @@ export interface SuperviseDeps {
   claimPath?: string
   /** 监督动作审计日志路径（测试注入临时文件，避免污染真实 watchdog.log） */
   auditLogPath?: string
+  /**
+   * 拉起后存活确认（DEF-20261120 墙二次追击层）注入点：
+   * 缺省=生产行为（10s 后复核进程+锁，失败二次拉起）；测试注入 false=整层跳过
+   *（fake spawn 返回假 pid、锁不落盘，生产复核在测试环境必判死，旧用例语义不变）。
+   */
+  livenessCheck?: boolean
 }
 
 export interface SuperviseResult {
@@ -530,11 +585,77 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
     } catch {
       log("[supervisor] 强度账落盘失败（不影响本次拉起）")
     }
-    const detail = `${action.reason}；${killedPid ? `已优雅停 pid=${killedPid}；` : ""}已拉起 pid=${spawnedPid}`
+
+    // ===== 拉起后存活确认（DEF-20261120 墙二次追击层）=====
+    // 背景（11-20 15:17 实证）：主杀后拉起的 7001 秒死——监督者要等下轮巡检
+    //（计划任务 3min/常驻 10min）才能再拉，期间 bot 继续失能；若死因未消（dist 混合态等），
+    // 将进入「杀-拉-死-等-杀」的慢循环，每轮空转一个巡检周期直至 give-up。
+    // 修复：拉起后立即做 10s 存活确认（进程在 + 锁建立），失败=立刻二次拉起（仅一次，
+    // 防递归爆炸——二次拉起交由下轮巡检接力，与强度账协同防永动）。
+    // 强度账语义不变：本函数每进场只记 1 次重启（上方 restartLog.push），存活确认
+    // 的二次拉起不另记账——它是「本次重启的完整性收尾」而非新重启。
+    // 测试注入：livenessCheck=false 跳过整层（fake 环境判死恒真）。
+    let livenessVerdict = "alive"
+    let respawnPid: number | null = null
+    if (deps.livenessCheck !== false) {
+      const graceWaitMs = 10_000
+      await sleep(graceWaitMs)
+      const liveness = readBotHealth(deps.paths, Date.now())
+      if (!isPidAlive(spawnedPid) || liveness.lockPid === null) {
+        // 拉起失败两种形态：进程即死（spawn 竞态/依赖缺失）或进程在但 10s 内锁未建立
+        //（启动路径卡死——等价于「生而无魂」）。先清残留锁再二次拉起，防 try 锁挡道。
+        livenessVerdict = `dead-after-spawn（10s 复核：进程${isPidAlive(spawnedPid) ? "在但锁未建立" : "已退出"}）`
+        audit(`二次追击：拉起 pid=${spawnedPid} 失败（${livenessVerdict}），立即重拉`)
+        try {
+          const locksDir2 = dirname(deps.paths.lockPath)
+          let cleared2: string[] = []
+          if (!isPidAlive(spawnedPid) && existsSync(deps.paths.lockPath)) {
+            cleared2 = releaseLocksOfPid(spawnedPid, locksDir2)
+          }
+          if (existsSync(deps.paths.lockPath)) {
+            try {
+              unlinkSync(deps.paths.lockPath)
+              if (!cleared2.includes(deps.paths.lockPath)) cleared2.push(deps.paths.lockPath)
+            } catch { /* mtime 仲裁兜底 */ }
+          }
+          if (cleared2.length > 0) audit(`清锁：${cleared2.join("、")}（二次追击前清场）`)
+        } catch { /* 清锁失败不阻断二次拉起 */ }
+        respawnPid = deps.spawn()
+        // 二次拉起同样确认（但不再追击——三次交下轮巡检，防递归）
+        await sleep(graceWaitMs)
+        const liveness2 = readBotHealth(deps.paths, Date.now())
+        if (!isPidAlive(respawnPid) || liveness2.lockPid === null) {
+          livenessVerdict += `；二次拉起 pid=${respawnPid} 仍失败——交下轮巡检接力（强度账 ${state.restartLog.length}/${policy.maxRestarts}）`
+        } else {
+          livenessVerdict += `；二次拉起 pid=${respawnPid} 成功`
+        }
+      }
+    }
+    // 诛杀审计（决策可审计三问全要素）：杀戮级动作落 kills.log 专线
+    if (killedPid !== null || livenessVerdict !== "alive") {
+      appendKillLog({
+        kind: "decision",
+        reason: action.reason,
+        health: {
+          lockPid: health.lockPid,
+          pidAlive: health.pidAlive,
+          heartbeatAgeMs: health.heartbeatAgeMs,
+          lockAgeMs: health.lockAgeMs,
+        },
+        killedPid,
+        killEscalation: killedPid !== null ? "TERM" : "n/a",
+        spawnedPid: respawnPid ?? spawnedPid,
+        restartIntensity: `${state.restartLog.length}/${policy.maxRestarts}`,
+        livenessVerdict: livenessVerdict !== "alive" ? livenessVerdict : "alive",
+        at: Date.now(),
+      })
+    }
+
+    const detail = `${action.reason}；${killedPid ? `已优雅停 pid=${killedPid}；` : ""}已拉起 pid=${respawnPid ?? spawnedPid}${livenessVerdict !== "alive" ? `；${livenessVerdict}` : ""}`
     // 审计分家（2026-11-09 加固红线）：「主动杀」与「验尸拉新」必须在日志里一眼可辨——
     // 历史上两者同文案导致无声死亡无法归因（2026-11-09 他杀排查实证：审计缺陷遮蔽真凶）。
     audit(killedPid ? `主动杀：${detail}` : `验尸拉新：${detail}`)
-    return { action: "restart", detail, killedPid, spawnedPid }
+    return { action: "restart", detail, killedPid, spawnedPid: respawnPid ?? spawnedPid }
   } finally {
     release()
   }
