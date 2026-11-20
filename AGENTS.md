@@ -177,7 +177,8 @@ openqq watchdog --loop --interval-min 10      # 或注册自启：openqq service
 
 ### 7.1 驱动与发送红线
 
-- 驱动链路=项目侧资产（exec135.ps1→uat-driver.ps1，随验收轮存 `tests/reports/<轮次>/tooling/`）；
+- 驱动链路=项目侧资产（exec135.ps1→uat-driver.ps1，随验收轮存 `tests/reports/<轮次>/tooling/`，仅放本轮实例脚本与驱动器快照）；
+  **跨轮复用的操作规程/SOP=常驻文档层 `docs/playbooks/`**（入仓须 owner 当轮授权，§3.2 新规）；
   凭据 `%TEMP%\opencode\cred-135.xml` 只读使用、不得回显外带。
 - **WinRM 红线**：对 135 的一切输入与 GUI 拉起必须经 /it 计划任务链——WinRM 直发落非交互
   会话，进程无窗、输入被静默吞掉。机理与唤窗规程见 AEE 文档 win-native 档案。
