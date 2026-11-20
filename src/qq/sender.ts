@@ -9,10 +9,41 @@ import { sendC2CMessage, sendGroupMessage, getNextMsgSeq, type MessageResponse }
 import type { MessageContext } from "./types.js"
 import { normalizeOutboundMarkdown, matchFence, type FenceToken } from "../core/markdown.js"
 
+// QQ 按 CommonMark 语义渲染：`\`+ASCII标点 被当作转义、反斜杠被吃掉
+//（2026-11-20 /status 实证：C:\Users\linjz\.openqq 被渲染成 linjz.openqq——
+// 路径里 `\U`、`\l` 等「反斜杠+字母」不是标点不受影响，唯独 `\.` 中招）。
+// 围栏代码块与行内代码内 QQ 按字面渲染、不做转义——故仅对围栏外、行内代码外的
+// 反斜杠双写（`\.` → `\\.` → QQ 渲染还原 `\.`）。
+// ASCII 标点类即 CommonMark 转义目标：!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~
+const PUNCT_BACKSLASH = /\\(?=[!-/:-@[-`{-~])/g
+const INLINE_CODE_SPLIT = /(`[^`]*`)/g
+
+/** 单行内：行内代码段（单反引号对）原样保留，其余段做反斜杠双写。 */
+function escapeLineBackslashes(line: string): string {
+  return line
+    .split(INLINE_CODE_SPLIT)
+    .map((seg, i) => (i % 2 === 1 ? seg : seg.replace(PUNCT_BACKSLASH, "\\\\")))
+    .join("")
+}
+
 // Markdown 主路径: QQ 原生渲染标准 markdown（含表格/代码），故基本透传，仅做首尾清理
 // 与围栏归一（补未闭合 + 去空围栏对）——两者都会在 QQ 里变成空代码卡（2026-11-10 实证）。
 export function formatForQQMarkdown(text: string): string {
-  return normalizeOutboundMarkdown(text.trim())
+  const normalized = normalizeOutboundMarkdown(text.trim())
+  // 围栏状态跟踪（normalizeOutboundMarkdown 已保证围栏配对，可安全切换）：
+  // 围栏行与其内部内容逐字保留，不做反斜杠双写。
+  let inFence = false
+  return normalized
+    .split("\n")
+    .map((line) => {
+      const f = matchFence(line)
+      if (f) {
+        inFence = !inFence
+        return line
+      }
+      return inFence ? line : escapeLineBackslashes(line)
+    })
+    .join("\n")
 }
 
 // 纯文本兜底: 去除所有 markdown 标记（当 markdown 发送失败时使用）
