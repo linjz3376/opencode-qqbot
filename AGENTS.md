@@ -161,6 +161,8 @@ openqq watchdog --loop --interval-min 10      # 或注册自启：openqq service
   执行纪律以 simulated-user-acceptance 技能（UI 主证/未触归因/台账尾部重读闸）为准；
   **台账锚定编辑前必须重读文件物理尾部**——mtime 可能滞后于内容（并行会话活跃写入期），
   以章节内容定权威位，插入式登记视为违规（11-20 指挥台插中部已纠偏实证）。
+  命名口径：任务书 `tests/plans/<topic>-uat-<date>.md`；报告树 `tests/reports/<YYYY-MM-DD>-<domain>/`
+  （证据 `AC-<域>-<序号>_<步骤>_<yyyyMMddTHHmm>.<ext>`）——只留当前轮，历史轮归档即清（2026-11-20 起）。
 - 缺陷编号：`DEF-qqbot-YYYYMMDD-<序号>`；待定性 `-P<序号>`；跨轮台账可达性开工必核。
 
 ---
