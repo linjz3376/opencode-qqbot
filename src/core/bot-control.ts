@@ -34,15 +34,33 @@ export function resolveInstalledBotEntry(fromUrl: string, exists: (p: string) =>
 }
 
 export function readAppId(envPath = join(homedir(), ".openqq", ".env")): string | null {
+  // 2026-11-20 应修尽修批：legacy 字段优先，缺省回退 QQ_BOTS 首角色（纯多角色部署的
+  // restart/探活锚点——此前只认 legacy 字段，纯 QQ_BOTS 部署下 restart/看门狗全瞎）。
+  let botsRaw: string | null = null
   try {
     for (const line of readFileSync(envPath, "utf-8").split("\n")) {
       const t = line.trim()
       if (!t || t.startsWith("#")) continue
       const eq = t.indexOf("=")
-      if (eq > 0 && t.slice(0, eq).trim() === "QQ_APP_ID") return t.slice(eq + 1).trim() || null
+      if (eq < 0) continue
+      const key = t.slice(0, eq).trim()
+      if (key === "QQ_APP_ID") {
+        const v = t.slice(eq + 1).trim()
+        if (v) return v
+      }
+      if (key === "QQ_BOTS") botsRaw = t.slice(eq + 1).trim()
     }
   } catch {
     /* 无 .env */
+  }
+  if (botsRaw) {
+    try {
+      const arr = JSON.parse(botsRaw) as Array<{ appId?: unknown }>
+      const first = Array.isArray(arr) ? arr[0]?.appId : undefined
+      if (typeof first === "string" && first) return first
+    } catch {
+      /* 坏 JSON 视为无 */
+    }
   }
   return null
 }
@@ -116,7 +134,7 @@ export interface RestartResult {
 export async function restartBot(opts: RestartOptions): Promise<RestartResult> {
   const log = opts.log ?? (() => {})
   const appId = readAppId()
-  if (!appId) throw new Error("缺少 ~/.openqq/.env 的 QQ_APP_ID，无法定位实例锁")
+  if (!appId) throw new Error("缺少 ~/.openqq/.env 的角色凭据（QQ_APP_ID 或 QQ_BOTS 首角色），无法定位实例锁")
   if (!opts.force) {
     const idle = await waitUntilIdle({
       timeoutMs: opts.timeoutMs,

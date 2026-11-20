@@ -55,7 +55,19 @@ export default Plugin.define({
     }
     const ensure = (): void => {
       try {
-        const appId = readDotEnvField(ENV_FILE, "QQ_APP_ID")
+        // 2026-11-20 应修尽修批：legacy 字段缺省时回退 QQ_BOTS 首角色（纯多角色部署）
+        const botsRaw = readDotEnvField(ENV_FILE, "QQ_BOTS")
+        let botsFirst: string | null = null
+        if (botsRaw) {
+          try {
+            const arr = JSON.parse(botsRaw) as Array<{ appId?: unknown }>
+            const first = Array.isArray(arr) ? arr[0]?.appId : undefined
+            if (typeof first === "string" && first) botsFirst = first
+          } catch {
+            /* 坏 JSON 视为无 */
+          }
+        }
+        const appId = readDotEnvField(ENV_FILE, "QQ_APP_ID") ?? botsFirst
         if (!appId) {
           warnOnce(
             "cred",

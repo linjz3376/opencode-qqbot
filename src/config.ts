@@ -40,8 +40,31 @@ export interface RoleConfig {
  * 行为与 2026-11-17 之前完全一致——存量部署零迁移。
  * 多角色模式下 ALLOWED_USERS/QQ_SANDBOX/QQ_APP_* 只作兜底缺项，不再单独生效。
  */
-export function loadRoles(): RoleConfig[] {
-  const raw = (process.env.QQ_BOTS ?? "").trim()
+/**
+ * 可用凭据判定（纯函数，2026-11-20 应修尽修批）：legacy 字段齐全 或 QQ_BOTS
+ * 解析出 ≥1 合法角色。ensureConfig 用它做早退——纯 QQ_BOTS 部署（无 legacy 字段）
+ * 不再掉进交互提问分支（detached 进程 stdin 无TTY会挂起）。
+ */
+export function hasUsableCredentials(env: NodeJS.ProcessEnv = process.env): boolean {
+  if ((env.QQ_APP_ID ?? "").trim() && (env.QQ_APP_SECRET ?? "").trim()) return true
+  const raw = (env.QQ_BOTS ?? "").trim()
+  if (!raw) return false
+  return parseRolesJson(raw).length > 0
+}
+
+/**
+ * 主角色 appId（纯函数）：legacy QQ_APP_ID 优先，缺省回退 QQ_BOTS 首角色——
+ * restart/看门狗/插件引导器等单点探活调用方的锁路径锚点，在纯多角色部署下不再瞎。
+ */
+export function primaryAppId(env: NodeJS.ProcessEnv = process.env): string | null {
+  const legacy = (env.QQ_APP_ID ?? "").trim()
+  if (legacy) return legacy
+  const raw = (env.QQ_BOTS ?? "").trim()
+  if (!raw) return null
+  return parseRolesJson(raw)[0]?.appId ?? null
+}
+
+export function loadRoles(): RoleConfig[] {  const raw = (process.env.QQ_BOTS ?? "").trim()
   if (raw) {
     const roles = parseRolesJson(raw)
     if (roles.length > 0) return roles
@@ -127,17 +150,17 @@ function askTwo(q1: string, q2: string): Promise<[string, string]> {
 }
 
 export async function ensureConfig(): Promise<void> {
-  if (process.env.QQ_APP_ID && process.env.QQ_APP_SECRET) return
+  if (hasUsableCredentials()) return
 
   if (existsSync(ENV_FILE)) {
     loadEnvFile(ENV_FILE)
-    if (process.env.QQ_APP_ID && process.env.QQ_APP_SECRET) return
+    if (hasUsableCredentials()) return
   }
 
   const localEnv = join(process.cwd(), ".env")
   if (existsSync(localEnv)) {
     loadEnvFile(localEnv)
-    if (process.env.QQ_APP_ID && process.env.QQ_APP_SECRET) return
+    if (hasUsableCredentials()) return
   }
 
   console.log("首次运行，需要配置 QQ 机器人凭证")

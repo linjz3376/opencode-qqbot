@@ -73,7 +73,7 @@ watchdog/restart/autostart 已全部收编为包内 TS（`core/watchdog.ts` + �
 - 克隆后：`bun install`，然后 `bun run verify` 必须全绿才开始改码。
 
 ### 3.2 日常开发闭环
-1. **verify 门禁**：`bun run verify`（tsc + 47 套件测试链）全绿才可提交/部署；红期间只诊断不改码。
+1. **verify 门禁**：`bun run verify`（tsc + 53 套件测试链）全绿才可提交/部署；红期间只诊断不改码。
 2. **每修必带测试**：新行为进 `test/<域>-cases.ts`（check/PASS 风格）并挂入 package.json 测试链；
    `test/` 目录 gitignored 不入库，但测试链引用必须与 suite 文件同步维护。
 3. **提交纪律**：精确路径 `git add`（禁 `git add -A`）；不碰其他会话的在途文件；
@@ -154,7 +154,7 @@ openqq watchdog --loop --interval-min 10      # 或注册自启：openqq service
 
 ## 6. 测试与验收资产
 
-- 组件层：`bun run verify`（tsc + 47 套件测试链；另有 `test:e2e` 5 套件按需）为每日门禁；每修必带测试。
+- 组件层：`bun run verify`（tsc + 53 套件测试链；另有 `test:e2e` 5 套件按需）为每日门禁；每修必带测试。
 - 验收层：`tests/reports/` 各轮历史 + `TEST-STATUS-OVERALL.md` 总索引，单轮细节在同目录各轮文件夹；
   执行纪律以 simulated-user-acceptance 技能（UI 主证/未触归因/台账尾部重读闸）为准。
 - 缺陷编号：`DEF-qqbot-YYYYMMDD-<序号>`；待定性 `-P<序号>`；跨轮台账可达性开工必核。

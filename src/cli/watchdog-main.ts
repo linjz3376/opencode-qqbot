@@ -10,12 +10,10 @@
 //
 // 2026-11-09 重构：裸 healOnce 升级为 superviseOnce——优雅杀（TERM→宽限→KILL）、
 // 冷却（防互踢）、重启强度（超限 give-up 并告警，不当永动机）、监督者认领互斥。
-import { botWatchdogPaths, readEnvField, appendWatchdogLog, superviseOnce } from "../core/watchdog.js"
+import { botWatchdogPaths, appendWatchdogLog, superviseOnce } from "../core/watchdog.js"
 import { readAppId, startBot } from "../core/bot-control.js"
 import { electSupervisor } from "../core/supervisor-election.js"
 import { runNotifyCli } from "./notify.js"
-import { join } from "path"
-import { homedir } from "os"
 
 const DEFAULT_INTERVAL_MIN = 10
 
@@ -28,7 +26,8 @@ function parseArgs(argv: string[]): { loop: boolean; intervalMin: number } {
 }
 
 function currentAppId(): string | null {
-  return readAppId() ?? readEnvField(join(homedir(), ".openqq", ".env"), "QQ_APP_ID")
+  // readAppId 已含 QQ_BOTS 首角色回退（2026-11-20 应修尽修批）
+  return readAppId()
 }
 
 /** give-up 上报：入队 QQ 通知（bot 恢复后送达）＋本进程日志；失败静默（fail-open）。 */
@@ -61,7 +60,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   const appId = currentAppId()
   if (!appId) {
-    console.error("[watchdog] 未找到 QQ_APP_ID（~/.openqq/.env），无法定位实例锁")
+    console.error("[watchdog] 未找到任何角色凭据（~/.openqq/.env 缺 QQ_APP_ID/QQ_APP_SECRET 且 QQ_BOTS 无合法角色），无法定位实例锁")
     process.exit(1)
   }
   console.log(`[watchdog] 模式=${args.loop ? `loop/${args.intervalMin}min` : "once"}（监督矩阵：冷却2m/强度3次15m/优雅杀8s）`)
