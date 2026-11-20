@@ -16,6 +16,7 @@ import { botWatchdogPaths, superviseOnce } from "./core/watchdog.js"
 import { startBot } from "./core/bot-control.js"
 import { runNotifyCli } from "./cli/notify.js"
 import { readDotEnvField } from "./core/bot-launcher.js"
+import { electSupervisor } from "./core/supervisor-election.js"
 
 const ENV_FILE = join(homedir(), ".openqq", ".env")
 const CHECK_INTERVAL_MS = (() => {
@@ -62,6 +63,10 @@ export default Plugin.define({
           )
           return
         }
+        // 双触发器归一（2026-11-20 owner 批）：service（计划任务看门狗）与 plugin
+        // （本引导器巡检）租约选主——service 持租约时整轮让贤，连 superviseOnce
+        // 都不进（零干扰）；service 停排/死亡后租约过期自动接管，双向自愈。
+        if (!electSupervisor("plugin")) return
         // 2026-11-09 重构：巡检升级为 superviseOnce（与计划任务同一监督矩阵 + 认领互斥）：
         // 优雅杀/冷却/重启强度超限 give-up 并告警，杜绝裸「杀旧拉新」循环。
         void superviseOnce({

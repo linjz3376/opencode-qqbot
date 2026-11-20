@@ -12,6 +12,7 @@
 // 冷却（防互踢）、重启强度（超限 give-up 并告警，不当永动机）、监督者认领互斥。
 import { botWatchdogPaths, readEnvField, appendWatchdogLog, superviseOnce } from "../core/watchdog.js"
 import { readAppId, startBot } from "../core/bot-control.js"
+import { electSupervisor } from "../core/supervisor-election.js"
 import { runNotifyCli } from "./notify.js"
 import { join } from "path"
 import { homedir } from "os"
@@ -39,6 +40,12 @@ function alert(message: string): void {
 }
 
 async function tick(appId: string): Promise<void> {
+  // 双触发器归一（2026-11-20 owner 批）：service 与 plugin 两通道租约选主，
+  // plugin 持租约时本通道整轮让贤（不进 superviseOnce，零干扰）；租约过期自动夺回。
+  if (!electSupervisor("service")) {
+    console.log("[supervisor] 让贤：plugin 通道持监督租约中，本轮跳过")
+    return
+  }
   const result = await superviseOnce({
     paths: botWatchdogPaths(appId),
     spawn: () => startBot(import.meta.url, (line) => console.log(line)),

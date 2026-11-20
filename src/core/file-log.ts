@@ -12,6 +12,7 @@
 // 「日志最后写入时间」，堵住"日志 17:17 后无写入却无人发现"的观测缺口。
 import { appendFileSync, existsSync, mkdirSync, statSync } from "fs"
 import { join } from "path"
+import { inspect } from "util"
 import { enforceLogBudget, logLimitsFromEnv, rotateLogIfNeeded } from "./log-rotate.js"
 
 interface ActiveLog {
@@ -56,7 +57,12 @@ export function installFileLog(logPath: string): () => void {
       if (existsSync(logPath) && statSync(logPath).size > limits.maxBytes) {
         if (rotateLogIfNeeded(logPath, limits)) enforceLogBudget(logPath, limits)
       }
-      const line = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ")
+      // 2026-11-20 修：非字符串参数用 util.inspect（JSON.stringify(Error)=="{}" 会把
+      // 错误消息与堆栈整个吞掉——11-20 启动失败 {} 事故的根因级教训）；breakLength
+      // 拉满保持单行，不破坏行级日志结构。
+      const line = args
+        .map((a) => (typeof a === "string" ? a : inspect(a, { depth: 4, maxStringLength: 500, breakLength: Infinity, colors: false })))
+        .join(" ")
       appendFileSync(logPath, `${formatLocalTimestamp()} [${level}] ${line}\n`, { mode: 0o600 })
       state.lastWriteAt = Date.now()
     } catch {

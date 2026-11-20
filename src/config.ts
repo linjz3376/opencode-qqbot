@@ -48,6 +48,10 @@ export function loadRoles(): RoleConfig[] {
     console.warn("[config] QQ_BOTS 配置存在但解析结果为空，回退 legacy 单角色模式")
   }
   const single = loadConfig()
+  console.warn(
+    "[config] legacy 单角色配置（QQ_APP_ID/QQ_APP_SECRET）已弃用——QQ_BOTS 多角色表是唯一角色源；" +
+      "legacy 兜底将于 2026-12-31 移除，请迁移 .env：QQ_BOTS=[{\"appId\":\"…\",\"secret\":\"…\",\"sandbox\":false,\"name\":\"角色名\"}]",
+  )
   return [{
     name: single.qq.appId,
     appId: single.qq.appId,
@@ -147,6 +151,8 @@ export async function ensureConfig(): Promise<void> {
 
   mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 }) // POSIX 凭据目录仅本人可入
   const envContent = [
+    `# 多角色（唯一角色源，推荐）：QQ_BOTS=[{"appId":"…","secret":"…","sandbox":false,"name":"开发角色","allowedUsers":[]}]`,
+    `# 以下 legacy 单角色字段已弃用，将于 2026-12-31 移除`,
     `QQ_APP_ID=${appId}`,
     `QQ_APP_SECRET=${appSecret}`,
     `QQ_SANDBOX=false`,
