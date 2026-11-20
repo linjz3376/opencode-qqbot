@@ -125,7 +125,8 @@ openqq watchdog --loop --interval-min 10      # 或注册自启：openqq service
 
 ### 4.4 应用者排障入口
 `/status`（服务器/鉴权/会话/队列/日志新鲜度）→ `/queue` `/ledger` → 日志
-统一日志 `~/.openqq/openqq.log`（bot 输出与看门狗审计同文件：`主动杀`/`验尸拉新`/`装配`/`Gateway 就绪` 一条时间线归因；滚动 20MB×4 代、总预算 100MB）。
+统一日志 `~/.openqq/openqq.log`（bot 输出与看门狗审计同文件：`主动杀`/`验尸拉新`/`装配`/`Gateway 就绪` 一条时间线归因；滚动 20MB×4 代、总预算 100MB）；
+杀戮决策专线 `~/.openqq/kills.log`（JSONL 机器可解析，审计三问：判据快照/动作升级链/后果强度账——诛杀归因免在全域日志里捞沙，同口径轮转）。
 
 ---
 

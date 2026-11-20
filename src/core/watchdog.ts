@@ -237,11 +237,16 @@ export function appendWatchdogLog(line: string): void {
  * 审计场景下 openqq.log 会被 bot 高频输出冲刷稀释（11-20 实证：30 分钟卡死现场被
  * 后续日志淹没，诛杀归因只能靠 supervisor 片段倒推），kills.log 保证决策记录永不被稀释。
  */
-export function appendKillLog(entry: KillAuditEntry): void {
+export function appendKillLog(entry: KillAuditEntry, logPath = join(homedir(), ".openqq", "kills.log")): void {
   try {
-    const logPath = join(homedir(), ".openqq", "kills.log")
-    // 单行 JSONL：机器可解析（工具审计）+人类可读（字段名自释）
+    // 单行 JSONL：机器可解析（工具审计）+人类可读（字段名自释）。
+    // 轮转归 log-rotate 统一管辖（与 openqq.log 同口径 20MB×4 代/100MB 总预算；
+    // 量级=决策级事件每天数条，statSync 每次诛杀一次可忽略）。
     writeFileSync(logPath, `${JSON.stringify(entry)}\n`, { flag: "a" })
+    const limits = logLimitsFromEnv()
+    if (existsSync(logPath) && statSync(logPath).size > limits.maxBytes) {
+      if (rotateLogIfNeeded(logPath, limits)) enforceLogBudget(logPath, limits)
+    }
   } catch {
     /* 审计日志失败不阻断监督主流程——监督本身即最后防线 */
   }
@@ -587,9 +592,12 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
     }
 
     // ===== 拉起后存活确认（DEF-20261120 墙二次追击层）=====
-    // 背景（11-20 15:17 实证）：主杀后拉起的 7001 秒死——监督者要等下轮巡检
-    //（计划任务 3min/常驻 10min）才能再拉，期间 bot 继续失能；若死因未消（dist 混合态等），
-    // 将进入「杀-拉-死-等-杀」的慢循环，每轮空转一个巡检周期直至 give-up。
+    // 背景（2026-11-20 修订时更正注记）：立项时引用的「11-20 15:17 主杀后拉起 7001
+    // 秒死」实系 lock-sweep 测试泄漏的假审计行（假 pid 7001，已在测试补 auditLogPath
+    // 隔离后根治）——该时刻真实 bot 存活。本层保留立项，因为「拉起后秒死」这一失败类
+    // 当日真实存在（早晨 8ms 速死群，根因未钉、仪器已埋）：监督者要等下轮巡检
+    //（计划任务 3min/常驻 10min）才能再拉，期间 bot 继续失能；若死因未消（dist
+    // 混合态等），将进入「杀-拉-死-等-杀」的慢循环，每轮空转一个巡检周期直至 give-up。
     // 修复：拉起后立即做 10s 存活确认（进程在 + 锁建立），失败=立刻二次拉起（仅一次，
     // 防递归爆炸——二次拉起交由下轮巡检接力，与强度账协同防永动）。
     // 强度账语义不变：本函数每进场只记 1 次重启（上方 restartLog.push），存活确认
