@@ -63,7 +63,7 @@ npx @linjz/opencode-qqbot setup
 QQ_APP_ID=你的AppID
 QQ_APP_SECRET=你的AppSecret
 ALLOWED_USERS=你的QQ openid   # fail-closed：必填，非名单用户一律拒绝
-OPENCODE_BASE_URL=http://127.0.0.1:<端口>/api   # opencode 桌面服务地址（2.1.x 端口动态；失联时 bot 启动会自动发现）
+OPENCODE_BASE_URL=http://127.0.0.1:<端口>/api   # 【可选】opencode 桌面服务地址——不配也行：默认沿用上次自动发现，失联时启动流程会自动端口扫描发现（DEF-20261120-01c）
 OPENCODE_PASSWORD=opencode 服务密码（桌面端服务配置的 Basic auth 密码）
 QQ_SANDBOX=false
 ```

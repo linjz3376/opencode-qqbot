@@ -7,7 +7,8 @@ import { mkdirSync, writeFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
 import { createClient, healthCheck, type OpencodeClient } from "./opencode/client.js"
-import { discoverOpencode, persistDiscovery } from "./core/discovery.js"
+import { discoverOpencode, persistDiscovery, readLastDiscovered, resolveInitialBaseUrl } from "./core/discovery.js"
+import { formatStartupError, startupDiagnosticBundle } from "./core/start-error.js"
 import { startLinkWatch } from "./core/linkwatch.js"
 import { getAccessToken, sendC2CMessage, getNextMsgSeq, registerAppEnv } from "./qq/api.js"
 import { SessionManager } from "./opencode/sessions.js"
@@ -122,8 +123,17 @@ async function main(): Promise<void> {
     for (const r of roles) instanceLocks.push(await waitInstanceLock(r.appId))
   }
 
-  if (!baseConfig.opencode.baseUrl) {
-    throw new Error("缺少 OPENCODE_BASE_URL，指向 OpenCode 桌面版 API（如 http://127.0.0.1:<端口>/api；2.1.x 端口动态，失联时启动流程会自动发现）")
+  // DEF-20261120-01c：OPENCODE_BASE_URL 可选化（owner 2026-11-20「能自动发现的
+  // 都不要配置」举一反三指令）——显式配置仍是第一优先（externalUrl 语义不变）；
+  // 缺省时沿用上次自动发现档案，引擎换端口由既有重试-发现环第 1 次纠正。
+  const resolvedInitial = resolveInitialBaseUrl(
+    baseConfig.opencode.baseUrl,
+    baseConfig.opencode.baseUrl ? null : readLastDiscovered(),
+  )
+  if (resolvedInitial.source !== "explicit") {
+    console.log(
+      `[index] 未配置 OPENCODE_BASE_URL，初始地址=${resolvedInitial.source === "last-discovered" ? "上次自动发现" : "占位"} ${resolvedInitial.url}（失联时自动端口发现纠正）`,
+    )
   }
 
   // E4 心跳：每 60 秒写一次时间戳 = 事件循环存活证明。
@@ -158,7 +168,7 @@ async function main(): Promise<void> {
 
   let client: OpencodeClient
   try {
-    client = await waitForOpencode((u) => createClient(u), baseConfig.opencode.baseUrl)
+    client = await waitForOpencode((u) => createClient(u), resolvedInitial.url)
   } catch (error) {
     // 启动失败立即交还锁，缩短下一次接管的等待（否则锁要等 30s 过期才回收）
     clearInterval(heartbeatTimer)
@@ -244,7 +254,9 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error("[index] 启动失败:", error)
+  // DEF-20261120-01a：非 Error 抛出必须可读（{} 事故），诊断包定位拉起通道环境 delta
+  console.error("[index] 启动失败:", formatStartupError(error))
+  console.error("[index] 启动失败诊断包:", startupDiagnosticBundle())
   stopBackgroundTokenRefresh()
   process.exit(1) // 锁文件随之成僵尸，30s 后待命实例自动接管
 })

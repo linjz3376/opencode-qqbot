@@ -419,9 +419,9 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
       return { action: "yield", detail: action.reason, killedPid: null, spawnedPid: null }
     }
     if (action.kind === "give-up") {
-      const message = `⚠️ QQBot 看门狗已放弃：${action.restarts} 次重启/${Math.round(policy.windowMs / 60_000)} 分钟仍不健康。继续自动重启没有意义（同因反复死亡），请人工检查 %TEMP%\\opencode 下 bot.out.log 与 ~/.openqq/watchdog.log。`
+      const message = `⚠️ QQBot 看门狗已达重启强度上限：${action.restarts} 次/${Math.round(policy.windowMs / 60_000)} 分钟仍不健康（同因反复死亡）。降频重试继续——巡检不会停，强度窗口滑动后自动恢复，引擎/环境自愈即自行好转；若持续收到此告警，请检查 %TEMP%\\opencode 下 bot.out.log 与 ~/.openqq/watchdog.log。`
       audit(`give-up：${message}`)
-      log(`[supervisor] give-up：${action.restarts} 次重启仍异常，停止循环并上报`)
+      log(`[supervisor] give-up：${action.restarts} 次重启仍异常，降频重试继续并上报（不再永动猛拉）`)
       // 告警去抖：30 分钟内只报一次（计划任务每 10 分钟一轮，防止轰炸）
       const lastAlert = state.alertedAt ?? 0
       if (now - lastAlert > 30 * 60_000) {

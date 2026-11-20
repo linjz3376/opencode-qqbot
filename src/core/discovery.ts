@@ -8,11 +8,11 @@
 // 仅匹配 `${port}/api/info`：bot 的 V2 端点契约即 base=.../api（见 client.ts），
 // 无 /api 前缀的形态与本契约不符，不采用。
 // @input:  127.0.0.1 监听口（netstat -ano -p tcp）、/api/info 端点
-// @output: discoverOpencode, probeOpencodeEndpoint, parseListenPorts, isOpencodeInfo, persistDiscovery, getLastScanUnauthorized
+// @output: discoverOpencode, probeOpencodeEndpoint, parseListenPorts, isOpencodeInfo, persistDiscovery, getLastScanUnauthorized, readLastDiscovered, resolveInitialBaseUrl
 // @pos:    core - 端口发现（HC1，Windows only）
 import { exec } from "node:child_process"
 import { promisify } from "node:util"
-import { mkdirSync, writeFileSync } from "fs"
+import { mkdirSync, readFileSync, writeFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
 
@@ -155,6 +155,44 @@ export async function discoverOpencode(opts?: {
 }
 
 // 发现结果落盘 ~/.openqq/last-discovered.json，供看门狗/排障查看。不写 .env。
+const LAST_DISCOVERED_PATH = join(homedir(), ".openqq", "last-discovered.json")
+
+export interface LastDiscovered {
+  baseUrl: string
+  port: number
+  version: string
+  at: string
+}
+
+/** 读上次自动发现档案（无档案/损坏 → null，绝不抛）。 */
+export function readLastDiscovered(path: string = LAST_DISCOVERED_PATH): LastDiscovered | null {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf-8")) as Partial<LastDiscovered>
+    if (typeof raw.baseUrl === "string" && /^https?:\/\//.test(raw.baseUrl) && Number.isInteger(raw.port)) {
+      return raw as LastDiscovered
+    }
+  } catch {
+    /* 无档案或损坏 → 视为无 */
+  }
+  return null
+}
+
+/**
+ * 启动初始 URL 决议（DEF-20261120-01c：owner「能自动发现的不必配置」举一反三）：
+ * 显式 OPENCODE_BASE_URL > 上次自动发现档案（引擎换端口时第 1 次重试即纠正）
+ * > 占位地址（连接秒拒，快进重试-发现环）。三层都兜在既有 waitForOpencode
+ * 退避机制内，无新状态。
+ */
+export function resolveInitialBaseUrl(
+  explicit: string,
+  last: LastDiscovered | null,
+): { url: string; source: "explicit" | "last-discovered" | "placeholder" } {
+  const trimmed = explicit.trim()
+  if (trimmed) return { url: trimmed, source: "explicit" }
+  if (last) return { url: last.baseUrl.replace(/\/+$/, ""), source: "last-discovered" }
+  return { url: "http://127.0.0.1:1/api", source: "placeholder" }
+}
+
 export function persistDiscovery(d: OpencodeDiscovery): void {
   try {
     const dir = join(homedir(), ".openqq")
