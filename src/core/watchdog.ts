@@ -8,9 +8,10 @@
 // 约定：锁 mtime 由 bot 每 10s 刷新（instance-lock）；心跳文件由 bot 每 60s 刷新，
 // 且 2026-11-09 起「抢锁后立即写」，因此「进程活但心跳陈旧」= 真僵死，不是启动中。
 import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs"
-import { join } from "path"
+import { dirname, join } from "path"
 import { homedir } from "os"
 import { enforceLogBudget, logLimitsFromEnv, rotateLogIfNeeded } from "./log-rotate.js"
+import { releaseLocksOfPid } from "./instance-lock.js"
 
 /** 心跳超过 5 分钟未刷新 = 事件循环僵死（与既有看门狗阈值一致） */
 export const HEARTBEAT_STALE_MS = 5 * 60_000
@@ -491,14 +492,30 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
     // design §3.9.1 监督矩阵行 2「无锁 / 锁 pid 已死 → 清锁 → 拉起」：
     // 死 bot 的锁文件由监督者在拉起前清理。否则刚死（锁 mtime<30s）时
     // 新实例 try 模式判锁新鲜而拒绝接管，本轮拉起空转，须再等一个巡检周期。
-    // 仅当锁 pid 已死/无锁才删（grace-kill 路径已确认死亡，killedPid 非空）。
+    // 甲乙统一（2026-11-20 owner 批「修甲乙」）：单进程多角色持多把锁——
+    // 杀进程即按 pid 清扫其持有的全部实例锁（锁即进程，调用方不再记角色名单；
+    // 多角色改造前只清单把，残留锁曾把 restart 的新实例弹飞——ceshi 僵尸锁
+    // 挡道 11-20 激活亲历）。已知锁路径兜底直删，兼容非 openqq-* 命名与
+    // pid 读不到的边角。
     try {
-      if (killedPid !== null || health.lockPid === null || health.pidAlive === false) {
-        unlinkSync(deps.paths.lockPath)
-        audit(`清锁：${deps.paths.lockPath}（${action.reason}）`)
+      const locksDir = dirname(deps.paths.lockPath)
+      let cleared: string[] = []
+      if (killedPid !== null) {
+        cleared = releaseLocksOfPid(killedPid, locksDir)
+      } else if (health.pidAlive === false && health.lockPid !== null) {
+        cleared = releaseLocksOfPid(health.lockPid, locksDir)
       }
+      if (existsSync(deps.paths.lockPath)) {
+        try {
+          unlinkSync(deps.paths.lockPath)
+          if (!cleared.includes(deps.paths.lockPath)) cleared.push(deps.paths.lockPath)
+        } catch {
+          /* 锁不存在或删除失败：新实例 try 模式仍按 mtime 仲裁，不阻断拉起 */
+        }
+      }
+      if (cleared.length > 0) audit(`清锁：${cleared.join("、")}（${action.reason}）`)
     } catch {
-      /* 锁不存在或删除失败：新实例 try 模式仍按 mtime 仲裁，不阻断拉起 */
+      /* 清锁失败不阻断拉起 */
     }
     const spawnedPid = deps.spawn()
     state.restartLog.push(Date.now())

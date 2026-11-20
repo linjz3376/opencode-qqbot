@@ -9,7 +9,7 @@
 //   - 抢锁失败时看 mtime：超 30s 未刷新判僵尸锁（宿主崩溃）→ 删除强抢
 //   - 未抢到可进入待命循环，每 5s 重试，宿主退出/暴毙后自动接管
 // 锁文件按 appId 隔离：~/.openqq/openqq-<appId>.lock。
-import { openSync, readFileSync, writeFileSync, closeSync, unlinkSync, statSync, utimesSync, mkdirSync } from "fs"
+import { openSync, readFileSync, readdirSync, writeFileSync, closeSync, unlinkSync, statSync, utimesSync, mkdirSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
 
@@ -34,6 +34,37 @@ export interface InstanceLock {
 
 function lockPathOf(appId: string): string {
   return join(homedir(), ".openqq", `openqq-${appId}.lock`)
+}
+
+/**
+ * 按 pid 清扫实例锁（2026-11-20 owner 批「修甲乙」：锁即进程）。
+ * 单进程多角色持多把 openqq-<appId>.lock，杀进程后应清其持有的全部锁——
+ * 调用方不再记角色名单。锁文件内嵌 pid（acquireInstanceLockAt 写入），按 pid
+ * 匹配精准清扫：不误清他进程锁、不碰 supervisor.lock 等非实例锁。坏锁/占用
+ * 一律跳过（僵尸判定与接管仍由 mtime 机制兜底）。
+ */
+export function releaseLocksOfPid(pid: number, dir: string): string[] {
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return []
+  }
+  const cleared: string[] = []
+  for (const name of names) {
+    if (!/^openqq-.+\.lock$/.test(name)) continue
+    const p = join(dir, name)
+    try {
+      const holder = JSON.parse(readFileSync(p, "utf-8")) as { pid?: unknown }
+      if (holder.pid === pid) {
+        unlinkSync(p)
+        cleared.push(p)
+      }
+    } catch {
+      /* 坏锁/读写竞态——跳过，mtime 僵尸机制兜底 */
+    }
+  }
+  return cleared
 }
 
 function touch(path: string): void {
