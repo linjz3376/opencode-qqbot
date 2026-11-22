@@ -1650,7 +1650,22 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       }
       return `✅ /${name} 已执行（引擎无文本回执）`
     } catch (error) {
-      return `引擎命令执行失败（/goal 需 OpenCode ≥ 2.2.1）：${toErrorMessage(error)}`
+      const msg = toErrorMessage(error)
+      // 引擎把 goal 状态（paused/done 的完成度审计）走 500 CommandExecutionError
+      // 通道返回（真机实证 11-23）——非真失败：提取 body.message 按「状态报告」呈现，
+      // 不得误标失败造成「究竟是否执行成功」的误判。
+      if (name === "goal") {
+        const bodyMatch = /\{[\s\S]*"message"[\s\S]*\}/.exec(msg)
+        if (bodyMatch) {
+          try {
+            const j = JSON.parse(bodyMatch[0]) as { message?: string; command?: string }
+            if (j.message) return `📋 目标状态（goal ${j.command ?? ""}）：\n${j.message}`
+          } catch {
+            /* body 非 JSON → 落原失败路径 */
+          }
+        }
+      }
+      return `引擎命令执行失败（/goal 需 OpenCode ≥ 2.2.1）：${msg}`
     }
   }
 
