@@ -40,6 +40,7 @@ import {
 import { createMirror } from "./core/mirror.js"
 import { MessageQueue, laneKeyOf, laneScope, sessionIdOfLane, userIdOfLane, previewText, agoLabel, intentKeyOf } from "./core/message-queue.js"
 import { classifyProviderError, rescueText } from "./core/error-rescue.js"
+import { NOTICE } from "./core/notices.js"
 
 const QUEUE_MAX = 20 // Q1：忙碌队列上限（学习 pi-qqbot queue.max 默认）
 // 2026-11-05：队列完成回执（"队列 #N 完成（剩余 M 条）"）默认关闭——批量排空时
@@ -1352,7 +1353,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       } else {
         // 完成无正文（被杀回合）或 L2 静默强杀 → expired + 可见交代
         inflight.settle(entry.msgId, undefined, "expired")
-        await safeDeliver(ctx, "⚠️ 检测到一个卡死的回合（长时间无进展），已自动清理；如未收到预期结果请重新发送").catch(() => {})
+        await safeDeliver(ctx, NOTICE.reaperExpired()).catch(() => {})
       }
       console.log(
         `[reaper] ${dec.kind} user=${uid.slice(0, 8)}… lane=${shortId(sid)} msg=${shortId(entry.msgId)} age=${Math.round((now - entry.at) / 60_000)}m`,

@@ -8,6 +8,7 @@
 import { sendC2CMessage, sendGroupMessage, getNextMsgSeq, type MessageResponse } from "./api.js"
 import type { MessageContext } from "./types.js"
 import { normalizeOutboundMarkdown, matchFence, type FenceToken } from "../core/markdown.js"
+import { stripInteractionTags } from "../core/notices.js"
 
 // QQ 按 CommonMark 语义渲染：`\`+ASCII标点 被当作转义、反斜杠被吃掉
 //（2026-11-20 /status 实证：C:\Users\linjz\.openqq 被渲染成 linjz.openqq——
@@ -76,6 +77,19 @@ export function formatForQQ(text: string): string {
   for (let i = 0; i < codeBlocks.length; i++) {
     processed = processed.replace(`\x00CB${i}\x00`, codeBlocks[i])
   }
+
+  // 交互标签兜底剥离（2026-11-22 学习吸收轮）：<qqbot-cmd-input> 等仅 markdown 消息生效，
+  // 纯文本通道必须把标签降级为可读文本，否则尖括号原样糊给用户（AstrBot#8755 同款坑）。
+  // 围栏内是代码字面量，不动。
+  let inStripFence = false
+  processed = processed.split("\n").map((line) => {
+    const f = matchFence(line)
+    if (f) {
+      inStripFence = !inStripFence
+      return line
+    }
+    return inStripFence ? line : stripInteractionTags(line)
+  }).join("\n")
 
   return processed.trim()
 }
