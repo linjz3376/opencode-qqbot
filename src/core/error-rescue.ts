@@ -27,7 +27,7 @@ export function rescueText(kind: ProviderErrorKind, rawMessage: string): string 
     `服务端原文：${raw}`,
     "",
     "恢复方式（都不用等模型在线）——",
-    "1. 换现成模型：发 /model 看列表，或 /model provider/id 直接切换",
+    "1. 换现成模型：发 /models 看列表，或 /models provider/id 直接切换",
     "2. 更新 key：在桌面端 opencode 里更新该服务的 key 后，直接重发你的问题",
   ].join("\n")
 }

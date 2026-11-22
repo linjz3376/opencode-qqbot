@@ -115,6 +115,7 @@ const REASON_LABEL: Record<SettleReason, string> = {
   dropped: "已删除",
   blocked: "被阻塞",
   superseded: "被新回合取代",
+  steered: "已并入当前任务",
   expired: "已过期",
   redispatch: "重启重派",
   manual: "人工结清",

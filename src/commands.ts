@@ -1,6 +1,6 @@
-// @input:  ./config, ./qq/types, ./opencode/* (client, sessions)
+﻿// @input:  ./config, ./qq/types, ./opencode/* (client, sessions)
 // @output: isCommand, handleCommand, handlePendingSelection, CommandContext, PendingSelection
-// @pos:    根层 - 命令系统: /new /stop /status /sessions /help /model /agent /rename
+// @pos:    根层 - 命令系统: /new /cancel /status /sessions /help /models /agents /rename /undo /amend
 import type { Config } from "./config.js"
 import type { MessageContext } from "./qq/types.js"
 import type { OpencodeClient, SessionMessage } from "./opencode/client.js"
@@ -110,8 +110,7 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
   switch (parsed.name) {
     case "new":
       return handleNew(ctx, cmdCtx)
-    case "stop":
-    case "cancel": // /cancel 与 /stop 同义（用户自然习惯 + pi-qqbot 同款，UAT S3 实证缺口）
+    case "cancel": // 唯一中止命令（owner 2026-11-23 裁定：不收别名减负担；UAT 实证 /cancel 是用户自然习惯）
       return handleStop(ctx, cmdCtx)
     case "amend": // steer 降级版：忙时插话并入当前任务（参考 Hermes update_prompt）
       return cmdCtx.amend(ctx.userId, parsed.args)
@@ -129,11 +128,9 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
       return handleSessions(ctx, cmdCtx)
     case "help":
       return buildHelpText()
-    case "model":
-    case "models": // 官方 TUI 命令为复数 /models——同名对齐，单数保留为别名（用户习惯双向兼容）
+    case "models": // 官方 TUI 同名（owner 2026-11-23：严格对齐官方，单数别名已收编不留负担）
       return handleModel(ctx, parsed.args, cmdCtx)
-    case "agent":
-    case "agents": // 官方 TUI 命令为复数 /agents——同名对齐，单数保留为别名
+    case "agents": // 官方 TUI 同名
       return handleAgent(ctx, parsed.args, cmdCtx)
     case "rename":
       return handleRename(ctx, parsed.args, cmdCtx)
@@ -369,12 +366,12 @@ async function handleModel(ctx: MessageContext, args: string, cmdCtx: CommandCon
       return `${index + 1}. ${isCurrent ? "[当前] " : ""}${model.label}`
     })
 
-    return ["可用模型：", ...lines, "回复序号或 /model <provider/model> 切换（60 秒内有效）"].join("\n")
+    return ["可用模型：", ...lines, "回复序号或 /models <provider/model> 切换（60 秒内有效）"].join("\n")
   }
 
   if (/^\d+$/.test(args)) {
     const result = await handlePendingSelection(ctx.userId, Number(args), cmdCtx)
-    return result ?? "没有待选择的模型列表，请先发送 /model"
+    return result ?? "没有待选择的模型列表，请先发送 /models"
   }
 
   const model = splitModelId(args)

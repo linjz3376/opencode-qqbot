@@ -23,7 +23,7 @@ Built for production, not just message bridging: a self-healing watchdog, an aud
 | Progress watching | `/watch` subscribes to tool-call milestones (🔧 command summary / exit code), throttled and merged |
 | **Permission approval** | OpenCode permission requests arrive as 🔐 four-button cards (allow once / always allow / reject / ignore). Taps take effect silently (the tapped button shows ✓/✗ via native visited state). The card also shows exactly which rule "always allow" will save. Text replies ("允许/总是/拒绝") work too |
 | **Form prompt bridge** | OpenCode Forms (single-choice / multi-choice / boolean / text) render as 📝 QQ cards — answer by tapping buttons or replying with a letter (A/B/C). Requests and forms from desktop-side turns are pushed as well (always-on watcher, 12s poll) |
-| Remote commands | `/new /stop /status /sessions /history /model /agent /rename /watch /mirror /progress /queue /ledger /send` |
+| Remote commands | `/new /cancel /status /sessions /history /models /agents /rename /watch /mirror /progress /queue /ledger /send` |
 | Rich media | Receive images (native attachments go to the AI for vision); **receive voice** (QQ's built-in ASR transcribes to text into the prompt for free); **send images/files** (AI replies containing `QQ_SEND_FILE: <path>` or the `/send <path>` command; 20MB limit) |
 | Quote context | Long-press quote a message and ask — the AI sees the quoted content (our own replies are indexed too) |
 | Long tasks never lost | 30-min foreground timeout falls back to a background wait (SSE + polling, up to 24h); a 30-min stall triggers a proactive notice with status (stalled / unknown / finished-but-lost), the latest tool action, and how long there's been no progress |
@@ -141,12 +141,12 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | Command | What it does |
 |---|---|
 | `/new` | Start a new session |
-| `/stop` (alias `/cancel`) | Abort the current generation and clear the busy queue |
+| `/cancel` | Abort the current generation and clear the busy queue |
 | `/status` | Server / session / model / agent status |
 | `/sessions` | List sessions and switch by number |
 | `/history [N]` | Last N rounds (default 3, max 10; newlines / code blocks / tables preserved) |
-| `/model` | View or switch the model (session-level) |
-| `/agent` | View or switch the agent |
+| `/models` | View or switch the model (session-level) |
+| `/agents` | View or switch the agent |
 | `/rename <name>` | Rename the current session (local title only) |
 | `/watch` / `/watch off` | Watch mode: tool-call milestones pushed live |
 | `/progress` | Manual progress query: tool/failure stats and in-flight status (local event source, zero model calls) |
@@ -164,6 +164,7 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `QQ_STREAM_STAGGER_MS` | 300 | Stagger between split-reply chunks (0 = send all at once) |
 | `QQ_SESSION_IDLE_HOURS` | 6 | Idle session eviction threshold |
 | `QQ_INTERACTION_WATCH_SECONDS` | 12 | Always-on interaction watcher poll interval (0 = off) |
+| `QQ_BUSY_DEFAULT` | `steer` | Busy-time delivery, aligned with the official TUI (Enter steers): new messages merge into the running turn. Set `queue` for client-side FIFO queuing (legacy behavior) |
 | `QQ_REDISPATCH_MAX_AGE_MS` | 7200000 | Startup-reconcile auto-redispatch window for lost messages (0 = notify only; capped by the 24h ledger trim) |
 | `QQ_ACK_RECEIPT` | off | "Received, working on it" ack bubble (set `true`/`on`/`1` for debugging) |
 | `QQ_GATEWAY_STATE_MAX_HOURS` | 6 | Gateway session persistence window (older / RESUME-rejected falls back to IDENTIFY) |

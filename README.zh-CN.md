@@ -21,7 +21,7 @@
 | 进度观察 | `/watch` 订阅工具调用里程碑（🔧 命令摘要/退出码），节流合并推送 |
 | **权限审批** | opencode 发起权限请求 → QQ 收 🔐 四键卡片（允许一次/总是允许/拒绝/忽略），点按钮静默生效（点击后该按钮回显 ✓/✗，其余按钮保持原样），也可文字回复"允许/总是/拒绝" |
 | **选择弹窗桥接** | opencode 的 Form（选择/多选/布尔/文本）→ QQ 📝 卡片，点按钮或回字母（A/B/C）作答；桌面端回合发起的审批/表单**同样**推送（常驻监听，12s 轮询，bot 空闲也收得到） |
-| 远程指令 | `/new /stop /status /sessions /history /model /agent /rename /watch /mirror /progress /queue /ledger /send` |
+| 远程指令 | `/new /cancel /status /sessions /history /models /agents /rename /watch /mirror /progress /queue /ledger /send` |
 | 富媒体 | 收图（原生附件给 AI 看图）；**收语音**（QQ 内置 ASR 免费转文字进 prompt）；**发图/发文件**（AI 回复含 `QQ_SEND_FILE: <路径>` 标记或 `/send <路径>` 指令，20MB 上限） |
 | 引用上下文 | 长按引用某条消息提问，AI 能感知被引用的内容（我方回复也会入索引缓存） |
 | 长任务不丢 | 前台 30min 超时 → 后台等待（SSE + 轮询，最长 24h）；停滞 30min 主动提醒（带「已停滞/状态不明/已终结未回传」状态位 + 最近工具动作 + 无进展时长） |
@@ -137,12 +137,12 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | 指令 | 说明 |
 |---|---|
 | `/new` | 开新会话 |
-| `/stop`（别名 `/cancel`） | 中止当前生成并清空忙碌队列 |
+| `/cancel` | 中止当前生成并清空忙碌队列 |
 | `/status` | 服务器/会话/模型/Agent 状态 |
 | `/sessions` | 列出会话并可选择切换 |
 | `/history [N]` | 最近 N 轮历史（默认 3，上限 10；换行/代码块/表格完整保留） |
-| `/model` | 查看或切换模型（session 级） |
-| `/agent` | 查看或切换 Agent |
+| `/models` | 查看或切换模型（session 级） |
+| `/agents` | 查看或切换 Agent |
 | `/rename <名>` | 重命名当前会话（仅本地会话标题，不改服务端标题） |
 | `/watch` / `/watch off` | 观察模式：工具调用里程碑实时推送 |
 | `/progress` | 手动进度查询：工具调用/失败统计、当前在途状态（本地事件源，零模型调用） |
@@ -160,6 +160,7 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `QQ_STREAM_STAGGER_MS` | 300 | 多片回复片间错峰（0=一次性全发） |
 | `QQ_SESSION_IDLE_HOURS` | 6 | 闲置会话回收阈值 |
 | `QQ_INTERACTION_WATCH_SECONDS` | 12 | 常驻交互监听轮询间隔（0=关闭） |
+| `QQ_BUSY_DEFAULT` | `steer` | 忙时投递默认（对齐官方 TUI「忙时 Enter steers」）：新消息并入在途回合；设 `queue` 切回客户端 FIFO 排队（旧行为） |
 | `QQ_REDISPATCH_MAX_AGE_MS` | 7200000 | 启动对账时丢失消息的自动重派窗口（0=关闭自动重派只通知；受台账 24h 清账线封顶） |
 | `QQ_ACK_RECEIPT` | 关 | 受理即回执气泡「已收到，正在处理」（调试期设 `true`/`on`/`1` 开启） |
 | `QQ_GATEWAY_STATE_MAX_HOURS` | 6 | 网关会话持久化恢复窗口（超龄 / RESUME 被拒自动回退 IDENTIFY） |
@@ -215,7 +216,7 @@ openqq service install|uninstall|status   # 自启注册：win32=schtasks / linu
 | QQ 无响应 | 统一日志 `~/.openqq/openqq.log`（bot 输出与看门狗审计同文件，滚动 20MB×4 代、总预算 100MB） |
 | 进程疑似僵死 | `openqq watchdog --once` —— 一次判定并自愈（先杀残留再拉起） |
 | ECONNREFUSED | 桌面服务端口漂移——重启 bot 会自动发现新端口（`~/.openqq/last-discovered.json` 留痕） |
-| 桌面弹窗卡住任务 | 后台等待会发带任务的停滞通告（含最近动作与无进展时长）；`/stop` 可终止 |
+| 桌面弹窗卡住任务 | 后台等待会发带任务的停滞通告（含最近动作与无进展时长）；`/cancel` 可终止 |
 | 日志见「已有实例待命」 | 单实例锁生效中——另一实例持锁（60s 自检会在锁异动时收敛双活，正常无需处理） |
 
 ## 平台注意事项

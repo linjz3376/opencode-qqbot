@@ -246,6 +246,15 @@ export function resumeDecision(resumeCount: number, max: number): "resume" | "gi
 
 // ===== /amend（steer 降级版，2026-11-22 owner 裁定参考 Hermes update_prompt）=====
 
+/**
+ * 忙时投递默认（纯函数供测试）：owner 2026-11-23 裁定「默认对齐官方 TUI——忙时
+ * Enter steers」——steer=新消息并入在途回合；queue=客户端 FIFO 排队（旧行为）。
+ * 默认 steer；显式 "queue" 切回排队；非法值回退 steer（官方语义优先）。
+ */
+export function resolveBusyMode(envValue: string | undefined): "steer" | "queue" {
+  return envValue?.trim().toLowerCase() === "queue" ? "queue" : "steer"
+}
+
 /** 并入 prompt 构造（纯函数供测试）：原 prompt + 补充指令块，模型读历史接着做。 */
 export function buildAmendPrompt(original: string, amendment: string): string {
   return `${original}\n\n【补充指令】${amendment.trim()}`
@@ -1763,6 +1772,28 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       }
 
       if (busyUsers.has(lane)) {
+        // 忙时默认=steer（owner 2026-11-23 裁定：对齐官方 TUI「忙时 Enter steers」；
+        // QQ_BUSY_DEFAULT=queue 切回客户端 FIFO 排队旧行为）——附件消息不走 steer
+        //（附件需完整派发管线下载加工），自动落排队。
+        if (resolveBusyMode(process.env.QQ_BUSY_DEFAULT) === "steer" && !ctx.attachments?.length) {
+          try {
+            const sidForSteer = anchorSid ?? sessions.getSession(ctx.userId)?.sessionId
+            if (sidForSteer) {
+              await client.session.prompt({
+                path: { id: sidForSteer },
+                body: { text: ctx.content, delivery: "steer" },
+              })
+              // 账侧：本条 msgId 由在途回合负责答复，steered 结清（孤儿收割不误伤）
+              if (ctx.msgId) inflight.settle(ctx.msgId, undefined, "steered")
+              console.log(`[bridge] 忙时 steer 并入 lane=${shortId(sidForSteer)} msg=${shortId(ctx.msgId)}`)
+              await notifyUser(ctx, "🔄 已并入当前任务（官方 steer 语义，默认行为；想排队改 ~/.openqq/.env 的 QQ_BUSY_DEFAULT=queue）")
+              return
+            }
+          } catch (error) {
+            // steer 被拒（引擎竞态/旧版）：落回下方排队路径，不丢消息
+            console.log(`[bridge] 忙时 steer 失败改排队 msg=${shortId(ctx.msgId)}: ${toErrorMessage(error)}`)
+          }
+        }
         // Q1（学习 pi-qqbot 队列 UX）：忙碌不再拒绝——FIFO 排队，回合结束自动执行
         // 自检补强：入队即下载附件——QQ 签名 URL 短时效，drain 时下载必过期
         if (ctx.attachments?.length && !ctx.preparedAttachments) {
