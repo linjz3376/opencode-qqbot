@@ -1641,7 +1641,14 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         path: { id: session.sessionId },
         body: { name, text },
       })) as { data?: { text?: string; message?: string }; text?: string; message?: string }
-      return res?.data?.text ?? res?.text ?? res?.data?.message ?? res?.message ?? "✅ 命令已执行"
+      const reply = res?.data?.text ?? res?.text ?? res?.data?.message ?? res?.message
+      if (reply) return reply
+      // 引擎 command 端点对多数命令不回文本——给分命令的诚实兜底（真机实证 11-23：
+      // /goal 设完静默执行多轮，用户误以为没生效）
+      if (name === "goal") {
+        return "✅ goal 已执行（引擎无文本回执）。查状态再发 /goal；控制用 /goal pause|resume|clear。设定目标后会话自主续跑，进展会以普通回复推送到这里"
+      }
+      return `✅ /${name} 已执行（引擎无文本回执）`
     } catch (error) {
       return `引擎命令执行失败（/goal 需 OpenCode ≥ 2.2.1）：${toErrorMessage(error)}`
     }
