@@ -60,6 +60,9 @@ export interface MirrorDeps {
   busyUsers: ReadonlySet<string> // 会话主人在忙则不解锁（5 秒宽限内再判定）
   /** 多角色（2026-11-17）：镜像开关文件可按角色注入；缺省 legacy 全局 settings.json */
   settingsFile?: string
+  /** A 方案（2026-11-23）：摘要投递前过 cron 标记钩——注册提醒并返回剥净正文。
+   *  桌面端发起的回合也会输出 QQBOT_PAYLOAD，不经此钩会原样泄漏到 QQ。 */
+  onDigest?: (userId: string, digest: string) => string
 }
 
 export interface Mirror {
@@ -179,7 +182,10 @@ export function createMirror(deps: MirrorDeps): Mirror {
         const ctx: MessageContext = recent
           ? { ...recent, anchorSessionId: sessionID }
           : { type: "c2c", userId, msgId: "", content: "", anchorSessionId: sessionID }
-        await safeDeliver(ctx, digest)
+        const cronHook = deps.onDigest
+        const outText = cronHook ? cronHook(userId, digest) : digest
+        if (!outText.trim()) continue // 纯提醒标记的摘要：注册即全部语义，无可镜像内容
+        await safeDeliver(ctx, outText)
       }
       console.log(`[mirror] 会话 ${sessionID} 摘要已镜像给 ${owners.length} 个用户`)
     } catch (error) {

@@ -123,6 +123,9 @@ export interface OpencodeClient {
     /** 设置会话项目归属（POST /session/{id}/move；directory=绝对路径） */
     move(opts: { path: { id: string }; body: { directory: string } }): Promise<unknown>
     abort(opts: { path: { id: string } }): Promise<unknown>
+    /** 官方斜杠命令直通（/goal /compact /redo /btw，2026-11-23）：引擎内置实现，
+     *  POST /session/{id}/command——与桌面端同一语义（goal 审查器/轮数上限在引擎侧）。 */
+    command(opts: { path: { id: string }; body: { name: string; text: string } }): Promise<unknown>
     /**
      * 会话回滚（官方 /undo 语义，opencode.ai/docs/snapshots 为准）：
      * stage=在指定消息处立可逆边界（files=true 恢复边界后 assistant 改动的文件）；
@@ -426,6 +429,9 @@ export function createClient(baseUrl: string): OpencodeClient {
       },
       async abort(opts) {
         return json(await req(`/session/${opts.path.id}/interrupt`, { method: "POST", body: "{}" }))
+      },
+      async command(opts) {
+        return json(await req(`/session/${opts.path.id}/command`, { method: "POST", body: JSON.stringify(opts.body) }))
       },
       async revertStage(opts) {
         return json(await req(`/session/${opts.path.id}/revert/stage`, { method: "POST", body: JSON.stringify(opts.body) }))

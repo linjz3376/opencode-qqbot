@@ -963,7 +963,21 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     busyUsers,
     // 多角色：镜像开关按角色分文件（缺省 legacy 全局）
     settingsFile: storageAppId ? roleFile("settings.json") : undefined,
+    // A 方案（owner 2026-11-23）：桌面端回合的摘要同样过 cron 钩——注册提醒+剥净标记
+    onDigest: (userId, digest) => {
+      const hit = parseCronReminder(digest, Date.now())
+      if (!hit) return digest
+      registerCron(userId, hit)
+      return hit.cleanedText // 剥净为空 → 镜像侧跳过投递（注册即全部语义）
+    },
   })
+
+  /** 双端共用的 cron 注册（QQ 侧与镜像侧同一调度器/上限/投递链）。 */
+  function registerCron(userId: string, hit: { atMs: number; reminderText: string }): boolean {
+    return cronScheduler.schedule(userId, hit.atMs, hit.reminderText, (uid, t) => {
+      void safeDeliver(ctxForUser(uid), t).catch(() => {})
+    })
+  }
 
   // openqq notify 外部入队通道（feature：headless 定时任务结果推送，2026-11-05 外部提案 Part1）：
   // cron/CI 任意进程经 `openqq notify` 写 ~/.openqq/outbox.json（只入队），bot 进程消费投递。
@@ -1613,6 +1627,26 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     return `📥 已排队 #${queued.job.id}（第 ${queued.ahead + 1} 位），当前任务结束后自动执行`
   }
 
+  /**
+   * 官方斜杠命令直通（owner 2026-11-23）：/goal /compact /redo /btw 经引擎
+   * POST /session/{id}/command 执行——与桌面端同一实现（goal 的 idle 审查器、
+   * 50 轮/停滞刹车全在引擎侧，咱们零重写=严格对齐）。引擎 <2.2.1 无内置 goal
+   * 时如实报错。
+   */
+  async function runEngineCommand(userId: string, name: string, text: string): Promise<string> {
+    const session = sessions.getSession(userId)
+    if (!session) return "没有绑定的会话；先在 QQ 里发一条消息建立会话"
+    try {
+      const res = (await client.session.command({
+        path: { id: session.sessionId },
+        body: { name, text },
+      })) as { data?: { text?: string; message?: string }; text?: string; message?: string }
+      return res?.data?.text ?? res?.text ?? res?.data?.message ?? res?.message ?? "✅ 命令已执行"
+    } catch (error) {
+      return `引擎命令执行失败（/goal 需 OpenCode ≥ 2.2.1）：${toErrorMessage(error)}`
+    }
+  }
+
   const commandContext: CommandContext = {
     config,
     client,
@@ -1628,6 +1662,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     amend: amendCurrentTurn,
     undo: undoLastTurn,
     enqueue: enqueueExplicit,
+    engineCommand: runEngineCommand,
   }
 
   // R2 修复批次启动项（2026-10-14）
@@ -2008,9 +2043,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           let outboundText = extracted.text
           const cronHit = parseCronReminder(extracted.text, Date.now())
           if (cronHit) {
-            const okCron = cronScheduler.schedule(ctx.userId, cronHit.atMs, cronHit.reminderText, (uid, t) => {
-              void safeDeliver(ctxForUser(uid), t).catch(() => {})
-            })
+            const okCron = registerCron(ctx.userId, cronHit)
             const when = new Date(cronHit.atMs).toLocaleString("zh-CN", { hour12: false })
             outboundText = cronHit.cleanedText ||
               (okCron ? `⏰ 好的，已设置提醒（${when}）：${cronHit.reminderText}` : "⚠️ 提醒设置失败（同时在册超限），请重试")

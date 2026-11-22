@@ -67,6 +67,8 @@ export interface CommandContext {
   undo: (userId: string) => Promise<string>
   /** 显性入队（/queue <文本>，owner 2026-11-23）：steer 默认下的显式排队动词——排进 FIFO，当前任务跑完才执行 */
   enqueue: (ctx: MessageContext, text: string) => Promise<string>
+  /** 官方斜杠命令直通（owner 2026-11-23）：/goal /compact /redo /btw 走引擎内置实现，与桌面端同语义 */
+  engineCommand: (userId: string, name: string, text: string) => Promise<string>
 }
 
 export interface PendingSelection {
@@ -118,6 +120,14 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
       return cmdCtx.amend(ctx.userId, parsed.args)
     case "undo": // 对齐官方 TUI /undo：回滚上一回合+恢复文件（prompt 回盒由回执承担）
       return cmdCtx.undo(ctx.userId)
+    case "goal": // 官方引擎内置（v2.2.1+，PR#59437）：目标模式直通——审查器/50轮上限在引擎侧
+      return cmdCtx.engineCommand(ctx.userId, "goal", parsed.args)
+    case "compact": // 官方引擎命令：会话压缩
+      return cmdCtx.engineCommand(ctx.userId, "compact", parsed.args)
+    case "redo": // 官方引擎命令：撤销暂存回滚的恢复
+      return cmdCtx.engineCommand(ctx.userId, "redo", parsed.args)
+    case "btw": // 官方引擎命令：侧问（不写入会话上下文）
+      return cmdCtx.engineCommand(ctx.userId, "btw", parsed.args)
     case "queue":
       return handleQueue(ctx, parsed.args, cmdCtx)
     case "ledger":
@@ -617,6 +627,8 @@ export function buildHelpText(): string {
     "/watch off - 停止观察",
     "/progress - 手动进度查询（工具调用/失败统计、在途状态，本地事件源零模型调用）",
     "/queue - 队列与台账对账视图；/queue all [页码] 全量；/queue clear 清空；/queue drop <编号> 定点删除；/queue <文本> 显性入队（steer 默认下排进 FIFO）",
+    "/goal <目标> - 官方目标模式（引擎内置 v2.2.1+）；/goal 查状态；pause/resume/clear 控制",
+    "/compact /redo /btw - 官方引擎命令直通（压缩会话 / 恢复撤销 / 侧问）",
     "/ledger - 台账快照（在途/孤儿/最近拒绝）；/ledger check 对账会话历史；/ledger settle <尾号> confirm 人工结清",
     "/cancel - 同 /stop：中止当前 AI 运行并清空忙碌队列",
     "/mirror [on|off] - 桌面问答摘要镜像开关（会话轮次完成推送问答摘要）",
