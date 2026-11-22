@@ -120,6 +120,14 @@ export interface OpencodeClient {
     /** 设置会话项目归属（POST /session/{id}/move；directory=绝对路径） */
     move(opts: { path: { id: string }; body: { directory: string } }): Promise<unknown>
     abort(opts: { path: { id: string } }): Promise<unknown>
+    /**
+     * 会话回滚（官方 /undo 语义，opencode.ai/docs/snapshots 为准）：
+     * stage=在指定消息处立可逆边界（files=true 恢复边界后 assistant 改动的文件）；
+     * commit=提交暂存回滚；delete=取消暂存。会话运行中拒绝（须先 abort）。
+     */
+    revertStage(opts: { path: { id: string }; body: { messageID: string; files?: boolean } }): Promise<unknown>
+    revertCommit(opts: { path: { id: string } }): Promise<unknown>
+    revertDiscard(opts: { path: { id: string } }): Promise<unknown>
     messages(opts: {
       path: { id: string }
       query?: { limit?: number; cursor?: string }
@@ -415,6 +423,15 @@ export function createClient(baseUrl: string): OpencodeClient {
       },
       async abort(opts) {
         return json(await req(`/session/${opts.path.id}/interrupt`, { method: "POST", body: "{}" }))
+      },
+      async revertStage(opts) {
+        return json(await req(`/session/${opts.path.id}/revert/stage`, { method: "POST", body: JSON.stringify(opts.body) }))
+      },
+      async revertCommit(opts) {
+        return json(await req(`/session/${opts.path.id}/revert/commit`, { method: "POST", body: "{}" }))
+      },
+      async revertDiscard(opts) {
+        return json(await req(`/session/${opts.path.id}/revert`, { method: "DELETE" }))
       },
       async messages(opts) {
         const query = new URLSearchParams()

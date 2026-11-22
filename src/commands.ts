@@ -63,6 +63,8 @@ export interface CommandContext {
   stopAll: (userId: string) => Promise<{ cleared: number; title: string | undefined }>
   /** steer 降级版：/amend <补充> 打断当前任务并以「原 prompt+补充」续跑（2026-11-22，参考 Hermes update_prompt） */
   amend: (userId: string, amendment: string) => Promise<string>
+  /** 对齐官方 /undo：回滚上一回合并恢复文件，回执带被撤 prompt（2026-11-23，opencode.ai/docs/snapshots 为准） */
+  undo: (userId: string) => Promise<string>
 }
 
 export interface PendingSelection {
@@ -113,6 +115,8 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
       return handleStop(ctx, cmdCtx)
     case "amend": // steer 降级版：忙时插话并入当前任务（参考 Hermes update_prompt）
       return cmdCtx.amend(ctx.userId, parsed.args)
+    case "undo": // 对齐官方 TUI /undo：回滚上一回合+恢复文件（prompt 回盒由回执承担）
+      return cmdCtx.undo(ctx.userId)
     case "queue":
       return handleQueue(ctx, parsed.args, cmdCtx)
     case "ledger":

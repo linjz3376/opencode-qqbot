@@ -266,6 +266,29 @@ export function selectAmendEntry(
     .sort((a, b) => b.at - a.at)[0]
 }
 
+// ===== 会话回滚（官方 /undo 对齐批，2026-11-23 owner 令「对上opencode桌面端，开工」）=====
+// 基准=opencode.ai/docs/snapshots：/undo=stage 边界→恢复文件→prompt 回盒，提交编辑后
+// prompt 时才 commit；/redo=取消暂存；会话运行中拒绝 revert。QQ 侧 /undo 为一次性
+// stage→commit（无暂存窗，故 /redo 无对象——如实不做，不做半成品语义）。
+
+/** 取会话消息列表中最后一条 user 消息的 id（回滚边界；纯函数供测试）。 */
+export function lastUserMessageId(msgs: Array<{ id?: string; type?: string }>): string | null {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].type === "user" && msgs[i].id) return msgs[i].id as string
+  }
+  return null
+}
+
+/** 从消息体提取可读文本（user 消息 content 可能为字符串或 text 块数组；纯函数供测试）。 */
+export function messageTextOf(m: { content?: unknown }): string {
+  const c = m.content
+  if (typeof c === "string") return c
+  if (Array.isArray(c)) {
+    return c.map((p) => (typeof p === "object" && p !== null && "text" in p ? String((p as { text?: unknown }).text ?? "") : "")).join("")
+  }
+  return ""
+}
+
 /**
  * 流活性判定（纯函数供测试）。msgs=同一次后台探知的拉取结果；
  * promptId/baseline=本回合锚点（与 turnStateOf 同口径）。
@@ -1472,6 +1495,23 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     }
     // 3) 结清被并入回合的账（cancelled=用户主动中止语义，与 /cancel 同口径）
     inflight.settle(entry.msgId, entry.attemptId, "cancelled")
+    // 3.5) 官方 /undo 语义对齐（snapshots 文档）：abort 后会话不再 running——尝试把
+    // 死回合连同原 prompt 一起 revert 出上下文（files:true=死回合改过的文件一并恢复），
+    // 模型续跑时看到的是「任务从没开始」的干净历史。revert 失败（非 git 目录/旧引擎/
+    // 竞态）回落 v1「读历史续跑」语义——不阻塞功能，只降级体感。
+    let reverted = false
+    try {
+      await client.session.revertStage({ path: { id: session.sessionId }, body: { messageID: entry.promptId as string, files: true } })
+      await client.session.revertCommit({ path: { id: session.sessionId } })
+      reverted = true
+    } catch (error) {
+      try {
+        await client.session.revertDiscard({ path: { id: session.sessionId } })
+      } catch {
+        /* 无暂存可弃（stage 即失败场景） */
+      }
+      console.log(`[bridge] amend revert 失败，回落读历史续跑 session=${shortId(session.sessionId)}: ${toErrorMessage(error)}`)
+    }
     // 4) 合成并入消息入队：原 prompt + 补充指令，drain 在 lane 释放后续跑
     //（复用既有 FIFO/单飞/在途账全链；msgId 空=主动通道投递，同 reaper 合成 ctx 先例）
     const actx: MessageContext = { ...ctxForUser(userId), msgId: "", content: buildAmendPrompt(entry.text, add) }
@@ -1480,7 +1520,47 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     // 5) 手动释放 lane + drain（bgWait 已 cancel，监督不会复活抢 lane）
     busyUsers.delete(activeLane)
     void drainQueue(userId, session.sessionId)
-    return "✅ 已打断当前任务，正把你的补充并入原指令续跑（模型从历史接着做，完成自动回复）"
+    return reverted
+      ? "✅ 已打断并清空该回合（含文件回滚），正带你的补充重新起跑"
+      : "✅ 已打断当前任务，正把你的补充并入原指令续跑（模型从历史接着做，完成自动回复）"
+  }
+
+  /**
+   * /undo：对齐官方 TUI /undo（snapshots 文档三段语义的一次性版）——stage 到最后一条
+   * user 消息边界（files:true 恢复该回合改动的文件）→ commit → 回执带被撤 prompt
+   * （QQ 版「prompt 回盒」：用户改后可重发，或 /amend <补充> 带修改续跑）。
+   * 运行中拒绝（官方语义：OpenCode rejects rollback while the session is running）。
+   */
+  async function undoLastTurn(userId: string): Promise<string> {
+    const session = sessions.getSession(userId)
+    if (!session) return "没有绑定的会话，无事可撤销"
+    if ([...busyUsers].some((k) => userIdOfLane(k) === userId)) {
+      return "当前有任务在跑——官方语义运行中不可回滚；请先等它完成，或 /cancel 后再 /undo"
+    }
+    let msgs: Awaited<ReturnType<typeof client.session.messages>>["data"] = []
+    try {
+      msgs = (await client.session.messages({ path: { id: session.sessionId }, query: { limit: 50 } })).data ?? []
+    } catch (error) {
+      return `读取会话失败：${toErrorMessage(error)}`
+    }
+    const boundary = lastUserMessageId(msgs)
+    if (!boundary) return "会话里没有可撤销的用户消息"
+    const removed = msgs.find((m) => m.id === boundary)
+    const removedText = messageTextOf(removed ?? {}).trim()
+    try {
+      await client.session.revertStage({ path: { id: session.sessionId }, body: { messageID: boundary, files: true } })
+      await client.session.revertCommit({ path: { id: session.sessionId } })
+    } catch (error) {
+      try {
+        await client.session.revertDiscard({ path: { id: session.sessionId } })
+      } catch {
+        /* 无暂存可弃 */
+      }
+      return `撤销失败：${toErrorMessage(error)}（引擎拒绝或快照缺失；会话内容未改动）`
+    }
+    console.log(`[bridge] undo 已回滚 user=${userId.slice(0, 8)}… session=${shortId(session.sessionId)} boundary=${shortId(boundary)}`)
+    const box = removedText ? `被撤回的指令：「${removedText.length > 80 ? `${removedText.slice(0, 80)}…` : removedText}」\n改好后重新发送即可，或 /amend <修改点> 带修改重跑。` : "改好后重新发送即可。"
+    return `↩️ 已撤销上一回合（该回合改动的文件已一并恢复）。\n${box}`
   }
 
   const commandContext: CommandContext = {
@@ -1496,6 +1576,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     progress: progressApi,
     stopAll: stopAllForUser,
     amend: amendCurrentTurn,
+    undo: undoLastTurn,
   }
 
   // R2 修复批次启动项（2026-10-14）
