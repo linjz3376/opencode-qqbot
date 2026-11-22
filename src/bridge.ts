@@ -1479,6 +1479,22 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     // 活动 lane=该用户名下仍 busy 的 lane（stopAll 同款口径，不依赖队列条目存在）
     const activeLane = [...busyUsers].find((k) => userIdOfLane(k) === userId)
     if (!session || !activeLane) return "当前没有进行中的任务，直接发消息即可"
+    // —— /amend v3：真 steer（2026-11-23 对齐官方 TUI「忙时 Enter steers」语义）——
+    // 订正：steer 不在独立端点上，藏在 prompt body 的 delivery 枚举（Session.Inbox
+    // .Delivery=steer|queue）——此前「引擎无 steer」结论系关键词检索漏判（教训同
+    // form 命名空间事件，已入技能纪律）。steer=补充直达在途回合：无 abort、无 token
+    // 沉没、死回合残骸为零。失败（引擎旧版/竞态）回落 v2 abort+revert 链。
+    try {
+      await client.session.prompt({
+        path: { id: session.sessionId },
+        body: { text: `【补充指令】${add}`, delivery: "steer" },
+      })
+      console.log(`[bridge] amend steer 已送达 user=${userId.slice(0, 8)}… session=${shortId(session.sessionId)}`)
+      return "✅ 已把补充送进当前任务（官方 steer 语义：模型把这条指令并入正在跑的回合，完成照常回传）"
+    } catch (error) {
+      console.log(`[bridge] amend steer 被拒，回落 abort+revert 链: ${toErrorMessage(error)}`)
+    }
+    // —— 回落链（v2，2026-11-22）：abort → revert 清残骸 → 合并重发 ——
     // 原 prompt 取在途账：本用户锚定会话里已落 promptId 的活动回合（stage running/background
     // 或 dispatched——只要 state=inflight 且有 promptId 即本回合；取最新一条）
     const entry = selectAmendEntry(inflight.pending(), userId, session.sessionId)

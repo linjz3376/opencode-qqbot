@@ -130,8 +130,10 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
     case "help":
       return buildHelpText()
     case "model":
+    case "models": // 官方 TUI 命令为复数 /models——同名对齐，单数保留为别名（用户习惯双向兼容）
       return handleModel(ctx, parsed.args, cmdCtx)
     case "agent":
+    case "agents": // 官方 TUI 命令为复数 /agents——同名对齐，单数保留为别名
       return handleAgent(ctx, parsed.args, cmdCtx)
     case "rename":
       return handleRename(ctx, parsed.args, cmdCtx)

@@ -53,6 +53,9 @@ export interface PermissionRequest {
 export interface PromptOptions {
   model?: { providerID: string; modelID: string }
   agent?: string
+  /** 投递语义（Session.Inbox.Delivery，官方枚举 steer|queue）：steer=并入在途回合
+   *  （官方 TUI 忙时 Enter 同款），queue=引擎侧排队。缺省=引擎默认。 */
+  delivery?: "steer" | "queue"
 }
 
 export interface PromptAndWaitOptions extends PromptOptions {
