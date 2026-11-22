@@ -1588,6 +1588,27 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     return `↩️ 已撤销上一回合（该回合改动的文件已一并恢复）。\n${box}`
   }
 
+  /**
+   * 显性入队（/queue <文本>，owner 2026-11-23）：steer 默认模式下把文本显式排进
+   * FIFO（而非并入当前任务）。合成 ctx（msgId 空=主动通道投递，同恢复重派先例），
+   * 走既有 msgQueue/drain 全链（单飞/台账/去重全继承）；当前空闲则入队即执行。
+   */
+  async function enqueueExplicit(ctx: MessageContext, text: string): Promise<string> {
+    const session = sessions.getSession(ctx.userId)
+    const sid = session?.sessionId
+    if (!sid) return "没有绑定的会话，请先发消息建立会话再排队"
+    const lane = laneKeyOf(ctx.userId, sid)
+    const actx: MessageContext = { ...ctx, msgId: "", content: text }
+    const queued = msgQueue.push(lane, ctx.userId, sid, actx)
+    if (!queued) return "队列已满，请等当前任务完成或 /queue clear 后重试"
+    console.log(`[queue] 显性入队 user=${ctx.userId.slice(0, 8)}… qid=${queued.job.id} ahead=${queued.ahead}`)
+    void drainQueue(ctx.userId, sid)
+    if (queued.ahead === 0 && !busyUsers.has(lane)) {
+      return `📥 已入队 #${queued.job.id}，当前空闲，立即执行`
+    }
+    return `📥 已排队 #${queued.job.id}（第 ${queued.ahead + 1} 位），当前任务结束后自动执行`
+  }
+
   const commandContext: CommandContext = {
     config,
     client,
@@ -1602,6 +1623,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     stopAll: stopAllForUser,
     amend: amendCurrentTurn,
     undo: undoLastTurn,
+    enqueue: enqueueExplicit,
   }
 
   // R2 修复批次启动项（2026-10-14）

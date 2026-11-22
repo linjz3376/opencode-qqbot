@@ -65,6 +65,8 @@ export interface CommandContext {
   amend: (userId: string, amendment: string) => Promise<string>
   /** 对齐官方 /undo：回滚上一回合并恢复文件，回执带被撤 prompt（2026-11-23，opencode.ai/docs/snapshots 为准） */
   undo: (userId: string) => Promise<string>
+  /** 显性入队（/queue <文本>，owner 2026-11-23）：steer 默认下的显式排队动词——排进 FIFO，当前任务跑完才执行 */
+  enqueue: (ctx: MessageContext, text: string) => Promise<string>
 }
 
 export interface PendingSelection {
@@ -233,7 +235,7 @@ async function handleStop(ctx: MessageContext, cmdCtx: CommandContext): Promise<
 }
 
 // Q1：/queue 查看与管理忙碌队列（2026-11-05：默认视图 join 台账，不再只看内存）
-function handleQueue(ctx: MessageContext, args: string, cmdCtx: CommandContext): string {
+function handleQueue(ctx: MessageContext, args: string, cmdCtx: CommandContext): string | Promise<string> {
   const parts = args.trim().split(/\s+/).filter(Boolean)
   const sub = parts[0]?.toLowerCase() ?? ""
   if (sub === "clear") {
@@ -251,6 +253,11 @@ function handleQueue(ctx: MessageContext, args: string, cmdCtx: CommandContext):
   }
   if (/^\d+$/.test(sub)) {
     return cmdCtx.queue.listAll(ctx.userId, Math.max(1, Number(sub)))
+  }
+  // 显性入队动词（owner 2026-11-23）：steer 默认模式下，/queue <文本>=把这条文本
+  // 排进 FIFO（当前任务跑完才执行），而不是默认的并入当前任务。
+  if (args.trim()) {
+    return cmdCtx.enqueue(ctx, args.trim())
   }
   return cmdCtx.queue.list(ctx.userId)
 }
@@ -609,7 +616,7 @@ export function buildHelpText(): string {
     "/watch <会话ID> - 观察指定会话",
     "/watch off - 停止观察",
     "/progress - 手动进度查询（工具调用/失败统计、在途状态，本地事件源零模型调用）",
-    "/queue - 队列与台账对账视图；/queue all [页码] 全量；/queue clear 清空；/queue drop <编号> 定点删除",
+    "/queue - 队列与台账对账视图；/queue all [页码] 全量；/queue clear 清空；/queue drop <编号> 定点删除；/queue <文本> 显性入队（steer 默认下排进 FIFO）",
     "/ledger - 台账快照（在途/孤儿/最近拒绝）；/ledger check 对账会话历史；/ledger settle <尾号> confirm 人工结清",
     "/cancel - 同 /stop：中止当前 AI 运行并清空忙碌队列",
     "/mirror [on|off] - 桌面问答摘要镜像开关（会话轮次完成推送问答摘要）",
