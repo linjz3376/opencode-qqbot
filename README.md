@@ -181,6 +181,28 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `QQBOT_DEFAULT_CWD` | bot process cwd | Default project directory for new sessions |
 | `QQ_SANDBOX` | false | QQ sandbox environment (REST domain switches to sandbox) |
 | `QQ_INSTANCE_LOCK` | on | Single-instance file lock (`false` to disable; only for multi-instance debugging) |
+| `QQ_BOTS` | — | Multi-role JSON table (multiple QQ bots in one process, data bucketed per role; absent = single-role legacy) |
+| `QQ_LANE_SCOPE` | `per-session-peer` | Session isolation granularity: `per-session-peer` (official per-peer refined per-session) or `per-peer` |
+| `QQ_ACTIVE_MINUTE_LIMIT` | 20 | Proactive message per-minute rolling window (official 20/min aligned) |
+| `QQ_API_CALL_TIMEOUT_MS` | 30000 | Per-call engine API timeout (P11 req-layer defense) |
+| `QQ_SSE_SILENCE_MS` | 120000 | SSE silence kill threshold (P8: zero-byte proactive reconnect) |
+| `QQ_BG_RESUME_MAX` | 3 | Dead-turn auto-continuation cap (0 = off; valid 0–5) |
+| `QQ_BG_STREAM_DEAD_MS` | 15min | Background stream-liveness dead threshold (valid 1–60min) |
+| `QQ_BG_TOOL_GRACE_MS` | 60min | Bounded tool-execution grace window before dead judgment |
+| `QQ_REAPER_MIN_AGE_MS` | 40min | Zombie reaper age gate |
+| `QQ_REAPER_SILENCE_MS` | 30min | Zombie reaper silence gate |
+| `QQ_REAPER_SCAN_SECONDS` | 60 | Zombie/orphan patrol interval (same tick) |
+| `QQ_ORPHAN_SCAN_SECONDS` | 60 | Orphan ledger patrol interval |
+| `QQ_DISPATCH_STALL_MS` | 120000 | Dispatch-stall sentinel threshold (valid 30s–60min) |
+| `QQ_NOTIFY_MAX_ATTEMPTS` | 8 | `openqq notify` delivery attempt cap |
+| `QQ_NOTIFY_TTL_HOURS` | 24 | notify outbox queue retention |
+| `QQ_DATA_DIR` | `~/.openqq` | Runtime data root (ledgers/logs/locks; whole directory is portable) |
+| `QQ_INFLIGHT_FILE` | `<data dir>/inflight.json` | In-flight ledger file path |
+| `QQ_OUTBOX_FILE` | `<data dir>/outbox.json` | notify outbox file path |
+| `QQ_FORM_JOURNAL_FILE` | `<data dir>/forms.json` | Form-bridge persistence file |
+| `QQ_DELIVERY_DEDUPE_FILE` | `<data dir>/delivery-dedupe.json` | Outbound dedupe state file |
+
+> All variables go into `~/.openqq/.env` (one `KEY=value` per line). Secrets discipline: the file is read by the bot only; no tool or session may echo its contents.
 
 ## Architecture
 

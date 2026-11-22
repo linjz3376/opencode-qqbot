@@ -177,6 +177,28 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `QQBOT_DEFAULT_CWD` | bot 进程工作目录 | 新会话默认项目目录（目录继承链兜底值） |
 | `QQ_SANDBOX` | false | QQ 沙箱环境（REST 域切至 sandbox） |
 | `QQ_INSTANCE_LOCK` | 开 | 单实例文件锁（`false` 关闭，仅排查多实例问题时临时用） |
+| `QQ_BOTS` | — | 多角色 JSON 表（单进程挂多个 QQ 机器人，数据按角色分桶；缺省=单角色 legacy 形态） |
+| `QQ_LANE_SCOPE` | `per-session-peer` | 会话隔离粒度：`per-session-peer`（官方 per-peer 的会话级细化）或 `per-peer` |
+| `QQ_ACTIVE_MINUTE_LIMIT` | 20 | 主动消息分钟滚动窗（对齐官方 20 条/分） |
+| `QQ_API_CALL_TIMEOUT_MS` | 30000 | 单次引擎 API 调用超时（P11 req 层防线） |
+| `QQ_SSE_SILENCE_MS` | 120000 | SSE 静默判死阈值（P8：零字节即主动重连） |
+| `QQ_BG_RESUME_MAX` | 3 | 死回合自动续作上限（0=关闭；合法 0 至 5） |
+| `QQ_BG_STREAM_DEAD_MS` | 15min | 后台流活性判死阈值（合法 1 至 60min） |
+| `QQ_BG_TOOL_GRACE_MS` | 60min | 工具执行中的判死豁免宽限窗（有界豁免） |
+| `QQ_REAPER_MIN_AGE_MS` | 40min | 僵尸收割年龄门 |
+| `QQ_REAPER_SILENCE_MS` | 30min | 僵尸收割静默门 |
+| `QQ_REAPER_SCAN_SECONDS` | 60 | 僵尸/孤儿巡检间隔（同巡逻 tick） |
+| `QQ_ORPHAN_SCAN_SECONDS` | 60 | 孤儿账巡检间隔 |
+| `QQ_DISPATCH_STALL_MS` | 120000 | 派发悬挂哨兵阈值（合法 30s 至 60min） |
+| `QQ_NOTIFY_MAX_ATTEMPTS` | 8 | `openqq notify` 投递尝试上限 |
+| `QQ_NOTIFY_TTL_HOURS` | 24 | notify outbox 队列保留时长 |
+| `QQ_DATA_DIR` | `~/.openqq` | 运行时数据根目录（台账/日志/锁全在此，可整目录迁移） |
+| `QQ_INFLIGHT_FILE` | `<数据目录>/inflight.json` | 在途台账文件路径 |
+| `QQ_OUTBOX_FILE` | `<数据目录>/outbox.json` | notify outbox 文件路径 |
+| `QQ_FORM_JOURNAL_FILE` | `<数据目录>/forms.json` | 表单桥持久化文件 |
+| `QQ_DELIVERY_DEDUPE_FILE` | `<数据目录>/delivery-dedupe.json` | 出站去重状态文件 |
+
+> 以上全部写入 `~/.openqq/.env`（单行 `键=值`）。 Secrets 纪律：该文件只被 bot 读取，任何工具/会话不得回显其内容。
 
 ## 架构
 
