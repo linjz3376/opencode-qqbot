@@ -619,6 +619,13 @@ export function formatPermissionPrompt(
     lines.push("资源：")
     for (const r of resources) lines.push(`  ${truncate(r, 300)}`)
   }
+  // W 项（2026-11-22 宿主侧学习）：官方文档 permissions 页——always 保存工具提案的
+  // pattern（shell=命令前缀等）。卡片上明示「总是允许」将保存什么，owner 点之前知道
+  // 豁免范围（request.save 即引擎提案的保存规则，仅 always 决策时生效）。
+  if (request.save && request.save.length > 0) {
+    const saves = request.save.slice(0, 3).map((s) => truncate(s, 120))
+    lines.push(`总是允许将保存：${saves.join("；")}`)
+  }
   if (request.message) lines.push(`说明：${truncate(request.message, 300)}`)
   lines.push("")
   lines.push("回复「允许」= 仅本次｜「总是」= 保存为项目级白名单（后续同类命令永久放行）｜「拒绝」= 驳回（含本会话其他待审）")

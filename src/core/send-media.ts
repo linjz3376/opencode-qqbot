@@ -6,7 +6,8 @@
 // 安全：路径白名单（默认只允许 QQ 图片缓存目录与 bot 工作目录，QQ_SEND_EXTRA_ROOTS 可扩）；
 // 大小上限 20MB（官方单次上传上限，base64 前检查）。
 import { readFileSync, statSync } from "node:fs"
-import { resolve, extname, basename, sep } from "node:path"
+import { resolve, extname, basename, sep, join } from "node:path"
+import { homedir } from "node:os"
 import { imageDir } from "../qq/media.js"
 import { uploadQQMedia, sendQQMediaMessage, MediaFileType } from "../qq/api.js"
 import type { MessageContext } from "../qq/types.js"
@@ -85,13 +86,39 @@ export interface SendLocalFileDeps {
   getToken: () => Promise<string>
 }
 
+/**
+ * 本地路径规范化（X 项，2026-11-22 学习吸收 openclaw local-file-router P0）：
+ * file:// 前缀剥离（含 Windows file:///C:/ 三斜杠形态）→ URL decode（非法编码按原样）
+ * → ~ 展开为家目录。白名单/拒绝名单判定必须先于或基于规范化结果，否则同一文件
+ * 因写法不同得到两种判定。
+ */
+export function normalizeLocalPath(p: string): string {
+  let r = p.trim()
+  if (r.startsWith("file://")) {
+    r = r.slice("file://".length)
+    if (/^\/[a-zA-Z]:[\\/]/.test(r)) r = r.slice(1)
+  }
+  try {
+    r = decodeURIComponent(r)
+  } catch {
+    /* 非法 % 编码按原样，后续 stat 会给出「不存在」的准确交代 */
+  }
+  if (r === "~" || r.startsWith("~/") || r.startsWith("~\\")) {
+    r = join(homedir(), r.slice(1))
+  }
+  return r
+}
+
 /** 白名单校验 → 读取 → 上传 → 发送媒体消息；错误以中文短语抛出（调用方回显用户）。 */
 export async function sendLocalFile(
   ctx: MessageContext,
   filePath: string,
   deps: SendLocalFileDeps,
 ): Promise<string> {
-  const trimmed = filePath.trim()
+  // X 项（2026-11-22 学习吸收，源=openclaw local-file-router P0）：路径规范化先行——
+  // file:// 前缀剥离、URL decode、~ 展开；规范化在拒绝名单/白名单之前（否则
+  // file:///C:/x 与 C:/x 同一文件两种判定结果）。非法编码按原样不炸。
+  const trimmed = normalizeLocalPath(filePath)
   // DEF-qqbot-20261112-03：文件级拒绝优先于目录白名单（穿越解析落白名单根也拦）
   if (isDeniedSendFile(trimmed)) {
     throw new Error("该文件属于密钥/凭据类，禁止外发（已拦截）")
