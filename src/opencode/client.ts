@@ -390,9 +390,14 @@ export function createClient(baseUrl: string): OpencodeClient {
       // DEF-20261119-P9：429 带 Retry-After 时把暗示值透出（机器可读标记），
       // 让上层退避按服务端节奏走，而非固定 20s（UAT SY-004 注入实证）。
       const retryAfter = res.status === 429 ? res.headers.get("retry-after") : null
-      throw new Error(
+      const err = new Error(
         `OpenCode API ${res.status}: ${excerpt}${retryAfter ? ` [retry-after:${retryAfter}]` : ""}`,
       )
+      // 完整响应体挂 error.body（不截断）——错误通道的结构化状态（如 goal 的
+      // CommandExecutionError 审计长文）由上层按 body 解析；截断的 excerpt 仅供日志
+      //（真机实证 11-23：200 字截断切断长 JSON，上层状态解析失配退化成失败文案）。
+      ;(err as { body?: string }).body = txt
+      throw err
     }
     // 204 (如 /model /agent /permission reply) 无 body；res.json() 会抛错。
     if (res.status === 204) return null

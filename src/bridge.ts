@@ -1652,16 +1652,18 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     } catch (error) {
       const msg = toErrorMessage(error)
       // 引擎把 goal 状态（paused/done 的完成度审计）走 500 CommandExecutionError
-      // 通道返回（真机实证 11-23）——非真失败：提取 body.message 按「状态报告」呈现，
-      // 不得误标失败造成「究竟是否执行成功」的误判。
+      // 通道返回（真机实证 11-23）——非真失败：优先读 error.body 的完整 JSON
+      //（日志 excerpt 有 200 字截断，长审计会切断 JSON 使正则失配），按状态报告呈现。
       if (name === "goal") {
-        const bodyMatch = /\{[\s\S]*"message"[\s\S]*\}/.exec(msg)
-        if (bodyMatch) {
+        const full = (error as { body?: string }).body ?? msg
+        const trimmed = full.trim()
+        const jsonText = trimmed.startsWith("{") ? trimmed : (/\{[\s\S]*"message"[\s\S]*\}/.exec(full)?.[0] ?? "")
+        if (jsonText) {
           try {
-            const j = JSON.parse(bodyMatch[0]) as { message?: string; command?: string }
+            const j = JSON.parse(jsonText) as { message?: string; command?: string }
             if (j.message) return `📋 目标状态（goal ${j.command ?? ""}）：\n${j.message}`
           } catch {
-            /* body 非 JSON → 落原失败路径 */
+            /* body 非完整 JSON → 落原失败路径 */
           }
         }
       }
