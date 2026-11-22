@@ -61,6 +61,8 @@ export interface CommandContext {
   progress: ProgressApi
   /** P1 防线 B：/cancel 彻底复位（清队列+abort+杀后台等待+结清在途账+drain） */
   stopAll: (userId: string) => Promise<{ cleared: number; title: string | undefined }>
+  /** steer 降级版：/amend <补充> 打断当前任务并以「原 prompt+补充」续跑（2026-11-22，参考 Hermes update_prompt） */
+  amend: (userId: string, amendment: string) => Promise<string>
 }
 
 export interface PendingSelection {
@@ -109,6 +111,8 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
     case "stop":
     case "cancel": // /cancel 与 /stop 同义（用户自然习惯 + pi-qqbot 同款，UAT S3 实证缺口）
       return handleStop(ctx, cmdCtx)
+    case "amend": // steer 降级版：忙时插话并入当前任务（参考 Hermes update_prompt）
+      return cmdCtx.amend(ctx.userId, parsed.args)
     case "queue":
       return handleQueue(ctx, parsed.args, cmdCtx)
     case "ledger":

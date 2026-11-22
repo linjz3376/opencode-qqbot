@@ -244,6 +244,28 @@ export function resumeDecision(resumeCount: number, max: number): "resume" | "gi
   return max > 0 && resumeCount < max ? "resume" : "giveup"
 }
 
+// ===== /amend（steer 降级版，2026-11-22 owner 裁定参考 Hermes update_prompt）=====
+
+/** 并入 prompt 构造（纯函数供测试）：原 prompt + 补充指令块，模型读历史接着做。 */
+export function buildAmendPrompt(original: string, amendment: string): string {
+  return `${original}\n\n【补充指令】${amendment.trim()}`
+}
+
+/**
+ * 并入目标选择（纯函数供测试）：本用户该会话最新一条已落 promptId 且有原文的
+ * 在途回合（stage 不限——running/background/dispatched 均可并入；queued 无
+ * promptId 自然落选）。找不到=不可并入（桌面端发起/已结清）。
+ */
+export function selectAmendEntry(
+  entries: Array<Pick<import("./core/inflight-journal.js").InflightEntry, "userId" | "sessionId" | "promptId" | "text" | "at" | "msgId" | "attemptId">>,
+  userId: string,
+  sessionId: string,
+): (typeof entries)[number] | undefined {
+  return entries
+    .filter((e) => e.userId === userId && e.sessionId === sessionId && e.promptId && e.text)
+    .sort((a, b) => b.at - a.at)[0]
+}
+
 /**
  * 流活性判定（纯函数供测试）。msgs=同一次后台探知的拉取结果；
  * promptId/baseline=本回合锚点（与 turnStateOf 同口径）。
@@ -1419,6 +1441,48 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     },
   }
 
+  /**
+   * /amend：steer 降级版「并入当前任务」（owner 2026-11-22 裁定，参考 Hermes update_prompt:y/n）。
+   * 引擎无在途注入能力（openapi 139 端点实证），落地形态=打断并以「原 prompt+补充」同会话续跑
+   * （模型读历史接着做，与死回合自动续作同语义）。abort 顺序复用 stopAll 证毕的
+   * cancel→abort 链：先杀后台监督再 abort，杜绝「判死→自动续作」race 双跑。
+   */
+  async function amendCurrentTurn(userId: string, amendment: string): Promise<string> {
+    const add = amendment.trim()
+    if (!add) {
+      return "用法：/amend <补充指令>——打断当前任务，把你的补充并入原指令一起续跑（模型从历史接着做）"
+    }
+    const session = sessions.getSession(userId)
+    // 活动 lane=该用户名下仍 busy 的 lane（stopAll 同款口径，不依赖队列条目存在）
+    const activeLane = [...busyUsers].find((k) => userIdOfLane(k) === userId)
+    if (!session || !activeLane) return "当前没有进行中的任务，直接发消息即可"
+    // 原 prompt 取在途账：本用户锚定会话里已落 promptId 的活动回合（stage running/background
+    // 或 dispatched——只要 state=inflight 且有 promptId 即本回合；取最新一条）
+    const entry = selectAmendEntry(inflight.pending(), userId, session.sessionId)
+    if (!entry) {
+      return "找不到可并入的原任务（可能由桌面端发起或已被结清）；请用 /cancel 后重发完整指令"
+    }
+    // 1) 先杀后台监督（bgWait cancel=监督循环退出，resumeDead 不可能再触发）
+    bgWaits.get(session.sessionId)?.cancel()
+    // 2) abort 当前回合（悬挂回合可能已自行终结，失败不阻断）
+    try {
+      await client.session.abort({ path: { id: session.sessionId } })
+    } catch {
+      /* 同 stopAll：abort 失败不阻断复位 */
+    }
+    // 3) 结清被并入回合的账（cancelled=用户主动中止语义，与 /cancel 同口径）
+    inflight.settle(entry.msgId, entry.attemptId, "cancelled")
+    // 4) 合成并入消息入队：原 prompt + 补充指令，drain 在 lane 释放后续跑
+    //（复用既有 FIFO/单飞/在途账全链；msgId 空=主动通道投递，同 reaper 合成 ctx 先例）
+    const actx: MessageContext = { ...ctxForUser(userId), msgId: "", content: buildAmendPrompt(entry.text, add) }
+    msgQueue.push(activeLane, userId, session.sessionId, actx)
+    console.log(`[bridge] amend 并入 user=${userId.slice(0, 8)}… lane=${shortId(session.sessionId)} msg=${shortId(entry.msgId)}`)
+    // 5) 手动释放 lane + drain（bgWait 已 cancel，监督不会复活抢 lane）
+    busyUsers.delete(activeLane)
+    void drainQueue(userId, session.sessionId)
+    return "✅ 已打断当前任务，正把你的补充并入原指令续跑（模型从历史接着做，完成自动回复）"
+  }
+
   const commandContext: CommandContext = {
     config,
     client,
@@ -1431,6 +1495,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     ledger: ledgerApi,
     progress: progressApi,
     stopAll: stopAllForUser,
+    amend: amendCurrentTurn,
   }
 
   // R2 修复批次启动项（2026-10-14）
@@ -1625,7 +1690,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         // 入队前已由 claimInflight 落账；drain 重入时回填 sessionId，不重复写账。
         await notifyUser(
           ctx,
-          `已排队 #${queued.job.id}（第 ${queued.ahead + 1} 位${queued.ahead > 0 ? `，前面还有 ${queued.ahead} 条` : ""}），当前任务结束后自动执行。\n发 /queue 查看队列，/cancel 可中止当前任务并清空队列。`,
+          `已排队 #${queued.job.id}（第 ${queued.ahead + 1} 位${queued.ahead > 0 ? `，前面还有 ${queued.ahead} 条` : ""}），当前任务结束后自动执行。\n发 /queue 查看队列，/cancel 可中止当前任务并清空队列；想立刻把新消息并进当前任务：/amend <补充>（打断并以原指令+补充续跑）。`,
         )
         return
       }
