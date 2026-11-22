@@ -7,6 +7,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { createOutbox } from "../core/outbox.js"
 import { ENV_FILE, loadEnvFile } from "../config.js"
+import { applyConfigOverlay } from "../core/bot-config.js"
 import { defaultOutboxPath, resolveNotifyRecipients } from "../core/notify-sink.js"
 
 export interface NotifyCliOptions {
@@ -108,7 +109,9 @@ export async function runNotifyCli(
     console.log(help)
     return { ok: true, queued: false, id: "", user: "", chars: 0, truncated: false, dryRun: true, json: parsed.json, reason: "help" }
   }
-  // .env 注入：bot 进程入口已做；CLI 独立进程需自行加载（ALLOWED_USERS/凭据同源单点）
+  // .env 注入：bot 进程入口已做；CLI 独立进程需自行加载（ALLOWED_USERS/凭据同源单点）。
+  // config.json 先叠加（最低层），.env 后加载自然覆盖它——与 bot 入口同一层级序。
+  applyConfigOverlay()
   if (!options.env && existsSync(ENV_FILE)) loadEnvFile(ENV_FILE)
   const allowedUsers = options.env ? [...options.env.allowedUsers] : String(process.env.ALLOWED_USERS ?? "")
     .split(/[,\s]+/).filter(Boolean)

@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
 import { createInterface } from "readline"
+import { applyConfigOverlay } from "./core/bot-config.js"
 
 export interface Config {
   qq: {
@@ -150,6 +151,10 @@ function askTwo(q1: string, q2: string): Promise<[string, string]> {
 }
 
 export async function ensureConfig(): Promise<void> {
+  // P2 配置分层（2026-11-23 owner 裁定）：config.json 最低用户层，先叠加——
+  // 「已设不覆盖」使其落在继承环境与 .env 之下（.env 在其后加载自然覆盖它）。
+  applyConfigOverlay()
+
   if (hasUsableCredentials()) return
 
   if (existsSync(ENV_FILE)) {

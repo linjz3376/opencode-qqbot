@@ -183,6 +183,11 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `QQ_INSTANCE_LOCK` | on | Single-instance file lock (`false` to disable; only for multi-instance debugging) |
 | `QQ_BOTS` | — | Multi-role JSON table (multiple QQ bots in one process, data bucketed per role; absent = single-role legacy) |
 | `QQ_LANE_SCOPE` | `per-session-peer` | Session isolation granularity: `per-session-peer` (official per-peer refined per-session) or `per-peer` |
+
+**Internal knobs (troubleshooting/tests only — safe to ignore day to day)**
+
+| Variable | Default | Meaning |
+|---|---|---|
 | `QQ_ACTIVE_MINUTE_LIMIT` | 20 | Proactive message per-minute rolling window (official 20/min aligned) |
 | `QQ_API_CALL_TIMEOUT_MS` | 30000 | Per-call engine API timeout (P11 req-layer defense) |
 | `QQ_SSE_SILENCE_MS` | 120000 | SSE silence kill threshold (P8: zero-byte proactive reconnect) |
@@ -203,6 +208,23 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `QQ_DELIVERY_DEDUPE_FILE` | `<data dir>/delivery-dedupe.json` | Outbound dedupe state file |
 
 > All variables go into `~/.openqq/.env` (one `KEY=value` per line). Secrets discipline: the file is read by the bot only; no tool or session may echo its contents.
+
+### Behavior config (`~/.openqq/config.json`, optional)
+
+Mirrors the official OpenCode layering ("json = behavior, env = secrets"): behavior knobs can move to `config.json` (flat JSON, **same key names as the env vars**), leaving `.env` for secrets only. Precedence, high to low:
+
+```
+inherited env  >  ~/.openqq/.env  >  ~/.openqq/config.json  >  built-in defaults
+```
+
+```json
+{
+  "QQ_BUSY_DEFAULT": "queue",
+  "QQ_STREAM_STAGGER_MS": 500
+}
+```
+
+`QQ_CONFIG_FILE` overrides the config path (tests/multi-instance). Keep secrets (QQ_APP_SECRET, OPENCODE_PASSWORD, …) out of config.json — behavior keys only.
 
 ## Architecture
 

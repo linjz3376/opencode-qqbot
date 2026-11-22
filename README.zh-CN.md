@@ -179,6 +179,11 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `QQ_INSTANCE_LOCK` | 开 | 单实例文件锁（`false` 关闭，仅排查多实例问题时临时用） |
 | `QQ_BOTS` | — | 多角色 JSON 表（单进程挂多个 QQ 机器人，数据按角色分桶；缺省=单角色 legacy 形态） |
 | `QQ_LANE_SCOPE` | `per-session-peer` | 会话隔离粒度：`per-session-peer`（官方 per-peer 的会话级细化）或 `per-peer` |
+
+**内部调参（排障/测试用，日常无需理会）**
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
 | `QQ_ACTIVE_MINUTE_LIMIT` | 20 | 主动消息分钟滚动窗（对齐官方 20 条/分） |
 | `QQ_API_CALL_TIMEOUT_MS` | 30000 | 单次引擎 API 调用超时（P11 req 层防线） |
 | `QQ_SSE_SILENCE_MS` | 120000 | SSE 静默判死阈值（P8：零字节即主动重连） |
@@ -199,6 +204,23 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `QQ_DELIVERY_DEDUPE_FILE` | `<数据目录>/delivery-dedupe.json` | 出站去重状态文件 |
 
 > 以上全部写入 `~/.openqq/.env`（单行 `键=值`）。 Secrets 纪律：该文件只被 bot 读取，任何工具/会话不得回显其内容。
+
+### 行为配置（`~/.openqq/config.json`，可选）
+
+对齐 OpenCode 官方的「json=行为配置、env=密钥」分层：行为调参可移到 `config.json`（平铺 JSON，**键名与 env 相同**），`.env` 收敛为只装密钥。层级从高到低：
+
+```
+继承环境  >  ~/.openqq/.env  >  ~/.openqq/config.json  >  内置默认
+```
+
+```json
+{
+  "QQ_BUSY_DEFAULT": "queue",
+  "QQ_STREAM_STAGGER_MS": 500
+}
+```
+
+`QQ_CONFIG_FILE` 可覆盖配置文件路径（测试/多实例用）。密钥（QQ_APP_SECRET、OPENCODE_PASSWORD 等）**不要**写进 config.json——它只收行为键。
 
 ## 架构
 

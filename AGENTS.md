@@ -119,7 +119,7 @@ openqq watchdog --loop --interval-min 10      # 或注册自启：openqq service
 - node ≥ 20 即可（跑内置运行包，无需 bun）。
 
 ### 4.3 配置与数据（两形态相同）
-- 唯一配置面：`~/.openqq/.env`（QQ appId/appSecret、OPENCODE_PASSWORD、白名单、可选开关）。
+- 配置面（2026-11-23 起分层，对齐官方 json=行为/env=密钥）：密钥与凭据唯一面=`~/.openqq/.env`；行为调参可选 `~/.openqq/config.json`（平铺 JSON 键名同 env，层级：继承环境 > .env > config.json > 内置默认）。
   **secrets 纪律：任何工具/会话不得读取外泄、不得改写 `.env`**（排障只验证存在性与字段名）。
 - 运行时数据（台账/日志/锁/心跳）全部在 `~/.openqq/`，可整目录备份/迁移，跨机复制即迁移。
 
