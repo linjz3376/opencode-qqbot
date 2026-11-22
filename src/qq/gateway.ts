@@ -46,6 +46,8 @@ interface GatewayState {
   stopped: boolean
   connecting: boolean
   reconnectAttempt: number
+/** AB：快断连时刻戳窗（风暴守卫计数） */
+quickCloses: number[]
   reconnectTimer: ReturnType<typeof setTimeout> | null
   heartbeatTimer: ReturnType<typeof setInterval> | null
   accessToken: string | null
@@ -68,6 +70,7 @@ function createInitialState(stateFile: string): GatewayState {
     stopped: false,
     connecting: false,
     reconnectAttempt: 0,
+    quickCloses: [],
     reconnectTimer: null,
     heartbeatTimer: null,
     accessToken: null,
@@ -140,6 +143,26 @@ function scheduleReconnect(state: GatewayState, connect: () => Promise<void>, cu
     void connect()
   }, delayMs)
 }
+
+// —— AB：快断连风暴守卫（2026-11-23 学习吸收，源=hermes-agent adapter.py P0 邻接）——
+// 背景：指数退避（1s→30s）只放缓单个重连，挡不住「坏凭据/网络抖动」的无限循环——
+// bot 会在 1~30s 档永远空转且日志无声。守卫口径：窗口内快断连（建连后秒挂）累计
+// 达上限 → 升级 5min 静默冷却 + 高声错误日志（排障信号），冷却后再犯重新累计。
+
+/** 快断连判定与升级（纯函数供测试）：closes=各次断连时刻戳（epoch ms）。
+ *  返回 true=本次应升级长冷却（调用方负责清窗）。窗口默认 60s、上限默认 5 次。 */
+export function shouldEscalateReconnect(
+  closes: number[],
+  now: number,
+  windowMs: number = 60_000,
+  maxQuick: number = 5,
+): boolean {
+  while (closes.length > 0 && now - closes[0] > windowMs) closes.shift()
+  return closes.length >= maxQuick
+}
+
+/** 升级冷却时长（常量；5min 足以让平台侧限流/凭据修复/网络恢复生效） */
+const STORM_COOLDOWN_MS = 5 * 60_000
 
 function startHeartbeat(state: GatewayState, intervalMs: number): void {
   if (state.heartbeatTimer) {
@@ -579,6 +602,18 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayCont
 
         if (FATAL_CLOSE_CODES.has(code)) {
           return
+        }
+
+        // AB：快断连风暴守卫——窗口内快断连累计达上限 → 升级 5min 冷却 + 高声日志。
+        // 4008（平台限流）已有专属 60s 官方长退避，不计入风暴窗（避免双重惩罚误伤）。
+        if (code !== RATE_LIMITED_CLOSE_CODE) {
+          state.quickCloses.push(Date.now())
+          if (shouldEscalateReconnect(state.quickCloses, Date.now())) {
+            state.quickCloses.length = 0
+            console.error(`[qq-gateway] 快断连风暴（60s 内 ${5} 次以上）→ 冷却 ${STORM_COOLDOWN_MS / 60000} 分钟后重试；请排查凭据/intent/网络`)
+            scheduleReconnect(state, connect, STORM_COOLDOWN_MS)
+            return
+          }
         }
 
         scheduleReconnect(state, connect)

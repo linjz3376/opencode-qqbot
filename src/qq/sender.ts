@@ -9,6 +9,7 @@ import { sendC2CMessage, sendGroupMessage, getNextMsgSeq, type MessageResponse }
 import type { MessageContext } from "./types.js"
 import { normalizeOutboundMarkdown, matchFence, type FenceToken } from "../core/markdown.js"
 import { stripInteractionTags } from "../core/notices.js"
+import { stripScaffolding } from "../core/outbound-sanitize.js"
 
 // QQ 按 CommonMark 语义渲染：`\`+ASCII标点 被当作转义、反斜杠被吃掉
 //（2026-11-20 /status 实证：C:\Users\linjz\.openqq 被渲染成 linjz.openqq——
@@ -30,7 +31,10 @@ function escapeLineBackslashes(line: string): string {
 // Markdown 主路径: QQ 原生渲染标准 markdown（含表格/代码），故基本透传，仅做首尾清理
 // 与围栏归一（补未闭合 + 去空围栏对）——两者都会在 QQ 里变成空代码卡（2026-11-10 实证）。
 export function formatForQQMarkdown(text: string): string {
-  const normalized = normalizeOutboundMarkdown(text.trim())
+  // Z 项（2026-11-23）：先消毒脚手架块（thinking/system-reminder 等），再走归一——
+  // 顺序不可换：围栏保护在归一步，消毒须在围栏占位之前执行才刮不到代码块内。
+  const sanitized = stripScaffolding(text)
+  const normalized = normalizeOutboundMarkdown(sanitized.trim())
   // 围栏状态跟踪（normalizeOutboundMarkdown 已保证围栏配对，可安全切换）：
   // 围栏行与其内部内容逐字保留，不做反斜杠双写。
   let inFence = false

@@ -41,6 +41,7 @@ import { createMirror } from "./core/mirror.js"
 import { MessageQueue, laneKeyOf, laneScope, sessionIdOfLane, userIdOfLane, previewText, agoLabel, intentKeyOf } from "./core/message-queue.js"
 import { classifyProviderError, rescueText } from "./core/error-rescue.js"
 import { NOTICE } from "./core/notices.js"
+import { parseCronReminder, ReminderScheduler } from "./core/cron-reminders.js"
 
 const QUEUE_MAX = 20 // Q1：忙碌队列上限（学习 pi-qqbot queue.max 默认）
 // 2026-11-05：队列完成回执（"队列 #N 完成（剩余 M 条）"）默认关闭——批量排空时
@@ -928,6 +929,9 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   // 清槽必须两入口等价；clearIfResolved 保证桌面先决时 QQ 卡自动关闭（不双发）。
   // 多角色：本 gate 绑本角色 storageAppId（pending 落 roles/<appId>/），
   // 跨角色审批隔离=文件级+槽位 userId 级双保险，改造时不得合并。
+  // Y-1 cron 提醒调度器（2026-11-23）：进程内单次提醒，重启即失（与 openclaw 同口径）
+  const cronScheduler = new ReminderScheduler()
+
   const perm = createPermissionGate({
     client,
     sendReply,
@@ -1999,7 +2003,19 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           // 超长回合可能已超被动窗口：deliver 被动失败自动降级主动，答案不丢
           // 直答出口统一脱敏（DEF-qqbot-20261106-2）：与 history/mirror/form 同一脱敏器，
           // 防 AI 复述的密钥/令牌经直答气泡明文外泄。
-          if (extracted.text) turnDelivered = await safeDeliver(ctx, redactSecrets(extracted.text))
+          // Y-1 cron 提醒（2026-11-23 学习吸收 openclaw）：正文内嵌 QQBOT_PAYLOAD 标记
+          // → 注册一次性提醒并剥离标记；剥净为空则以确认句回执（不留脚手架痕迹）。
+          let outboundText = extracted.text
+          const cronHit = parseCronReminder(extracted.text, Date.now())
+          if (cronHit) {
+            const okCron = cronScheduler.schedule(ctx.userId, cronHit.atMs, cronHit.reminderText, (uid, t) => {
+              void safeDeliver(ctxForUser(uid), t).catch(() => {})
+            })
+            const when = new Date(cronHit.atMs).toLocaleString("zh-CN", { hour12: false })
+            outboundText = cronHit.cleanedText ||
+              (okCron ? `⏰ 好的，已设置提醒（${when}）：${cronHit.reminderText}` : "⚠️ 提醒设置失败（同时在册超限），请重试")
+          }
+          if (outboundText.trim()) turnDelivered = await safeDeliver(ctx, redactSecrets(outboundText))
         }
         // DEF-qqbot-20261110-9（2026-11-10 回归实证）：有正文但被 24h 去重拦截时
         // 不得记 answered——那是「台账假已答、用户侧零内容」。改记 error 并给用户交代。

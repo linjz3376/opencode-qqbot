@@ -13,6 +13,7 @@ import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync, readFileSy
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import type { MessageAttachment } from "./types.js"
+import { sttConfigured, sttTranscribe } from "../core/stt.js"
 
 export interface PromptFile {
   uri: string
@@ -91,6 +92,26 @@ export async function downloadQQAttachment(
   const isVoice = ctype.startsWith("audio/") || ctype === "voice" || ctype === "amr" || ctype.endsWith("/amr")
   if (isVoice && att.asr_refer_text?.trim()) {
     return { voice: att.asr_refer_text.trim() }
+  }
+  // AD（2026-11-23 学习吸收）：QQ 内置 ASR 无转写 → 外部 STT 回退（hermes 双级链同款）。
+  // 需 QQ_STT_BASE_URL+QQ_STT_API_KEY 齐配（QQ_STT_MODEL 默认 whisper-1）；未配置保持
+  // 既有「不支持」路径零变化。音频仍走 QQ 域白名单+token 重试，10MB 上限同图片口径。
+  if (isVoice && sttConfigured()) {
+    try {
+      if (!isAllowedDownloadHost(att.url)) return { failed: "下载域不在白名单" }
+      const name = att.filename || `voice-${Date.now()}.amr`
+      let res = await fetchWithTimeout(att.url, 15000)
+      if ((res.status === 401 || res.status === 403) && getAuth) {
+        res = await fetchWithTimeout(att.url, 15000, await getAuth())
+      }
+      if (!res.ok) return { failed: "语音下载失败" }
+      const buf = new Uint8Array(await res.arrayBuffer())
+      if (buf.byteLength > MAX_IMAGE_BYTES) return { failed: "语音超过 10MB 上限" }
+      const text = await sttTranscribe(buf, name, sttConfigured() as never)
+      return { voice: text }
+    } catch {
+      return { failed: "语音转写失败（外部 STT 未响应或识别为空）" }
+    }
   }
   const ext = extForImageMime(att.content_type || "")
   if (!ext) return { unsupported: att.content_type || att.filename || "未知类型" }
