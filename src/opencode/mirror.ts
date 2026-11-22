@@ -54,16 +54,23 @@ export function digestTurnKey(messages: SessionMessage[]): string | null {
 export function buildDigest(messages: SessionMessage[]): string | null {
   const ordered = [...messages].reverse()
 
+  // A 方案第三桶（owner 2026-11-23）：回合边界消息 type=synthetic = 引擎自主注入
+  // （goal 续跑/自动化）——既非 QQ 派发也非桌面输入，实证 shape（11-23 goal 会话
+  // 消息流）：continuation 为 synthetic 型 user 消息。此类回合标「🎯 目标续跑摘要」，
+  // 不再冒名「桌面」。
   let lastUserIdx = -1
+  let goalDriven = false
   for (let i = ordered.length - 1; i >= 0; i--) {
-    if (ordered[i].type === "user") {
+    const t = (ordered[i] as { type?: string }).type
+    if (t === "user" || t === "synthetic") {
       lastUserIdx = i
+      goalDriven = t === "synthetic"
       break
     }
   }
   if (lastUserIdx < 0) return null
 
-  const userText = ((ordered[lastUserIdx] as { text?: string }).text ?? "").trim()
+  const userText = goalDriven ? "" : ((ordered[lastUserIdx] as { text?: string }).text ?? "").trim()
 
   let answer = ""
   for (let i = ordered.length - 1; i > lastUserIdx; i--) {
@@ -77,7 +84,7 @@ export function buildDigest(messages: SessionMessage[]): string | null {
   }
   if (!answer) return null
 
-  const lines = ["📋 桌面问答摘要"]
+  const lines = [goalDriven ? "🎯 目标续跑摘要" : "📋 桌面问答摘要"]
   if (userText) lines.push(`🧑 ${clip(userText, USER_CLIP)}`)
   const clipLimit = answerClipLimit()
   if (clipLimit > 0) {
