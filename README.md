@@ -150,10 +150,14 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `/rename <name>` | Rename the current session (local title only) |
 | `/watch` / `/watch off` | Watch mode: tool-call milestones pushed live |
 | `/progress` | Manual progress query: tool/failure stats and in-flight status (local event source, zero model calls) |
-| `/queue` | Busy queue: view / `clear` / `drop <n>` (messages auto-queue FIFO while busy) |
+| `/queue` | Busy queue: view / `clear` / `drop <n>` / `<text>` explicit enqueue (busy messages steer into the running turn by default; `QQ_BUSY_DEFAULT=queue` restores auto-queuing) |
 | `/ledger` | Ledger view: snapshot / `check` reconcile / `settle <suffix> confirm` manual settle (orphans and in-flight traceable) |
-| `/mirror` | Digest mirror on/off |
+| `/mirror` | Session mirror: `/mirror` shows status; `on` / `off` to control |
 | `/send <path>` | Send a file/image from an allowlisted directory to QQ |
+| `/undo` | Official semantics: revert the last turn and restore files (receipt carries the reverted prompt; re-send after edits) |
+| `/amend <text>` | Steer a busy turn with supplementary instructions (official steer semantics); or `/queue <text>` to explicitly enqueue |
+| `/goal <objective>` | Official goal mode (engine built-in, v2.2.1+): the session drives itself until done or blocked; `/goal` for status, `pause`/`resume`/`clear` to control |
+| `/compact` `/redo` `/btw` | Official engine commands: compact session / restore an undo / side question (not written into session context) |
 
 ## Environment variables (optional tuning)
 

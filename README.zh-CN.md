@@ -146,10 +146,14 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `/rename <名>` | 重命名当前会话（仅本地会话标题，不改服务端标题） |
 | `/watch` / `/watch off` | 观察模式：工具调用里程碑实时推送 |
 | `/progress` | 手动进度查询：工具调用/失败统计、当前在途状态（本地事件源，零模型调用） |
-| `/queue` | 忙碌队列：查看 / `clear` 清空 / `drop <编号>` 定点删除（忙碌时消息自动 FIFO 排队） |
+| `/queue` | 忙碌队列：查看 / `clear` 清空 / `drop <编号>` 定点删除 / `<文本>` 显性入队（忙碌时消息默认 steer 并入当前任务，`QQ_BUSY_DEFAULT=queue` 可改回自动排队） |
 | `/ledger` | 台账视图：快照 / `check` 对账会话历史 / `settle <尾号> confirm` 人工结清（孤儿与在途可追溯） |
-| `/mirror` | 摘要镜像开关 |
+| `/mirror` | 摘要镜像：`/mirror` 查看状态；`on` 开 / `off` 关 |
 | `/send <路径>` | 把白名单目录内的文件/图片发到 QQ |
+| `/undo` | 对齐官方：撤销上一回合并恢复文件（回执带被撤指令，可改后重发） |
+| `/amend <补充>` | 忙时插话并入当前任务（官方 steer 语义）；也可 `/queue <文本>` 显式排队 |
+| `/goal <目标>` | 官方目标模式（引擎内置，v2.2.1+）：会话自主推进直到达成/卡住；`/goal` 查状态，`pause`/`resume`/`clear` 控制 |
+| `/compact` `/redo` `/btw` | 官方引擎命令直通：压缩会话 / 恢复撤销 / 侧问（不写会话上下文） |
 
 ## 环境变量（可选调优）
 
