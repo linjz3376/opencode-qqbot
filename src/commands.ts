@@ -137,7 +137,7 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
     case "status":
       return handleStatus(ctx, parsed.args, cmdCtx)
     case "watch": // 已退役（owner 2026-11-23 定案）：开关迁入 /status 驾驶舱
-      return "⌛ /watch 已退役：观察开关请用 /status watch on|off（盯当前绑定会话）。原 /watch <会话ID> 跨会话观察能力随之下线，需要请说一声"
+      return "⌛ /watch 已退役：观察开关请用 /status watch on|off（盯当前绑定会话）。原 /watch <会话ID> 跨会话观察能力已随命令下线（owner 2026-11-23 裁决不保留）"
     case "mirror": // 已退役：迁入 /status 驾驶舱
       return "⌛ /mirror 已退役：镜像开关请用 /status mirror on|off"
     case "sessions":
@@ -153,7 +153,7 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
     case "history":
       return handleHistory(ctx, parsed.args, cmdCtx)
     case "watch": // 已退役（owner 2026-11-23 定案）：开关迁入 /status 驾驶舱
-      return "⌛ /watch 已退役：观察开关请用 /status watch on|off（盯当前绑定会话）。原 /watch <会话ID> 跨会话观察能力随之下线，需要请说一声"
+      return "⌛ /watch 已退役：观察开关请用 /status watch on|off（盯当前绑定会话）。原 /watch <会话ID> 跨会话观察能力已随命令下线（owner 2026-11-23 裁决不保留）"
     case "send":
       return handleSend(ctx, parsed.args, cmdCtx)
     case "mirror": // 已退役：迁入 /status 驾驶舱
