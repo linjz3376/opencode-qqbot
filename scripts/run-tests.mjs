@@ -20,7 +20,9 @@ let failed = 0
 function runOne(file) {
   running++
   const t0 = Date.now()
-  const child = spawn(process.execPath, ["run", join("test", file)], { cwd: root, shell: false })
+  // DEF-qqbot-20261123-1 R1：--preload 测试守卫——QQ_DATA_DIR 未设时重定向独立临时目录
+  // （并发进程各拿各的 tmp，天然隔离），并断言 storageRoot 不落回 ~/.openqq（失败即停）。
+  const child = spawn(process.execPath, ["--preload", "test/guard.ts", "run", join("test", file)], { cwd: root, shell: false })
   const tail = []
   const push = (d) => {
     for (const line of d.toString().split("\n")) {

@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun scripts/run-tests.mjs",
     "hooks:install": "bun scripts/install-hooks.mjs",
-    "test:e2e": "bun run test/watch-history-e2e.ts && bun run test/d1-subagent-ask-e2e.ts && bun run test/d2-conflict-e2e.ts && bun run test/perm-e2e.ts && bun run test/perm-real-e2e.ts",
+    "test:e2e": "bun --preload ./test/guard.ts test/watch-history-e2e.ts && bun --preload ./test/guard.ts test/d1-subagent-ask-e2e.ts && bun --preload ./test/guard.ts test/d2-conflict-e2e.ts && bun --preload ./test/guard.ts test/perm-e2e.ts && bun --preload ./test/guard.ts test/perm-real-e2e.ts",
     "verify": "bun run typecheck && bun run test",
     "verify:full": "bun run verify && bun run test:e2e",
     "build:bundle": "bun build src/index.ts --outfile=dist/openqq-bot.js --target=node",

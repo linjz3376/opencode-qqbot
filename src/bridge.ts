@@ -1042,6 +1042,29 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     return Number.isFinite(n) && n >= 0 ? Math.floor(n * 1000) : 12_000
   })()
 
+  // DEF-qqbot-20261123-1 R2：失效映射驱逐——轮询 400/404 累计 3 次判死驱逐并落盘；
+  // 5xx/网络错误不驱逐（引擎重启窗口的合法映射靠这条不误伤）；任一成功即清零计数。
+  const pollFails = new Map<string, number>()
+  const httpStatusOf = (error: unknown): number | undefined => {
+    const m = error instanceof Error ? error.message : String(error)
+    const hit = /API\s+(\d{3})/.exec(m)
+    return hit ? Number(hit[1]) : undefined
+  }
+  const notePollResult = (userId: string, sessionId: string, ok: boolean, status?: number): void => {
+    const key = `${userId}|${sessionId}`
+    if (ok) {
+      pollFails.delete(key)
+      return
+    }
+    if (status !== 400 && status !== 404) return
+    const n = (pollFails.get(key) ?? 0) + 1
+    pollFails.set(key, n)
+    if (n >= 3) {
+      pollFails.delete(key)
+      sessions.evict(userId)
+    }
+  }
+
   function usersOfSession(sessionID: string): string[] {
     return sessions
       .all()
@@ -1057,7 +1080,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
 
   async function interactionTick(): Promise<void> {
     try {
-      // goal 状态轮询（下批批 2026-11-23）：piggyback 同一 12s tick，内部 5min 节流
+      // goal 状态轮询：piggyback 同一 12s tick，内部 5min 节流
       void goalWatchTick().catch(() => {})
       // 权限轮询兜底（SSE permission.asked 即时推送为主，轮询为断线兜底，双防线）。
       // DEF-qqbot-20261112-4（抄袭桌面形态）：改按会话端点（GET /session/:id/permission，
@@ -1066,7 +1089,18 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       {
         const seen = new Map<string, PermissionRequest>()
         const lists = await Promise.all(
-          sessions.all().map((entry) => client.permission.forSession(entry.sessionId).catch(() => undefined)),
+          sessions.all().map((entry) =>
+            client.permission.forSession(entry.sessionId).then(
+              (res) => {
+                notePollResult(entry.userId, entry.sessionId, true)
+                return res
+              },
+              (error: unknown) => {
+                notePollResult(entry.userId, entry.sessionId, false, httpStatusOf(error))
+                return undefined
+              },
+            ),
+          ),
         )
         for (const res of lists) {
           for (const req of res?.data ?? []) {
@@ -1088,7 +1122,18 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       // 表单轮询兜底（REST 表单通道，form-bridge 承接渲染/回执）
       {
         for (const entry of sessions.all()) {
-          const forms = (await client.form.list({ sessionID: entry.sessionId }).catch(() => undefined))?.data ?? []
+          const forms = (
+            await client.form.list({ sessionID: entry.sessionId }).then(
+              (res) => {
+                notePollResult(entry.userId, entry.sessionId, true)
+                return res
+              },
+              (error: unknown) => {
+                notePollResult(entry.userId, entry.sessionId, false, httpStatusOf(error))
+                return undefined
+              },
+            )
+          )?.data ?? []
           for (const form of forms) {
             // 会话级列表返回 Form.Info（无 state）；带 state 时只推 pending
             const state = (form as { state?: { status?: string } }).state

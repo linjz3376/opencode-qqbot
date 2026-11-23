@@ -40,8 +40,14 @@ export class SessionManager {
       // 手工编辑或 PowerShell Out-File 常带 BOM，JSON.parse 会炸——先剥掉
       const raw = readFileSync(this.storeFile, "utf8").replace(/^\uFEFF/, "")
       const parsed = JSON.parse(raw) as Record<string, UserSession>
+      let dropped = 0
       for (const [userId, session] of Object.entries(parsed)) {
-        if (session?.sessionId) this.sessions.set(userId, session)
+        // DEF-qqbot-20261123-1 R3：加载即校验 sessionId 形态，手工改坏/测试夹具在加载层拦截
+        if (session?.sessionId && /^ses_/.test(session.sessionId)) this.sessions.set(userId, session)
+        else dropped++
+      }
+      if (dropped > 0) {
+        console.warn(`[sessions] 加载时丢弃 ${dropped} 条非法映射（sessionId 形态不合法，不做整图回写保留）`)
       }
       if (this.sessions.size > 0) {
         console.log(`[sessions] 已从磁盘恢复 ${this.sessions.size} 个用户会话映射`)
@@ -215,6 +221,19 @@ export class SessionManager {
   // 枚举全部映射（摘要镜像订阅、会话→用户反查、interactionTick 权限分仓轮询用）
   all(): Array<{ userId: string; sessionId: string; directory?: string }> {
     return [...this.sessions.entries()].map(([userId, s]) => ({ userId, sessionId: s.sessionId, directory: s.directory }))
+  }
+
+  /**
+   * 驱逐失效映射（DEF-qqbot-20261123-1 R2）：轮询侧 400/404 累计 3 次判死后调用——
+   * 幽灵/失效绑定不驱逐则永久驻留并被 12s 轮询放大为无效请求风暴。返回是否真删了条目。
+   */
+  evict(userId: string): boolean {
+    const had = this.sessions.delete(userId)
+    if (had) {
+      this.saveSessions()
+      console.log(`[sessions] 驱逐失效映射 userId=${userId.slice(0, 8)}…（400/404 三连判死）`)
+    }
+    return had
   }
 
   // v2: 模型/agent 是 session 级（/prompt body 会被剥离），必须调 session 端点。
