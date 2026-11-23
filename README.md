@@ -23,7 +23,7 @@ Built for production, not just message bridging: a self-healing watchdog, an aud
 | Progress watching | `/watch` subscribes to tool-call milestones (🔧 command summary / exit code), throttled and merged |
 | **Permission approval** | OpenCode permission requests arrive as 🔐 four-button cards (allow once / always allow / reject / ignore). Taps take effect silently (the tapped button shows ✓/✗ via native visited state). The card also shows exactly which rule "always allow" will save. Text replies ("允许/总是/拒绝") work too |
 | **Form prompt bridge** | OpenCode Forms (single-choice / multi-choice / boolean / text) render as 📝 QQ cards — answer by tapping buttons or replying with a letter (A/B/C). Requests and forms from desktop-side turns are pushed as well (always-on watcher, 12s poll) |
-| Remote commands | `/new /cancel /status /sessions /history /models /agents /rename /watch /mirror /progress /queue /ledger /send` |
+| Remote commands | `/new /cancel /status /sessions /history /models /agents /rename /watch /mirror /progress /queue /ledger /send /undo /amend /goal /compact /redo /btw` |
 | Rich media | Receive images (native attachments go to the AI for vision); **receive voice** (QQ's built-in ASR transcribes to text into the prompt for free); **send images/files** (AI replies containing `QQ_SEND_FILE: <path>` or the `/send <path>` command; 20MB limit) |
 | Quote context | Long-press quote a message and ask — the AI sees the quoted content (our own replies are indexed too) |
 | Long tasks never lost | 30-min foreground timeout falls back to a background wait (SSE + polling, up to 24h); a 30-min stall triggers a proactive notice with status (stalled / unknown / finished-but-lost), the latest tool action, and how long there's been no progress |
@@ -152,7 +152,7 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `/progress` | Manual progress query: tool/failure stats and in-flight status (local event source, zero model calls) |
 | `/queue` | Busy queue: view / `clear` / `drop <n>` / `<text>` explicit enqueue (busy messages steer into the running turn by default; `QQ_BUSY_DEFAULT=queue` restores auto-queuing) |
 | `/ledger` | Ledger view: snapshot / `check` reconcile / `settle <suffix> confirm` manual settle (orphans and in-flight traceable) |
-| `/mirror` | Session mirror: `/mirror` shows status; `on` / `off` to control |
+| `/mirror` / `/mirror off` | Session mirror: desktop-session turns pushed to QQ live (📋 desktop turns / 🎯 goal continuations) |
 | `/send <path>` | Send a file/image from an allowlisted directory to QQ |
 | `/undo` | Official semantics: revert the last turn and restore files (receipt carries the reverted prompt; re-send after edits) |
 | `/amend <text>` | Steer a busy turn with supplementary instructions (official steer semantics); or `/queue <text>` to explicitly enqueue |

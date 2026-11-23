@@ -21,7 +21,7 @@
 | 进度观察 | `/watch` 订阅工具调用里程碑（🔧 命令摘要/退出码），节流合并推送 |
 | **权限审批** | opencode 发起权限请求 → QQ 收 🔐 四键卡片（允许一次/总是允许/拒绝/忽略），点按钮静默生效（点击后该按钮回显 ✓/✗，其余按钮保持原样），也可文字回复"允许/总是/拒绝" |
 | **选择弹窗桥接** | opencode 的 Form（选择/多选/布尔/文本）→ QQ 📝 卡片，点按钮或回字母（A/B/C）作答；桌面端回合发起的审批/表单**同样**推送（常驻监听，12s 轮询，bot 空闲也收得到） |
-| 远程指令 | `/new /cancel /status /sessions /history /models /agents /rename /watch /mirror /progress /queue /ledger /send` |
+| 远程指令 | `/new /cancel /status /sessions /history /models /agents /rename /watch /mirror /progress /queue /ledger /send /undo /amend /goal /compact /redo /btw` |
 | 富媒体 | 收图（原生附件给 AI 看图）；**收语音**（QQ 内置 ASR 免费转文字进 prompt）；**发图/发文件**（AI 回复含 `QQ_SEND_FILE: <路径>` 标记或 `/send <路径>` 指令，20MB 上限） |
 | 引用上下文 | 长按引用某条消息提问，AI 能感知被引用的内容（我方回复也会入索引缓存） |
 | 长任务不丢 | 前台 30min 超时 → 后台等待（SSE + 轮询，最长 24h）；停滞 30min 主动提醒（带「已停滞/状态不明/已终结未回传」状态位 + 最近工具动作 + 无进展时长） |
@@ -148,9 +148,9 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `/progress` | 手动进度查询：工具调用/失败统计、当前在途状态（本地事件源，零模型调用） |
 | `/queue` | 忙碌队列：查看 / `clear` 清空 / `drop <编号>` 定点删除 / `<文本>` 显性入队（忙碌时消息默认 steer 并入当前任务，`QQ_BUSY_DEFAULT=queue` 可改回自动排队） |
 | `/ledger` | 台账视图：快照 / `check` 对账会话历史 / `settle <尾号> confirm` 人工结清（孤儿与在途可追溯） |
-| `/mirror` | 摘要镜像：`/mirror` 查看状态；`on` 开 / `off` 关 |
+| `/mirror` / `/mirror off` | 摘要镜像：桌面会话回合实时推送到 QQ（📋 桌面回合 / 🎯 目标续跑） |
 | `/send <路径>` | 把白名单目录内的文件/图片发到 QQ |
-| `/undo` | 对齐官方：撤销上一回合并恢复文件（回执带被撤指令，可改后重发） |
+| `/undo` | 对齐官方：撤销上一回合，并恢复文件（回执带被撤指令，可改后重发） |
 | `/amend <补充>` | 忙时插话并入当前任务（官方 steer 语义）；也可 `/queue <文本>` 显式排队 |
 | `/goal <目标>` | 官方目标模式（引擎内置，v2.2.1+）：会话自主推进直到达成/卡住；`/goal` 查状态，`pause`/`resume`/`clear` 控制 |
 | `/compact` `/redo` `/btw` | 官方引擎命令直通：压缩会话 / 恢复撤销 / 侧问（不写会话上下文） |
