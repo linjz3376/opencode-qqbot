@@ -98,7 +98,7 @@ export function isSessionBusyError(error: unknown): boolean {
 }
 
 // E 闲置回收纯函数（导出供测试，2026-10-29）：返回应回收的闲置会话 id——
-// 超过 idleMs 无活动且未被 /watch 显式盯住的会话。
+// 超过 idleMs 无活动且未被观察（/status watch on）显式盯住的会话。
 export function evictableIdleSessions(
   lastActivity: ReadonlyMap<string, number>,
   watched: ReadonlySet<string>,
@@ -881,7 +881,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       saveWatchedMap(activeWatches, storageAppId ? roleFile("watch.json") : undefined) // R2-P1-3：落盘，重启恢复
       return [
         `👁 已开启观察：${sessionID}`,
-        "该会话的工具调用/执行完成会实时推送摘要，/watch off 停止。",
+        "该会话的工具调用/执行完成会实时推送摘要，/status watch off 停止。",
         "（≥2 秒节流合并；QQ 主动消息有日配额，被动窗口内不受限）",
       ].join("\n")
     },

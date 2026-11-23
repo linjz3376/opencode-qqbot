@@ -135,7 +135,11 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
     case "progress":
       return cmdCtx.progress.query(ctx.userId)
     case "status":
-      return handleStatus(ctx, cmdCtx)
+      return handleStatus(ctx, parsed.args, cmdCtx)
+    case "watch": // 已退役（owner 2026-11-23 定案）：开关迁入 /status 驾驶舱
+      return "⌛ /watch 已退役：观察开关请用 /status watch on|off（盯当前绑定会话）。原 /watch <会话ID> 跨会话观察能力随之下线，需要请说一声"
+    case "mirror": // 已退役：迁入 /status 驾驶舱
+      return "⌛ /mirror 已退役：镜像开关请用 /status mirror on|off"
     case "sessions":
       return handleSessions(ctx, cmdCtx)
     case "help":
@@ -148,12 +152,12 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
       return handleRename(ctx, parsed.args, cmdCtx)
     case "history":
       return handleHistory(ctx, parsed.args, cmdCtx)
-    case "watch":
-      return handleWatch(ctx, parsed.args, cmdCtx)
+    case "watch": // 已退役（owner 2026-11-23 定案）：开关迁入 /status 驾驶舱
+      return "⌛ /watch 已退役：观察开关请用 /status watch on|off（盯当前绑定会话）。原 /watch <会话ID> 跨会话观察能力随之下线，需要请说一声"
     case "send":
       return handleSend(ctx, parsed.args, cmdCtx)
-    case "mirror":
-      return handleMirror(parsed.args, cmdCtx)
+    case "mirror": // 已退役：迁入 /status 驾驶舱
+      return "⌛ /mirror 已退役：镜像开关请用 /status mirror on|off"
     default:
       return `不支持的命令：/${parsed.name}\n发送 /help 查看可用命令`
   }
@@ -315,7 +319,24 @@ export async function resolveStatusSessionTitle(
   return { title: session.title, sessionId: session.sessionId }
 }
 
-async function handleStatus(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
+async function handleStatus(ctx: MessageContext, args: string, cmdCtx: CommandContext): Promise<string> {
+  // 驾驶舱开关（owner 2026-11-23 定案）：/status watch|mirror on|off = 观察/镜像唯一开关
+  // 入口（/watch /mirror 命令已退役）；裸 /status 保持纯读。
+  const parts = args.trim().split(/\s+/).filter(Boolean)
+  if (parts.length > 0) {
+    const target = parts[0].toLowerCase()
+    const sw = parts[1]?.toLowerCase()
+    if ((target === "watch" || target === "mirror") && (sw === "on" || sw === "off")) {
+      if (target === "mirror") return cmdCtx.mirror.set(sw === "on")
+      if (sw === "on") {
+        const session = await cmdCtx.sessions.getOrCreate(ctx.userId)
+        return cmdCtx.watch.start(ctx.userId, session.sessionId, ctx)
+      }
+      return cmdCtx.watch.stop(ctx.userId)
+    }
+    return "用法：/status 查看状态｜/status watch on|off 观察开关｜/status mirror on|off 镜像开关"
+  }
+
   const sessionInfo = await resolveStatusSessionTitle(cmdCtx.sessions, cmdCtx.client, ctx.userId)
   const { providerId, modelId } = cmdCtx.sessions.getModel(ctx.userId)
   const agentId = cmdCtx.sessions.getAgent(ctx.userId)
@@ -338,6 +359,8 @@ async function handleStatus(ctx: MessageContext, cmdCtx: CommandContext): Promis
     `会话：${sessionInfo.sessionId ? `${sessionInfo.title ?? "未命名会话"} (${sessionInfo.sessionId})` : "未创建"}`,
     `模型：${providerId && modelId ? `${providerId} / ${modelId}` : "默认"}`,
     `Agent：${agentId ?? "默认"}`,
+    cmdCtx.watch.status(ctx.userId),
+    cmdCtx.mirror.status(),
     cmdCtx.queue.summary(ctx.userId),
     logLine,
   ].join("\n")
@@ -471,34 +494,6 @@ async function handleHistory(ctx: MessageContext, args: string, cmdCtx: CommandC
   return `📜 ${session.title ?? session.sessionId} · 最近 ${n} 轮\n\n${body}`
 }
 
-async function handleWatch(ctx: MessageContext, args: string, cmdCtx: CommandContext): Promise<string> {
-  const a = args.trim()
-  const lower = a.toLowerCase()
-
-  if (lower === "off" || lower === "stop") {
-    return cmdCtx.watch.stop(ctx.userId)
-  }
-
-  if (!a) {
-    const session = await cmdCtx.sessions.getOrCreate(ctx.userId)
-    return cmdCtx.watch.start(ctx.userId, session.sessionId, ctx)
-  }
-
-  if (/^ses_/i.test(a)) {
-    return cmdCtx.watch.start(ctx.userId, a, ctx)
-  }
-
-  return "用法：/watch 观察当前会话｜/watch <会话ID> 观察指定会话｜/watch off 停止观察"
-}
-
-function handleMirror(args: string, cmdCtx: CommandContext): string {
-  const a = args.trim().toLowerCase()
-  if (!a) return cmdCtx.mirror.status()
-  if (["on", "1", "开", "打开"].includes(a)) return cmdCtx.mirror.set(true)
-  if (["off", "0", "关", "关闭"].includes(a)) return cmdCtx.mirror.set(false)
-  return "用法：/mirror 查看状态｜/mirror on 开启｜/mirror off 关闭"
-}
-
 async function ensureSession(userId: string, cmdCtx: CommandContext): Promise<void> {
   await cmdCtx.sessions.getOrCreate(userId)
 }
@@ -611,27 +606,22 @@ export function buildHelpText(): string {
   return [
     "可用命令：",
     "/new - 创建新会话",
-    "/stop - 停止当前 AI 运行",
-    "/status - 查看服务器和当前会话状态",
+    "/cancel - 中止当前生成并清空忙碌队列",
+    "/status - 驾驶舱：服务器/会话/模型/Agent/观察/镜像/队列/日志；/status watch on|off 观察开关；/status mirror on|off 镜像开关",
     "/sessions - 列出历史会话并回复序号切换",
     "/help - 查看帮助",
-    "/model - 列出可用模型",
-    "/model <provider/model> - 切换模型",
-    "/agent - 列出可用 Agent",
-    "/agent <name> - 切换 Agent",
+    "/models - 列出可用模型｜/models <provider/model> 切换（session 级）",
+    "/agents - 列出可用 Agent｜/agents <name> 切换",
     "/rename <name> - 重命名当前会话",
     "/history [N] - 查看当前会话最近 N 轮历史（默认 3，最多 10）",
     "/send <路径> - 把白名单目录内的文件/图片发到 QQ",
-    "/watch - 观察当前会话实时过程（工具调用/完成会推送摘要）",
-    "/watch <会话ID> - 观察指定会话",
-    "/watch off - 停止观察",
     "/progress - 手动进度查询（工具调用/失败统计、在途状态，本地事件源零模型调用）",
     "/queue - 队列与台账对账视图；/queue all [页码] 全量；/queue clear 清空；/queue drop <编号> 定点删除；/queue <文本> 显性入队（steer 默认下排进 FIFO）",
     "/goal <目标> - 官方目标模式（引擎内置 v2.2.1+）；/goal 查状态；pause/resume/clear 控制",
     "/compact /redo /btw - 官方引擎命令直通（压缩会话 / 恢复撤销 / 侧问）",
     "/ledger - 台账快照（在途/孤儿/最近拒绝）；/ledger check 对账会话历史；/ledger settle <尾号> confirm 人工结清",
-    "/cancel - 同 /stop：中止当前 AI 运行并清空忙碌队列",
-    "/mirror [on|off] - 桌面问答摘要镜像开关（会话轮次完成推送问答摘要）",
+    "/undo - 对齐官方：撤销上一回合并恢复文件",
+    "/amend <补充> - 忙时插话并入当前任务（官方 steer 语义）",
     "",
     "权限审批（AI 请求权限时）：",
     "回复「允许」= 本次允许｜「总是」= 总是允许｜「拒绝」= 拒绝",
