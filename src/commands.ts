@@ -1,6 +1,6 @@
 ﻿// @input:  ./config, ./qq/types, ./opencode/* (client, sessions)
 // @output: isCommand, handleCommand, handlePendingSelection, CommandContext, PendingSelection
-// @pos:    根层 - 命令系统: /new /cancel /status /sessions /help /models /agents /rename /undo /amend
+// @pos:    根层 - 命令系统: /new /cancel /status /sessions /help /models /agents /rename /history /send /progress /queue /ledger /goal /compact /redo /btw /undo /amend
 import type { Config } from "./config.js"
 import type { MessageContext } from "./qq/types.js"
 import type { OpencodeClient, SessionMessage } from "./opencode/client.js"
@@ -620,11 +620,11 @@ export function buildHelpText(): string {
     "/goal <目标> - 官方目标模式（引擎内置 v2.2.1+）；/goal 查状态；pause/resume/clear 控制",
     "/compact /redo /btw - 官方引擎命令直通（压缩会话 / 恢复撤销 / 侧问）",
     "/ledger - 台账快照（在途/孤儿/最近拒绝）；/ledger check 对账会话历史；/ledger settle <尾号> confirm 人工结清",
-    "/undo - 对齐官方：撤销上一回合并恢复文件",
+    "/undo - 对齐官方：撤销上一回合，并恢复文件",
     "/amend <补充> - 忙时插话并入当前任务（官方 steer 语义）",
     "",
     "权限审批（AI 请求权限时）：",
-    "回复「允许」= 本次允许｜「总是」= 总是允许｜「拒绝」= 拒绝",
+    "点卡片按钮（允许一次/总是允许/拒绝/忽略），或回复「允许」= 本次允许｜「总是」= 总是允许｜「拒绝」= 拒绝",
     "（30 分钟无响应自动拒绝）",
   ].join("\n")
 }
