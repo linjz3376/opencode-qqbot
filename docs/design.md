@@ -1,4 +1,4 @@
-# OpenCode QQ Bot 系统设计文档
+﻿# OpenCode QQ Bot 系统设计文档
 
 > 本文档描述系统的功能模块与设计决策，是设计信息的唯一入口。
 > 维护约定：结构或机制变更时同步修订本文；不记录历史台账（时间线、做了/没做、版本迭代）。
@@ -95,7 +95,7 @@
 - 单进程 = 角色同生共死：一个角色未捕获异常带倒全部角色——装配循环按角色隔离 try/catch，单角色启动失败不拖垮其余角色（降级=该角色不在线，日志明示）。
 - `QQ_BOTS` 与 legacy 单角色键（`QQ_APP_ID` 等）并存时 `QQ_BOTS` 优先；legacy 键仅作未配 `QQ_BOTS` 的兜底，混用不会产生双角色。
 - `/sessions` 列出的是引擎全量会话（共享引擎单用户账号的固有结果）：任一角色可见其他角色/桌面端会话标题并可序号切入——已知风险，owner 2026-11-17 裁定保持现状不加过滤。
-- 运维面（watchdog/CLI 探活）当前按单 appId 口径实现，多角色探活为显式待办（§5.1）。
+- 运维面（watchdog/CLI 探活）按首角色口径实现（readAppId 含 `QQ_BOTS` 首角色回退），全角色逐个探活未实现（§5.1）。
 
 ## 3. 功能模块
 
@@ -114,7 +114,7 @@
 | 模块 | 职责 | 关键机制 |
 |---|---|---|
 | `client.ts` | REST 客户端 | V2 API 封装（Basic Auth）：steer prompt、会话 get/move、权限 reply、表单端点、interrupt |
-| `runner`（回合运行器） | 回合执行与流式聚合 | `delivery:"steer"` prompt 下发（声明前台在场 → 引擎审批门闭合）→ REST 消息轮询聚合（≈1s 档；SSE 仅承担 permission.asked/mirror/bgWait 通知）→ promptId 锚定回合边界（turnStateOf）→ 同会话串行性由每用户串行队列承担（每用户同时仅一个在途回合；他端并发由引擎 -32603 兜底拦截）→ 同会话新输入接管检测（SupersededError：被打断终态结算 + 完成抢救补投）→ 30min 只通知/24h 硬上限；会话加载携带自身 location.directory（缓存缺失经 REST 解析回填） |
+| `runner`（回合运行器） | 回合执行与流式聚合 | `delivery:"steer"` prompt 下发（声明前台在场 → 引擎审批门闭合）→ REST 消息轮询聚合（≈1s 档；SSE 仅承担 permission.asked/mirror/bgWait 通知）→ promptId 锚定回合边界（turnStateOf）→ 同会话串行性由每 lane 串行队列承担（lane 粒度见 §2.3，同 lane 同时仅一个在途回合；他端并发由引擎 -32603 兜底拦截）→ 同会话新输入接管检测（SupersededError：被打断终态结算 + 完成抢救补投）→ 30min 只通知/24h 硬上限；会话加载携带自身 location.directory（缓存缺失经 REST 解析回填） |
 | `sessions.ts` | 用户↔会话映射 | 持久化 `~/.openqq/sessions.json`；目录继承链；/new 一次性继承模型/Agent，切换不继承并回读服务端设置 |
 | `eventstream.ts` | 全局 SSE 订阅 | 单连接、按 sessionID 分流；`permission.asked` 即时推送（裁决前送达）；坏帧容错、退避重连、200KB 缓冲上限 |
 | `history.ts` | 历史渲染/脱敏 | 回复文本收集、redactSecrets |
@@ -136,16 +136,16 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 |---|---|
 | 调度 | 每 lane 串行（lane 粒度可配，见 §2.3；DEF-qqbot-20261112-01 修法=官方 per-peer 的会话级细腻化）；`pendingSelections`（/sessions /model 序号选择，TTL 60s）；首条消息问候；队列完成回执开关制（`QQ_QUEUE_RECEIPTS`，默认关） |
 | 回合边界 | prompt API 受理返回 promptId 精确锚定；前台直答/后台等待/补投共用 `turnStateOf` 判定，不依赖"下一条 user 消息"启发式 |
-| 后台等待 | `bgWait`：回合转后台后继续等结果（SSE + 1min 轮询兜底，P0-1 收紧自 5min）；停滞提醒（30min 节奏，stallSnapshot 纯函数先取快照再重置，闲置分钟/执行时长跨重启不丢）；后台 15min 进度心跳（BG_HEARTBEAT）；missingIdleDone 完成兜底判定；finalAnswerText 工作稿防误投；**流活性监督（2026-11-19 owner 裁定层）：锚定 assistant 最后活动超 `QQ_BG_STREAM_DEAD_MS`（默认 15min）且无 running 工具判死回合（死回合与长跑任务在「无进展」信号上同形，BG101A 实证：流停 3s 后 90 分钟假活），判死先 abort 后断点继续；**自动续作（同 owner 裁定：判死后同会话注入新回合重发原 prompt 由模型读历史续作，单任务上限 `QQ_BG_RESUME_MAX`=3 次，次数落盘 resumeCount 重启不洗白，超限 expired 放弃+放行队列）** |
+| 后台等待 | `bgWait`：回合转后台后继续等结果（SSE + 1min 轮询兜底，P0-1 收紧自 5min）；停滞提醒（30min 节奏，stallSnapshot 纯函数先取快照再重置，闲置分钟/执行时长跨重启不丢）；后台 15min 进度心跳（BG_HEARTBEAT）；missingIdleDone 完成兜底判定；finalAnswerText 工作稿防误投；**流活性监督（2026-11-19 owner 裁定层）：锚定 assistant 最后活动超 `QQ_BG_STREAM_DEAD_MS`（默认 15min）判死回合（running 工具在 `QQ_BG_TOOL_GRACE_MS` 豁免窗内保活、窗外照样判死；死回合与长跑任务在「无进展」信号上同形，BG101A 实证：流停 3s 后 90 分钟假活），判死先 abort 后断点继续；**自动续作（同 owner 裁定：判死后同会话注入新回合重发原 prompt 由模型读历史续作，单任务上限 `QQ_BG_RESUME_MAX`=3 次，次数落盘 resumeCount 重启不洗白，超限 expired 放弃+放行队列）**；**死态二分与去重提示（2026-11-23 owner 裁定）：纯流式死（dead）与死在工具内（dead-tool）均自动续作，dead-tool 续作 prompt 携带 deadToolResumeHint——点名在飞工具并声明其结果未知，模型重做写操作前须先只读核查副作用（查 git log/文件内容）；missingIdleDone 兜底带工具在飞守卫：边界内有 running 工具时不得按「有正文无 idle」误判完成（防健康长工具被交付半截答案）** |
 | 引用上下文 | context-buffer：引用解析 LRU 缓存（QQ 103 内嵌被引内容权威 + 本地缓存兜底）+ 出站回复登记（供"引用 AI 答案"命中） |
 | 错误救援 | error-rescue：provider 错误分类（402 余额/401 key 失效）+ 恢复路径话术（/model 切换/桌面更新 key），回合失败不甩原始错误 |
 | 审批 | SSE `permission.asked` **即时推送**（裁决前到达）→ 四键卡片（card-approval）→ REST permission reply 结算引擎 deferred（**reject 即 DeclinedError 释放回合，无需额外 cancel**）；真闸来自 steer 前台在场语义；无匹配裁决 fail-closed；拒绝后冲突即告警 |
 | 表单/提问 | REST form 端点 + SSE 事件（form-bridge 渲染/回执/台账；question-form 多题问答：跳过 vs 中止语义，30min TTL，旧挂起作废防串线） |
-| 镜像 watch | /watch 订阅会话：工具调用/完成摘要实时推送（≥2s 节流合并，主动消息日配额） |
+| 观察/镜像 | 开关唯一入口=/status 驾驶舱（`/status watch on|off` / `/status mirror on|off`，owner 2026-11-23 定案）：盯当前绑定会话的工具调用/完成摘要实时推送（≥2s 节流合并，主动消息日配额）；/watch /mirror 独立命令已退役（仅留迁移提示），跨会话观察能力正式下线（owner 裁「不用」） |
 | 媒体出站 | send-media：本地文件按标记发送（路径白名单） |
 | 服务健康 | SSE 断线退避重连 + `/status` 服务探活；单进程单连接，无子进程看护面 |
 
-命令面（`commands.ts`）：/new /stop|/cancel（彻底复位：清队列+abort+杀后台等待+结清+drain）/queue（支持 `all` 与裸页码）/ledger（子命令 orphan/rejected/inflight/settled + 尾号详情 + check + settle confirm，支持页码）/progress /status /sessions（带目录切换）/model /agent /rename /history /watch /send /mirror /help。命令门前置表情规范化（faceType 实体 + emoji 字符剥离，剥后形似命令以命令受理）。
+命令面（`commands.ts`）：/new /cancel（彻底复位：清队列+abort+杀后台等待+结清+drain）/status（驾驶舱：服务器/会话/模型/Agent/观察/镜像/队列/日志；观察与镜像开关唯一入口 `/status watch|mirror on|off`）/queue（支持 `all` 与裸页码；`/queue <文本>`=steer 默认下的显性入队动词，见 §3.4）/ledger（子命令 orphan/rejected/inflight/settled + 尾号详情 + check + settle confirm，支持页码）/progress /sessions（带目录切换）/models /agents（官方复数命名：列表或切换）/rename /history /send /goal（官方目标模式引擎直通 v2.2.1+：设定/查状态/pause/resume/clear；goal-watch 状态变化通知 + kickoff 🎯 归属标记随桥接层推送）/compact /redo /btw（官方引擎命令直通：压缩会话/恢复撤销/侧问）/undo（对齐官方：撤销上一回合并恢复文件，QQ 侧一次性 stage→commit 无暂存窗）/amend（忙时插话并入当前任务，官方 steer 语义）/help。命令门前置表情规范化（faceType 实体 + emoji 字符剥离，剥后形似命令以命令受理）。
 
 ### 3.4 消息管道与队列
 
@@ -155,6 +155,8 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 |---|---|---|
 | K1 | msgId 原子认领（跨进程文件锁） | 同一 msgId 重复受理 → 静默拒（QQ 重推/重放不产生二次执行） |
 | K2 | 内容指纹（稳定尾段随机段） | 窗口内同内容 → 短提示拒；窗口外重投按重发处理 |
+
+**忙时语义（2026-11-23 owner 裁定）**：会话忙时新消息**默认 steer**——以官方 steer 语义并入当前在途回合（引擎注入，不打断执行），并回执「已并入当前任务」；`QQ_BUSY_DEFAULT=queue` 可切回客户端 FIFO 排队旧行为。steer 默认下的**显性入队动词**=`/queue <文本>`：把文本显式排进 FIFO，当前任务跑完后按队列语义执行。附件消息不走 steer（回落排队）。
 
 **队列（message-queue）**：每 lane 一条 FIFO（lane 粒度 = `QQ_LANE_SCOPE`，见 §2.3；owner 2026-11-14 裁定缺省 `per-session-peer` = 官方 per-peer 串行的会话级细腻化），每 lane 上限 20；僵尸/长回合只堵所在 lane。**入队即锚定 sessionId 快照，drain 按锚定会话派发**——排队期间绑定切走，消息仍回锚定会话执行（跟原会话，不跟漂移的绑定）；无绑定消息落 null lane，派发时经 getOrCreate 解析并按解析结果补锁。两条独立语义同时呈现——
 
@@ -247,7 +249,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 - `/queue`：头两行固定三要素（`当前任务：…` / `队列：N/20 · 台账在途：M 条`）；队列逐条 `#票号 · 第M位 · age · 预览 · 状态`；异常区（孤儿/幽灵/最近拒绝）默认各 ≤8 条（`/queue all` 孤儿区放宽至页大小 20）；**空队列但有孤儿时禁止只回"队列：空"**。
 - `/queue all`：全量按时间升序，附 msgId/attemptId 尾 6 位 + stage。
 - `/ledger`：台账快照分页；子命令 orphan / rejected / `<尾号>` 详情（指纹+stage 时间线+lastError）/ check（逐条 classify 给修复建议）/ settle `<尾号>` confirm（人工结清）。
-- `/status`：五行现状 + 一行队列/台账摘要；日志路径 + 最后写入秒数（>5min 显示"日志停滞"）。
+- `/status`：驾驶舱视图——服务器/会话/模型/Agent/观察/镜像/队列/日志分区；观察与镜像开关唯一入口 `/status watch|mirror on|off`（独立 /watch /mirror 命令已退役，仅留迁移提示）；日志路径 + 最后写入秒数（>5min 显示"日志停滞"）。
 - 数字口径固定：`N/20`、`N 条`、`Nm 前`；本地时区；禁用 QQ 不支持的 markdown 表格（`·` 分隔）。
 
 ### 3.6 审批与交互
@@ -273,7 +275,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 ### 3.8 镜像与通知
 
-`mirror.ts`（摘要镜像订阅）、`linkwatch.ts`（链接/文件监视）、`notify-sink.ts` + `outbox.ts`
+`mirror.ts`（摘要镜像，开关在 /status 驾驶舱，盯当前绑定会话；跨会话观察已下线）、`linkwatch.ts`（链接/文件监视）、`notify-sink.ts` + `outbox.ts`
 （离线通知出队：TTL/日配额/幂等键，bot 不在时也能入队、恢复后送达）。
 
 ### 3.9 运维监督
@@ -307,7 +309,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 **不变约束**：绝不自杀（killPid=自身拒杀）；确认死亡才拉（严禁边杀边拉）；杀不掉（权限/系统级）→ 放弃本轮并留审计；监督者认领锁互斥（多入口不双开）。
 
-**矩阵输入（判活判据）**：心跳文件 5min 未刷新 = 事件循环僵死（缺失≠陈旧：启动中心跳未落盘视为未恢复，不判死，语义等效原 60s 启动宽限）；loop-lag 漂移遥测（>5s 落日志告警）；锁 mtime 30s 心跳独立证锁活性。强度账落盘 `supervisor.json`（重启时间戳滑动窗口）。遗留 `decideWatchdog`/`healOnce` 仅测试引用，生产唯一入口 superviseOnce。
+**矩阵输入（判活判据）**：心跳文件 5min 未刷新 = 事件循环僵死（缺失≠陈旧：启动中心跳未落盘视为未恢复，不判死，语义等效原 60s 启动宽限）；loop-lag 漂移遥测（>5s 落日志告警）；锁 mtime 30s 心跳独立证锁活性。强度账落盘 `supervisor.json`（重启时间戳滑动窗口）；**诛杀决策专线 `kills.log`**（JSONL 机器可解析：判据快照/动作升级链/后果强度账三段——诛杀归因免在全域日志里捞沙，与统一日志同口径轮转）。遗留 `decideWatchdog`/`healOnce` 仅测试引用，生产唯一入口 superviseOnce。
 
 ### 3.10 入口、CLI 与插件引导器
 
@@ -342,7 +344,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 `~/.openqq/`（数据目录，禁止放代码）：`.env`（密钥单点）、`sessions.json`（用户↔会话+目录映射）、
 `inflight.json`（在途台账）、`forms.json`、`gateway-state.json`、`supervisor.json`（重启强度账）、
-`heartbeat`、`*.lock`、`watchdog.log`、`bot.out.log`（+ 进程内双写；detached 拉起默认 `~/.openqq/openqq.log`，`QQ_LOG_FILE` 可覆盖）、`outbox.json`、`last-discovered.json`。
+`heartbeat`、`*.lock`、`watchdog.log`、`kills.log`（诛杀决策专线，见 §3.9.1）、`bot.out.log`（+ 进程内双写；detached 拉起默认 `~/.openqq/openqq.log`，`QQ_LOG_FILE` 可覆盖）、`outbox.json`、`last-discovered.json`。
 
 ### 5.1 多角色（单进程多 QQ bot 身份，2026-11-17 owner 裁定）
 
@@ -362,8 +364,8 @@ appId——每角色独立 token 刷新/会话映射/bridge/网关连接/白名�
 
 - 凭据/接入：`QQ_APP_ID` / `QQ_APP_SECRET`、`OPENCODE_BASE_URL`（缺省自动发现）/ `OPENCODE_PASSWORD`、`ALLOWED_USERS`、`QQ_SANDBOX=false`；多角色时以 `QQ_BOTS`（见 §5.1）为准，上述单角色键仅作 legacy 兜底；`QQ_LANE_SCOPE=per-session-peer|per-peer`（会话隔离粒度，见 §2.3，缺省 `per-session-peer`）
 - 工作区：`QQBOT_DEFAULT_CWD`（缺省=bot 进程 cwd）
-- 可调阈值：`QQ_WATCHDOG_INTERVAL_MS=300000`、`QQ_ORPHAN_MS=90000`（合法 5s 至 60min）、`QQ_REDISPATCH_MAX_AGE_MS=7200000`（0=关）、`OPENCODE_TURN_TIMEOUT_MINUTES=30`、`QQ_PERM_DEFER_MS=500`（0 至 10s）、`QQ_ACTIVE_DAILY_LIMIT=1000`（默认对齐 QQ 官方单关系日上限 1000 条/天，耗尽拒发并告警一次；测试造小配额用显式小值）、`QQ_ACTIVE_MINUTE_LIMIT=20`（官方分钟限速，滚动窗口等待式节流——超限睡到窗口滑动再发，不触发官方 40034100）、`QQ_PASSIVE_RIDE_WINDOW_MS=300000`、`QQ_STREAM_STAGGER_MS=300`（拼写容错见上行）、`QQ_BG_STREAM_DEAD_MS=900000`（后台流活性监督阈值：锚定 assistant 最后活动超 15min 且无 running 工具判死回合，先 abort 后 expired 结清+放行队列；合法域 1min 至 60min）、`QQ_BG_TOOL_GRACE_MS=3600000`（工具豁免窗：工具执行中 streamed 冻结属健康形态故豁免，但卡死工具 part 也恒 running（BG101A 实证），豁免只保活 60min、窗外照样判死；合法域 5min 至 4h）、`QQ_BG_RESUME_MAX=3`（死回合自动续作次数上限：判死后同会话注入新回合重发原 prompt 由模型读历史续作，重启后按台账 resumeCount 续算不洗白；0=关闭，合法域 0 至 5）、`QQ_REAPER_SCAN_SECONDS=60`、`QQ_REAPER_MIN_AGE_MS=2400000`（僵尸收割年龄门）、`QQ_REAPER_SILENCE_MS=1800000`（僵尸收割静默门）
-- 开关/路径：`QQ_ACK_RECEIPT`（默认关）、`QQ_QUEUE_RECEIPTS`（默认关）、`QQ_EVENT_PROBE`（默认关）、`QQ_LOG_FILE`（默认 openqq.log）、`QQ_INSTANCE_LOCK`（默认开）
+- 可调阈值：`QQ_WATCHDOG_INTERVAL_MS=300000`、`QQ_ORPHAN_MS=90000`（合法 5s 至 60min）、`QQ_REDISPATCH_MAX_AGE_MS=7200000`（0=关）、`OPENCODE_TURN_TIMEOUT_MINUTES=30`、`QQ_PERM_DEFER_MS=500`（0 至 10s）、`QQ_ACTIVE_DAILY_LIMIT=1000`（默认对齐 QQ 官方单关系日上限 1000 条/天，耗尽拒发并告警一次；测试造小配额用显式小值）、`QQ_ACTIVE_MINUTE_LIMIT=20`（官方分钟限速，滚动窗口等待式节流——超限睡到窗口滑动再发，不触发官方 40034100）、`QQ_PASSIVE_RIDE_WINDOW_MS=300000`、`QQ_STREAM_STAGGER_MS=300`（拼写容错见上行）、`QQ_BG_STREAM_DEAD_MS=900000`（后台流活性监督阈值：锚定 assistant 最后活动超 15min 判死回合——running 工具在豁免窗内保活；判死先 abort 后自动续作（上限 `QQ_BG_RESUME_MAX`，超限才 expired 结清+放行队列）；合法域 1min 至 60min）、`QQ_BG_TOOL_GRACE_MS=3600000`（工具豁免窗：工具执行中 streamed 冻结属健康形态故豁免，但卡死工具 part 也恒 running（BG101A 实证），豁免只保活 60min、窗外照样判死；合法域 5min 至 4h）、`QQ_BG_RESUME_MAX=3`（死回合自动续作次数上限：判死后同会话注入新回合重发原 prompt 由模型读历史续作，重启后按台账 resumeCount 续算不洗白；0=关闭，合法域 0 至 5）、`QQ_REAPER_SCAN_SECONDS=60`、`QQ_REAPER_MIN_AGE_MS=2400000`（僵尸收割年龄门）、`QQ_REAPER_SILENCE_MS=1800000`（僵尸收割静默门）
+- 开关/路径：`QQ_BUSY_DEFAULT=steer|queue`（忙时语义，见 §3.4，缺省 steer）、`QQ_ACK_RECEIPT`（默认关）、`QQ_QUEUE_RECEIPTS`（默认关）、`QQ_EVENT_PROBE`（默认关）、`QQ_LOG_FILE`（默认 openqq.log）、`QQ_INSTANCE_LOCK`（默认开）
 
 ## 6. 部署与验证
 
@@ -374,13 +376,3 @@ appId——每角色独立 token 刷新/会话映射/bridge/网关连接/白名�
 - **验证门禁**：`bun run verify`（tsc + 全套件）全绿才可提交部署；部署后必复验日志/心跳/台账。
 - **日志规范**：结构化 `k=v` 行；队列/台账关键动作固定前缀（`[queue]`/`[journal]`）；文件日志常开 + 轮转。
 
-## 修订记录
-
-| 日期 | 章节 | 内容 | 依据 |
-|---|---|---|---|
-| 2026-11-12 | §3.6 | DEF-qqbot-20261112-3 双防线同请求收养不重复推卡；交互监听兜底改按会话端点（抄袭桌面形态：引擎按会话实例路由，零 directory 簿记）；闸门恢复 500ms（owner 当轮明示改 .env）；挂起槽计时器 unref 修测试链挂死 | ZERO3 实测双卡实证（bot.out.log 11:37:01-02 同请求两卡）；verify 46 套件 EXIT=0 |
-| 2026-11-12 | §3.4 / §4 | 新增「官方对齐口径」：P0 SDK 中间件链对照（concurrencyGuard 串行/messageFilter 去重/有界队列/被动窗），同构·超集·增强·差异四级分类，差异项入学习 backlog；新增「官方对齐基准」决策行 | openclaw-qqbot@8998881 / dsh-qqbot@0ddf232e / @tencent-connect/qqbot-nodejs@1.0.5 源码考据（快照 %TEMP%\opencode\qqbot-sync\20261112-104047） |
-| 2026-11-12 | §3.6 / §4 | 新增「权限实例上下文」考据行（per-location 待审仓 + location 解析三规则 + 桌面 auto-approve 机制）；权限 REST 全链携带 `x-opencode-directory`；延迟闸反查同实例化；新增「完成判定同口径」决策（textCompleted） | DEF-qqbot-20261112-1/2；opencode v2.2.6 源码考据（sst/opencode tag dc2ffcf：core/permission.ts、server/handlers/permission.ts、server/location.ts、app/session/requests/auto-approve.ts、core/session/message-updater.ts） |
-| 2026-11-14 | §3.3 / §3.4 / §3.5 / §4 | 队列按 (用户,会话) lane（官方 per-peer 的会话级细腻化，owner 当轮）；入队锚定 sessionId 快照+drain 按锚定派发；新增「出站推送门」（锚定≠当前绑定不推）；running 口径改 per-lane；重启恢复按 lane 归组；DEF-qqbot-20261112-01 修法①落地 | owner 当轮「修」原话三口径；精读 design+bridge 实证（msgQueue/busyUsers/drain 全 per-user，1221 行注=派发时回填） |
-| 2026-11-14 | §3.4 / §4 | 新增「僵尸收割」（DEF-qqbot-20261112-02 修法②）：60s 独立巡检+三级门（年龄/引擎探针/静默）+L1 补投/L2 单会话 abort+动作前 attemptId 重验+per-lane 冷却；决策核 core/zombie-reaper.ts 纯函数 | owner 当轮「修。也是先修设计再修代码」；11-12 实证 busy 悬挂 27min（前台时限+bgWait 双层漏过） |
-| 2026-11-14 | §3.4 / §4 | 「全修剩下缺陷」批六笔（owner 当轮授权）：① /send 文件级拒绝名单——密钥/凭据类（.env*/pem/key/pfx/id_*/credentials）拒绝优先于目录白名单，DEF-03 穿越投递根治 ② 派发悬挂哨兵——stage=dispatched 无 promptId 超 `QQ_DISPATCH_STALL_MS`（120s）→ 引擎探针（404=幽灵 reap-ghost），DEF-04 队列冻结根治 ③ 审批卡慢管道途中清槽防线——发送前复查在单线程语义下是死守卫（推卡与清槽同 tick 不可交错，如实移除）：卡在途不可撤（平台无撤回 API）→ 死卡日志归因；文字降级前复查槽位，不发迟到死菜单（DEF-P5）④ /model 存在性校验——listModels 命中才切换（DEF-01 假模型误导根治）⑤ 重启恢复容量拒收单独归因 queue-full+准确文案（P6 误标根治）⑥ 纯表情有据提示——isEmojiOnlyContent→ctx.emojiOnly→丢弃点回执（DEF-1111-P2 owner 11-12 裁定落地） | owner 当轮「全修剩下缺陷」；DEF-qqbot-20261113-P1（ask fail-open）为引擎侧落盘隐式放行，不在 bot 修码射程——判别取证/上游 issue 另案；F1 观察项（排队中 /命令绕门）属行为变更留 owner 裁定 |
