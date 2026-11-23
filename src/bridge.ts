@@ -42,6 +42,11 @@ import { MessageQueue, laneKeyOf, laneScope, sessionIdOfLane, userIdOfLane, prev
 import { classifyProviderError, rescueText } from "./core/error-rescue.js"
 import { NOTICE } from "./core/notices.js"
 import { parseCronReminder, ReminderScheduler } from "./core/cron-reminders.js"
+// 回合修正域纯决策（2026-11-23 拆分切片）——bridge 再导出保测试导入路径兼容
+export {
+  resolveBusyMode, buildAmendPrompt, selectAmendEntry, lastUserMessageId, messageTextOf, parseGoalState,
+} from "./core/turn-correction.js"
+import { resolveBusyMode, buildAmendPrompt, selectAmendEntry, lastUserMessageId, messageTextOf, parseGoalState } from "./core/turn-correction.js"
 
 const QUEUE_MAX = 20 // Q1：忙碌队列上限（学习 pi-qqbot queue.max 默认）
 // 2026-11-05：队列完成回执（"队列 #N 完成（剩余 M 条）"）默认关闭——批量排空时
@@ -247,57 +252,13 @@ export function resumeDecision(resumeCount: number, max: number): "resume" | "gi
 
 // ===== /amend（steer 降级版，2026-11-22 owner 裁定参考 Hermes update_prompt）=====
 
-/**
- * 忙时投递默认（纯函数供测试）：owner 2026-11-23 裁定「默认对齐官方 TUI——忙时
- * Enter steers」——steer=新消息并入在途回合；queue=客户端 FIFO 排队（旧行为）。
- * 默认 steer；显式 "queue" 切回排队；非法值回退 steer（官方语义优先）。
- */
-export function resolveBusyMode(envValue: string | undefined): "steer" | "queue" {
-  return envValue?.trim().toLowerCase() === "queue" ? "queue" : "steer"
-}
-
-/** 并入 prompt 构造（纯函数供测试）：原 prompt + 补充指令块，模型读历史接着做。 */
-export function buildAmendPrompt(original: string, amendment: string): string {
-  return `${original}\n\n【补充指令】${amendment.trim()}`
-}
-
-/**
- * 并入目标选择（纯函数供测试）：本用户该会话最新一条已落 promptId 且有原文的
- * 在途回合（stage 不限——running/background/dispatched 均可并入；queued 无
- * promptId 自然落选）。找不到=不可并入（桌面端发起/已结清）。
- */
-export function selectAmendEntry(
-  entries: Array<Pick<import("./core/inflight-journal.js").InflightEntry, "userId" | "sessionId" | "promptId" | "text" | "at" | "msgId" | "attemptId">>,
-  userId: string,
-  sessionId: string,
-): (typeof entries)[number] | undefined {
-  return entries
-    .filter((e) => e.userId === userId && e.sessionId === sessionId && e.promptId && e.text)
-    .sort((a, b) => b.at - a.at)[0]
-}
+// 2026-11-23 拆分切片：本域纯决策函数收敛于 core/turn-correction.ts（bridge 再导出，
+// 测试导入路径兼容）。下方仅保留域注释。
 
 // ===== 会话回滚（官方 /undo 对齐批，2026-11-23 owner 令「对上opencode桌面端，开工」）=====
 // 基准=opencode.ai/docs/snapshots：/undo=stage 边界→恢复文件→prompt 回盒，提交编辑后
 // prompt 时才 commit；/redo=取消暂存；会话运行中拒绝 revert。QQ 侧 /undo 为一次性
 // stage→commit（无暂存窗，故 /redo 无对象——如实不做，不做半成品语义）。
-
-/** 取会话消息列表中最后一条 user 消息的 id（回滚边界；纯函数供测试）。 */
-export function lastUserMessageId(msgs: Array<{ id?: string; type?: string }>): string | null {
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].type === "user" && msgs[i].id) return msgs[i].id as string
-  }
-  return null
-}
-
-/** 从消息体提取可读文本（user 消息 content 可能为字符串或 text 块数组；纯函数供测试）。 */
-export function messageTextOf(m: { content?: unknown }): string {
-  const c = m.content
-  if (typeof c === "string") return c
-  if (Array.isArray(c)) {
-    return c.map((p) => (typeof p === "object" && p !== null && "text" in p ? String((p as { text?: unknown }).text ?? "") : "")).join("")
-  }
-  return ""
-}
 
 /**
  * 流活性判定（纯函数供测试）。msgs=同一次后台探知的拉取结果；
@@ -932,6 +893,52 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   // Y-1 cron 提醒调度器（2026-11-23）：进程内单次提醒，重启即失（与 openclaw 同口径）
   const cronScheduler = new ReminderScheduler()
 
+  // ===== goal 状态机（2026-11-23 下批批）=====
+  // goalStates：会话 -> 最近已知 goal 状态（transition 检测用，5min 轮询 + 主动通知）。
+  // goalKickoffs：会话 -> 设定时的目标原文（kickoff 轮归属的 bot 侧标记——引擎不给
+  // kickoff user 消息打标，11-23 探测实证；用「边界 user 文本==目标原文」近似识别）。
+  const goalStates = new Map<string, { state: string; at: number; notified: boolean }>()
+  const goalKickoffs = new Map<string, { text: string; at: number }>()
+  const GOAL_WATCH_INTERVAL_MS = 5 * 60_000
+  const GOAL_NOTIFY_DEDUP_MS = 30 * 60_000
+  let lastGoalWatchAt = 0
+
+  /** goal 状态轮询：每 5min 对绑定会话查一次 /goal 状态，paused/done 转变即时推 QQ
+   *  （下批批 owner 2026-11-23：状态变化不再静默）。失败静默，下轮再探。 */
+  async function goalWatchTick(): Promise<void> {
+    if (Date.now() - lastGoalWatchAt < GOAL_WATCH_INTERVAL_MS) return
+    lastGoalWatchAt = Date.now()
+    for (const s of sessions.all()) {
+      const prev = goalStates.get(s.sessionId)
+      // 只盯「曾见过 active」的会话——从未设过 goal 的会话每 5min 白查一次无意义
+      if (!prev) continue
+      try {
+        let raw: string | null = null
+        try {
+          const res = await client.session.command({ path: { id: s.sessionId }, body: { name: "goal", text: "" } })
+          raw = JSON.stringify(res)
+        } catch (error) {
+          raw = (error as { body?: string }).body ?? null
+        }
+        const parsed = raw ? parseGoalState(raw) : null
+        if (!parsed) continue
+        const transitionToTerminal = (parsed.state === "paused" || parsed.state === "done")
+          && prev.state === "active"
+          && (!prev.notified || Date.now() - prev.at > GOAL_NOTIFY_DEDUP_MS)
+        if (parsed.state === "active") {
+          goalStates.set(s.sessionId, { state: "active", at: Date.now(), notified: false })
+        } else if (transitionToTerminal) {
+          goalStates.set(s.sessionId, { state: parsed.state, at: Date.now(), notified: true })
+          const head = parsed.state === "done" ? "✅ 目标已达成" : "🎯 目标已暂停"
+          void safeDeliver(ctxForUser(s.userId), `${head}（${s.sessionId}）\n${parsed.message.slice(0, 400)}\n——发 /goal 看详情；resume 继续 / clear 放弃`).catch(() => {})
+          console.log(`[goal-watch] 状态转变通知 user=${s.userId.slice(0, 8)}… state=${parsed.state}`)
+        }
+      } catch {
+        /* 单会话探测失败不阻断整轮 */
+      }
+    }
+  }
+
   const perm = createPermissionGate({
     client,
     sendReply,
@@ -969,6 +976,17 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       if (!hit) return digest
       registerCron(userId, hit)
       return hit.cleanedText // 剥净为空 → 镜像侧跳过投递（注册即全部语义）
+    },
+    // kickoff 归属 bot 侧标记（2026-11-23）：引擎不给 kickoff user 消息打 goal 标——
+    // 用「边界 user 文本==设定时目标原文」近似识别第三桶；30min TTL 自动过期。
+    goalObjectiveOf: (sessionID) => {
+      const k = goalKickoffs.get(sessionID)
+      if (!k) return undefined
+      if (Date.now() - k.at > 30 * 60_000) {
+        goalKickoffs.delete(sessionID)
+        return undefined
+      }
+      return k.text
     },
   })
 
@@ -1039,6 +1057,8 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
 
   async function interactionTick(): Promise<void> {
     try {
+      // goal 状态轮询（下批批 2026-11-23）：piggyback 同一 12s tick，内部 5min 节流
+      void goalWatchTick().catch(() => {})
       // 权限轮询兜底（SSE permission.asked 即时推送为主，轮询为断线兜底，双防线）。
       // DEF-qqbot-20261112-4（抄袭桌面形态）：改按会话端点（GET /session/:id/permission，
       // 引擎按会话自身实例路由）逐绑定会话轮询——零 directory 簿记；只有绑定会话才
@@ -1646,6 +1666,17 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       // 引擎 command 端点对多数命令不回文本——给分命令的诚实兜底（真机实证 11-23：
       // /goal 设完静默执行多轮，用户误以为没生效）
       if (name === "goal") {
+        const t = text.trim()
+        if (/^clear/i.test(t)) {
+          goalKickoffs.delete(session.sessionId)
+          goalStates.delete(session.sessionId)
+        } else if (t && !/^(pause|resume|status)?$/i.test(t)) {
+          // 设定新目标：登记 kickoff 原文（镜像归属 bot 侧标记）+ 状态机入 active
+          goalKickoffs.set(session.sessionId, { text: t, at: Date.now() })
+          goalStates.set(session.sessionId, { state: "active", at: Date.now(), notified: false })
+        } else if (/^resume/i.test(t)) {
+          goalStates.set(session.sessionId, { state: "active", at: Date.now(), notified: false })
+        }
         return "✅ goal 已执行（引擎无文本回执）。查状态再发 /goal；控制用 /goal pause|resume|clear。设定目标后会话自主续跑，进展会以普通回复推送到这里"
       }
       return `✅ /${name} 已执行（引擎无文本回执）`
@@ -1653,18 +1684,14 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       const msg = toErrorMessage(error)
       // 引擎把 goal 状态（paused/done 的完成度审计）走 500 CommandExecutionError
       // 通道返回（真机实证 11-23）——非真失败：优先读 error.body 的完整 JSON
-      //（日志 excerpt 有 200 字截断，长审计会切断 JSON 使正则失配），按状态报告呈现。
+      //（日志 excerpt 有 200 字截断，长审计会切断 JSON 使状态解析失配），统一走
+      // parseGoalState 按状态报告呈现。
       if (name === "goal") {
         const full = (error as { body?: string }).body ?? msg
-        const trimmed = full.trim()
-        const jsonText = trimmed.startsWith("{") ? trimmed : (/\{[\s\S]*"message"[\s\S]*\}/.exec(full)?.[0] ?? "")
-        if (jsonText) {
-          try {
-            const j = JSON.parse(jsonText) as { message?: string; command?: string }
-            if (j.message) return `📋 目标状态（goal ${j.command ?? ""}）：\n${j.message}`
-          } catch {
-            /* body 非完整 JSON → 落原失败路径 */
-          }
+        const parsed = parseGoalState(full)
+        if (parsed) {
+          if (parsed.state === "active") goalStates.set(session.sessionId, { state: "active", at: Date.now(), notified: false })
+          return `📋 目标状态（goal）：\n${parsed.message}`
         }
       }
       return `引擎命令执行失败（/goal 需 OpenCode ≥ 2.2.1）：${msg}`
@@ -2531,7 +2558,7 @@ export function formatMilestone(ev: V2Event, calls?: Map<string, string>): strin
 
 // 里程碑投递目标（纯函数，供单测）：只认 /watch 显式订阅（activeWatches）。
 // 2026-10-14 拍板：推不推完全由用户显式控制；sessionSubs（自身回合/镜像等
-// 来源）不再隐式携带里程碑，避免"没开 /watch 却在收"的噪声。
+// 来源）不再隐式携带里程碑，避免"没开观察（/status watch on）却在收"的噪声。
 export function milestoneTargets(
   activeWatches: ReadonlyMap<string, string>,
   sessionID: string,

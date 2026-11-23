@@ -51,13 +51,13 @@ export function digestTurnKey(messages: SessionMessage[]): string | null {
 }
 
 // 构建最近一轮问答的摘要卡；返回 null = 无可镜像正文。
-export function buildDigest(messages: SessionMessage[]): string | null {
+export function buildDigest(messages: SessionMessage[], goalObjective?: string): string | null {
   const ordered = [...messages].reverse()
 
   // A 方案第三桶（owner 2026-11-23）：回合边界消息 type=synthetic = 引擎自主注入
   // （goal 续跑/自动化）——既非 QQ 派发也非桌面输入，实证 shape（11-23 goal 会话
-  // 消息流）：continuation 为 synthetic 型 user 消息。此类回合标「🎯 目标续跑摘要」，
-  // 不再冒名「桌面」。
+  // 消息流）：continuation 为 synthetic 型 user 消息。此类回合标「🎯 目标续跑摘要」。
+  // kickoff 轮（引擎不打标）：边界 user 文本==goal 设定原文时同标（bot 侧标记近似）。
   let lastUserIdx = -1
   let goalDriven = false
   for (let i = ordered.length - 1; i >= 0; i--) {
@@ -70,7 +70,13 @@ export function buildDigest(messages: SessionMessage[]): string | null {
   }
   if (lastUserIdx < 0) return null
 
-  const userText = goalDriven ? "" : ((ordered[lastUserIdx] as { text?: string }).text ?? "").trim()
+  const boundaryMsg = ordered[lastUserIdx] as { text?: string; content?: Array<{ type?: string; text?: string }> }
+  const userText = goalDriven
+    ? ""
+    : ((boundaryMsg.text ?? (boundaryMsg.content ?? []).filter((p) => p.type === "text").map((p) => p.text ?? "").join("")) ?? "").trim()
+  if (!goalDriven && goalObjective && userText && userText === goalObjective.trim()) {
+    goalDriven = true
+  }
 
   let answer = ""
   for (let i = ordered.length - 1; i > lastUserIdx; i--) {

@@ -63,6 +63,9 @@ export interface MirrorDeps {
   /** A 方案（2026-11-23）：摘要投递前过 cron 标记钩——注册提醒并返回剥净正文。
    *  桌面端发起的回合也会输出 QQBOT_PAYLOAD，不经此钩会原样泄漏到 QQ。 */
   onDigest?: (userId: string, digest: string) => string
+  /** kickoff 归属 bot 侧标记（2026-11-23）：goal 设定时的目标原文——buildDigest
+   *  对「边界 user 文本==目标原文」的回合标 🎯（引擎不给 kickoff 打标的近似识别）。 */
+  goalObjectiveOf?: (sessionID: string) => string | undefined
 }
 
 export interface Mirror {
@@ -167,7 +170,7 @@ export function createMirror(deps: MirrorDeps): Mirror {
         if (turnKey) mirroredTurns.set(sessionID, turnKey)
         return
       }
-      const digest = buildDigest(messages)
+      const digest = buildDigest(messages, deps.goalObjectiveOf?.(sessionID))
       if (!digest) {
         console.log(`[mirror] 跳过：无可摘要内容（空轮/纯工具轮）session=${sessionID}`)
         return
