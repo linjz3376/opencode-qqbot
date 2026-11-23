@@ -203,8 +203,11 @@ export function missingIdleDone(
   lastProgressAt: number,
   now: number,
   graceMs: number = MISSING_IDLE_GRACE_MS,
+  /** 工具在飞守卫（2026-11-23 同族审计）：边界内有 running 工具时不得按「有正文无 idle」判完成——
+   * 健康长工具（豁免窗内）同样沉默，误结会交付半截答案并丢失真实结果。 */
+  hasRunningTool = false,
 ): boolean {
-  return !turn.hasIdle && Boolean(turn.text) && now - lastProgressAt >= graceMs
+  return !turn.hasIdle && !hasRunningTool && Boolean(turn.text) && now - lastProgressAt >= graceMs
 }
 
 // ===== 后台流活性监督（2026-11-19 owner 裁定：与后台探知同 tick 执行）=====
@@ -235,9 +238,23 @@ export function resolveToolGraceMs(envValue: string | undefined): number {
   return Number.isFinite(raw) && raw >= 300_000 && raw <= 14_400_000 ? Math.floor(raw) : BG_TOOL_GRACE_MS_DEFAULT
 }
 
-// dead-tool（2026-11-23 分级续作闸新增）=死在工具内：running 工具 part 超豁免窗且流陈旧达判死阈值——
-// 最后一步写操作执行结果未知（可能已生效），不自动续作交人工裁决（参考 Open Agent API 账侧保守设计）。
+// dead-tool =死在工具内：running 工具 part 超豁免窗且流陈旧达判死阈值。处置与纯流式死同为自动续作
+// （owner 2026-11-23 裁定：拦停等人工违背无人值守原设计——question 工具悬挂等常见形态重试零风险），
+// 但续作 prompt 必须携带 deadToolResumeHint（哪个工具在飞、结果未知），模型重做写操作前先只读核查。
 export type StreamLiveness = "alive" | "dead" | "dead-tool" | "none"
+
+/** 流活性探针：状态 + 边界内 running 工具名（去重提示的靶点；亦供完成判据的工具在飞守卫）。 */
+export interface StreamProbe {
+  state: StreamLiveness
+  runningTools: string[]
+}
+
+/** 断点续作去重提示（owner 2026-11-23 裁定）：携带模型本没有的事实——哪个工具在飞、其结果未知；
+ *  与泛泛「注意去重」不同，模型可据此针对性核查。空名单=无提示。纯函数供测试。 */
+export function deadToolResumeHint(runningTools: string[]): string {
+  if (runningTools.length === 0) return ""
+  return `\n\n【断点续作提示】上一轮在执行工具 ${runningTools.join("、")} 时中断，该工具执行结果未知（可能已生效）。重做任何写操作前，请先用只读手段核实副作用是否已发生（如查 git log、文件内容），避免重复执行。`
+}
 
 /** 续作上限解析（纯函数供测试）：env QQ_BG_RESUME_MAX，默认 3 次；0=关闭自动续作；合法域 0 至 5。 */
 export function resolveResumeMax(envValue: string | undefined): number {
@@ -276,9 +293,20 @@ export function streamLiveness(
   /** 工具豁免窗（默认 60min）：工具执行中 streamed 冻结属健康，但卡死工具 part 也恒 running——豁免有界。 */
   toolGraceMs: number = BG_TOOL_GRACE_MS_DEFAULT,
 ): StreamLiveness {
+  return streamLivenessDetail(msgs, promptId, baseline, now, deadMs, toolGraceMs).state
+}
+
+export function streamLivenessDetail(
+  msgs: SessionMessage[],
+  promptId: string,
+  baseline: number,
+  now: number,
+  deadMs: number,
+  toolGraceMs: number = BG_TOOL_GRACE_MS_DEFAULT,
+): StreamProbe {
   const turn = turnStateOf(msgs, promptId, baseline)
   // 完成判据优先：有 idle 或全部 assistant 已终结 → 不归活性监督
-  if (turn.hasIdle) return "alive"
+  if (turn.hasIdle) return { state: "alive", runningTools: [] }
   const ordered = [...msgs].sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
   // 回合边界（与 turnStateOf 同构：promptId 精确锚 > 200ms 时间锚）
   let startIdx = 0
@@ -298,7 +326,7 @@ export function streamLiveness(
   }
   let latestActivity = 0
   let anyUncompleted = false
-  let anyRunningTool = false
+  const runningTools = new Set<string>()
   for (let i = startIdx; i < ordered.length; i++) {
     const m = ordered[i]
     if (m.type !== "assistant") continue
@@ -306,18 +334,20 @@ export function streamLiveness(
     const activity = m.time?.streamed ?? m.time?.created ?? 0
     if (activity > latestActivity) latestActivity = activity
     if (!m.time?.completed) anyUncompleted = true
-    for (const p of [...(m.parts ?? []), ...(m.content ?? [])] as Array<{ type?: string; state?: { status?: string } }>) {
-      if ((p.type === "tool" || p.type === undefined) && p.state?.status === "running") anyRunningTool = true
+    for (const p of [...(m.parts ?? []), ...(m.content ?? [])] as Array<{ type?: string; tool?: string; state?: { status?: string } }>) {
+      if ((p.type === "tool" || p.type === undefined) && p.state?.status === "running") runningTools.add(p.tool ?? "unknown")
     }
   }
-  if (latestActivity === 0) return "none"
-  if (!anyUncompleted) return "alive"
+  if (latestActivity === 0) return { state: "none", runningTools: [] }
+  if (!anyUncompleted) return { state: "alive", runningTools: [...runningTools] }
   // 工具豁免（有界）：running 工具只在豁免窗内保活；窗外与无工具同口径按流陈旧度判死
   //（卡死工具 part 恒 running——BG101A 实证 question 工具悬挂 2.5h，无界豁免=永远假活）。
-  if (anyRunningTool && now - latestActivity < toolGraceMs) return "alive"
-  // 分级续作闸：达判死阈值时，死在工具内与死在纯流式上分流——前者执行结果未知不自动续作。
-  if (now - latestActivity >= deadMs) return anyRunningTool ? "dead-tool" : "dead"
-  return "alive"
+  if (runningTools.size > 0 && now - latestActivity < toolGraceMs) return { state: "alive", runningTools: [...runningTools] }
+  // dead/dead-tool 分流仅决定续作是否带去重提示，两者都自动续作（owner 2026-11-23 裁定）。
+  if (now - latestActivity >= deadMs) {
+    return { state: runningTools.size > 0 ? "dead-tool" : "dead", runningTools: [...runningTools] }
+  }
+  return { state: "alive", runningTools: [...runningTools] }
 }
 
 // ===== 终稿提取（2026-11-10 工作稿误投事故根修）=====
@@ -679,22 +709,6 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       console.log(`[bridge] 后台回合流活性丧失：续作${resumeCount}次仍死，expired 结清 session=${sessionId} msg=${shortId(trackId)}`)
     }
 
-    /** 死在工具内处置（分级续作闸，owner 2026-11-23 批准）：判死时最后活动挂在 running 工具 part——
-     *  该步骤执行结果未知（可能已生效）。自动续作=重发原 prompt，写入类动作可能执行两次；
-     *  故不自动续作，显式结清+交用户确认后重发。 */
-    async function finishDeadTool(): Promise<void> {
-      if (cancelled || finished) return
-      finished = true
-      if (trackId) inflight.settle(trackId, undefined, "expired")
-      cleanup()
-      void drainQueue(ctx.userId, sessionId)
-      await safeDeliver(
-        ctx,
-        "⚠️ 后台任务在执行某一步操作时失去响应，该步骤的执行结果未知（可能已生效）。为避免重复执行已停止自动续作；确认状态后请重新发送",
-      ).catch(() => {})
-      console.log(`[bridge] 后台回合死在工具内：结果未知不续作，expired 结清 session=${sessionId} msg=${shortId(trackId)}`)
-    }
-
     /**
      * 死回合自动续作（owner 2026-11-19 裁定：单任务续作上限 3 次）——
      * 「继续」的落地形态=同会话注入新回合重发原 prompt，模型读会话历史接着做；
@@ -702,7 +716,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
      * 本 bgWait 不换班：onAccepted 切换锚点后继续盯梢新回合，盯到完成/再死/被取代。
      * 副作用口径：模型从历史可见死前已执行的动作，自行决定去重——与人工「重发」等价。
      */
-    async function resumeDead(): Promise<void> {
+    async function resumeDead(hint = ""): Promise<void> {
       if (cancelled || finished) return
       resumeCount += 1
       console.log(`[bridge] 后台死回合自动续作 #${resumeCount}/${MAX_RESUME} session=${sessionId} msg=${shortId(trackId)}`)
@@ -713,7 +727,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         )
         const { text: promptBody, files } = augmentPromptWithAttachments(ctx.content, prepared)
         const promptText =
-          (ctx.quoteText ? `> 引用上文：${ctx.quoteText}\n\n${promptBody}` : promptBody) + QQ_LIST_FORMAT_HINT
+          (ctx.quoteText ? `> 引用上文：${ctx.quoteText}\n\n${promptBody}` : promptBody) + QQ_LIST_FORMAT_HINT + hint
         // 不阻塞 tick：promptAndWait 异步跑，onAccepted 切换锚点后由本 bgWait 的
         // 既有 tick（完成/停滞/流活性/superseded 全判据）继续监督新回合。
         void client.promptAndWait(sessionId, promptText, {
@@ -806,16 +820,16 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         // 流活性监督（owner 2026-11-19 裁定：与后台探知同 tick、同一拉取结果）——
         // 死回合与长跑任务在「无进展」信号上同形（昨夜 BG101A 实证：流停 3s 后
         // 90 分钟假活）。判死 → 先关（abort 死回合）后断点继续（finishDead）。
-        const live = streamLiveness(msgs, promptId, baseline, now, STREAM_DEAD_MS, TOOL_GRACE_MS)
+        const probe = streamLivenessDetail(msgs, promptId, baseline, now, STREAM_DEAD_MS, TOOL_GRACE_MS)
+        const live = probe.state
         if (live === "dead" || live === "dead-tool") {
           // 先关（owner 裁定）：abort 死回合，幂等容忍失败
           await client.session.abort({ path: { id: sessionId } }).catch(() => undefined)
-          // 后断点继续：纯流式死（live==="dead"）续作上限内自动重发原 prompt（新回合）；
-          // 死在工具内（live==="dead-tool"）执行结果未知——分级续作闸拦停，不自动重发
-          if (live === "dead-tool") {
-            await finishDeadTool()
-          } else if (resumeDecision(resumeCount, MAX_RESUME) === "resume") {
-            await resumeDead()
+          // 后断点继续：续作上限内自动重发原 prompt（新回合），超限才 expired 放弃。
+          // 死在工具内同样自动续作（owner 2026-11-23 裁定），但携带去重提示——
+          // 哪个工具在飞、结果未知，模型重做写操作前先只读核查副作用。
+          if (resumeDecision(resumeCount, MAX_RESUME) === "resume") {
+            await resumeDead(live === "dead-tool" ? deadToolResumeHint(probe.runningTools) : "")
           } else {
             await finishDead()
           }
@@ -825,7 +839,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         if (turn.superseded) {
           // DEF-qqbot-20261107-P2：死回合立即按被打断终态结算（交付+销账在 finish）
           await finish("superseded")
-        } else if (turn.hasIdle || missingIdleDone(turn, lastProgressAt, now)) {
+        } else if (turn.hasIdle || missingIdleDone(turn, lastProgressAt, now, MISSING_IDLE_GRACE_MS, probe.runningTools.length > 0)) {
           // 2026-11-10 僵尸事故根修：被杀回合无 idle（重复派发→接管打断链），
           // 有正文+超宽限即实质已完，按完成投递，杜绝假心跳僵尸。
           await finish("done")
