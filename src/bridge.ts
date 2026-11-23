@@ -235,7 +235,9 @@ export function resolveToolGraceMs(envValue: string | undefined): number {
   return Number.isFinite(raw) && raw >= 300_000 && raw <= 14_400_000 ? Math.floor(raw) : BG_TOOL_GRACE_MS_DEFAULT
 }
 
-export type StreamLiveness = "alive" | "dead" | "none"
+// dead-tool（2026-11-23 分级续作闸新增）=死在工具内：running 工具 part 超豁免窗且流陈旧达判死阈值——
+// 最后一步写操作执行结果未知（可能已生效），不自动续作交人工裁决（参考 Open Agent API 账侧保守设计）。
+export type StreamLiveness = "alive" | "dead" | "dead-tool" | "none"
 
 /** 续作上限解析（纯函数供测试）：env QQ_BG_RESUME_MAX，默认 3 次；0=关闭自动续作；合法域 0 至 5。 */
 export function resolveResumeMax(envValue: string | undefined): number {
@@ -313,7 +315,9 @@ export function streamLiveness(
   // 工具豁免（有界）：running 工具只在豁免窗内保活；窗外与无工具同口径按流陈旧度判死
   //（卡死工具 part 恒 running——BG101A 实证 question 工具悬挂 2.5h，无界豁免=永远假活）。
   if (anyRunningTool && now - latestActivity < toolGraceMs) return "alive"
-  return now - latestActivity >= deadMs ? "dead" : "alive"
+  // 分级续作闸：达判死阈值时，死在工具内与死在纯流式上分流——前者执行结果未知不自动续作。
+  if (now - latestActivity >= deadMs) return anyRunningTool ? "dead-tool" : "dead"
+  return "alive"
 }
 
 // ===== 终稿提取（2026-11-10 工作稿误投事故根修）=====
@@ -675,6 +679,22 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       console.log(`[bridge] 后台回合流活性丧失：续作${resumeCount}次仍死，expired 结清 session=${sessionId} msg=${shortId(trackId)}`)
     }
 
+    /** 死在工具内处置（分级续作闸，owner 2026-11-23 批准）：判死时最后活动挂在 running 工具 part——
+     *  该步骤执行结果未知（可能已生效）。自动续作=重发原 prompt，写入类动作可能执行两次；
+     *  故不自动续作，显式结清+交用户确认后重发。 */
+    async function finishDeadTool(): Promise<void> {
+      if (cancelled || finished) return
+      finished = true
+      if (trackId) inflight.settle(trackId, undefined, "expired")
+      cleanup()
+      void drainQueue(ctx.userId, sessionId)
+      await safeDeliver(
+        ctx,
+        "⚠️ 后台任务在执行某一步操作时失去响应，该步骤的执行结果未知（可能已生效）。为避免重复执行已停止自动续作；确认状态后请重新发送",
+      ).catch(() => {})
+      console.log(`[bridge] 后台回合死在工具内：结果未知不续作，expired 结清 session=${sessionId} msg=${shortId(trackId)}`)
+    }
+
     /**
      * 死回合自动续作（owner 2026-11-19 裁定：单任务续作上限 3 次）——
      * 「继续」的落地形态=同会话注入新回合重发原 prompt，模型读会话历史接着做；
@@ -787,11 +807,14 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         // 死回合与长跑任务在「无进展」信号上同形（昨夜 BG101A 实证：流停 3s 后
         // 90 分钟假活）。判死 → 先关（abort 死回合）后断点继续（finishDead）。
         const live = streamLiveness(msgs, promptId, baseline, now, STREAM_DEAD_MS, TOOL_GRACE_MS)
-        if (live === "dead") {
+        if (live === "dead" || live === "dead-tool") {
           // 先关（owner 裁定）：abort 死回合，幂等容忍失败
           await client.session.abort({ path: { id: sessionId } }).catch(() => undefined)
-          // 后断点继续：续作上限内自动重发原 prompt（新回合），超限才 expired 放弃
-          if (resumeDecision(resumeCount, MAX_RESUME) === "resume") {
+          // 后断点继续：纯流式死（live==="dead"）续作上限内自动重发原 prompt（新回合）；
+          // 死在工具内（live==="dead-tool"）执行结果未知——分级续作闸拦停，不自动重发
+          if (live === "dead-tool") {
+            await finishDeadTool()
+          } else if (resumeDecision(resumeCount, MAX_RESUME) === "resume") {
             await resumeDead()
           } else {
             await finishDead()
