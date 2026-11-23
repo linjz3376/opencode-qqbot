@@ -1,0 +1,19 @@
+#!/bin/sh
+# 机械闸：新增 docs/ 文件必须带 docs-authorized 尾注，杜绝一次性报告误入标准文档区。
+# 安装：bun run hooks:install（把 core.hooksPath 指向 scripts/hooks）
+# 依据：2026-11-23 实证——缺陷报告曾被误提交到 docs/defects/，规则层有歧义，需机械兜底。
+
+msg_file="$1"
+added=$(git diff --cached --name-only --diff-filter=A -- 'docs/')
+[ -z "$added" ] && exit 0
+
+if [ -n "$msg_file" ] && grep -Eqi '^docs-authorized:[[:space:]]*[^[:space:]]' "$msg_file"; then
+  exit 0
+fi
+
+printf '%s\n' "BLOCKED: 新增 docs/ 文件需在 commit message 末尾附理由：" >&2
+printf '%s\n' "  docs-authorized: <长期维护理由>" >&2
+printf '%s\n' "以下文件被拦截：" >&2
+printf '%s\n' "$added" >&2
+printf '%s\n' "一次性报告/清单/分析请改用临时目录交付，不入标准文档区。" >&2
+exit 1

@@ -15,6 +15,7 @@
     "start": "bun run src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun scripts/run-tests.mjs",
+    "hooks:install": "bun scripts/install-hooks.mjs",
     "test:e2e": "bun run test/watch-history-e2e.ts && bun run test/d1-subagent-ask-e2e.ts && bun run test/d2-conflict-e2e.ts && bun run test/perm-e2e.ts && bun run test/perm-real-e2e.ts",
     "verify": "bun run typecheck && bun run test",
     "verify:full": "bun run verify && bun run test:e2e",
