@@ -148,11 +148,11 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `/models` | View or switch the model (session-level) |
 | `/agents` | View or switch the agent |
 | `/rename <name>` | Rename the current session (local title only) |
-| `/watch` / `/watch off` | Watch mode: tool-call milestones pushed live |
+| `/watch` | Watch mode: `/watch` on / `/watch off` off; tool-call milestones pushed live |
 | `/progress` | Manual progress query: tool/failure stats and in-flight status (local event source, zero model calls) |
 | `/queue` | Busy queue: view / `clear` / `drop <n>` / `<text>` explicit enqueue (busy messages steer into the running turn by default; `QQ_BUSY_DEFAULT=queue` restores auto-queuing) |
 | `/ledger` | Ledger view: snapshot / `check` reconcile / `settle <suffix> confirm` manual settle (orphans and in-flight traceable) |
-| `/mirror` / `/mirror off` | Session mirror: desktop-session turns pushed to QQ live (📋 desktop turns / 🎯 goal continuations) |
+| `/mirror` | Session mirror: `/mirror` shows status, `on` / `off` to control; desktop-session turns pushed to QQ live (📋 desktop / 🎯 goal continuations) |
 | `/send <path>` | Send a file/image from an allowlisted directory to QQ |
 | `/undo` | Official semantics: revert the last turn and restore files (receipt carries the reverted prompt; re-send after edits) |
 | `/amend <text>` | Steer a busy turn with supplementary instructions (official steer semantics); or `/queue <text>` to explicitly enqueue |
