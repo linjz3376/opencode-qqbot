@@ -17,6 +17,7 @@ import { startBot } from "./core/bot-control.js"
 import { runNotifyCli } from "./cli/notify.js"
 import { readDotEnvField } from "./core/bot-launcher.js"
 import { electSupervisor } from "./core/supervisor-election.js"
+import { executeQQSendFile } from "./core/send-requests.js"
 
 const ENV_FILE = join(homedir(), ".openqq", ".env")
 const CHECK_INTERVAL_MS = (() => {
@@ -108,6 +109,45 @@ export default Plugin.define({
     }
     ensure()
     const timer = setInterval(ensure, CHECK_INTERVAL_MS)
+
+    // qq_send_file 工具注册（2026-11-23 owner 批准）：AI 出站发文件从「QQ_SEND_FILE 魔法标记」
+    // 升级为一等工具——模型在工具清单读到 schema 与精确错误，不再猜标记/猜路径。
+    // 传输=文件队列（core/send-requests），bot 进程消费并回执；权威白名单校验在 bot 侧。
+    // 特性探测：旧引擎无 ctx.tool.transform 时静默降级（标记通道仍可用），不阻断宿主。
+    const toolApi = (_ctx as unknown as {
+      tool?: {
+        transform?: (cb: (editor: {
+          namespace?: (ns: { name: string; description: string }) => void
+          add: (def: {
+            name: string
+            description: string
+            input: Record<string, unknown>
+            options?: Record<string, unknown>
+            execute: (input: { path: string; caption?: string }, context: { sessionID: string; signal?: AbortSignal }) => Promise<{ content: string }>
+          }) => void
+        }) => void) => Promise<unknown>
+      }
+    }).tool
+    if (toolApi?.transform) {
+      void toolApi.transform((editor) => {
+        editor.namespace?.({ name: "qq", description: "QQ 消息通道工具（发送到当前会话绑定的 QQ 用户）" })
+        editor.add({
+          name: "send_file",
+          description:
+            "把本机文件/图片发送到当前会话绑定的 QQ 用户。path=本机绝对路径（须在发送白名单内，默认 QQ 图片缓存目录与 bot 工作目录，QQ_SEND_EXTRA_ROOTS 可扩）。失败返回精确原因（含白名单根目录/拒识类型），修正后可重试；相同文件重复调用自动去重。",
+          input: {
+            type: "object",
+            properties: { path: { type: "string" }, caption: { type: "string" } },
+            required: ["path"],
+            additionalProperties: false,
+          },
+          options: { namespace: "qq", codemode: true },
+          execute: async (input, context) => ({ content: await executeQQSendFile(input, context) }),
+        })
+      }).catch((error) => {
+        console.warn("[opencode-qqbot] qq_send_file 注册失败（降级为 QQ_SEND_FILE 标记通道）:", error)
+      })
+    }
 
     // 事件探针（可选，默认关）：QQ_EVENT_PROBE=true 时订阅全量事件流落盘
     let probeAbort: AbortController | null = null

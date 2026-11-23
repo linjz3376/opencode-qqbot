@@ -77,6 +77,11 @@ export const UNDELIVERED_NOTICE = "（此前有未能送达的消息）\n"
 export const QQ_LIST_FORMAT_HINT =
   "\n\n（输出格式约定：本对话经 QQ 渲染，请用「1、2、3、」顿号或「-」无序列表代替 markdown 有序列表，避免表格；代码块不受影响可正常使用。）"
 
+/** AI 出站发文件指引（2026-11-23 工具化批）：一等工具优先，魔法标记降级——语法必须随 prompt 注入，
+ *  此前标记从未告知模型，新会话只能猜（「发文件总要试好几次」根因）。 */
+export const QQ_SEND_FILE_HINT =
+  "\n\n如需把本机文件/图片发给 QQ 用户：优先调用 qq_send_file 工具（若工具清单提供，失败会返回精确原因可据以修正）；无该工具时，在回复末尾独立一行写 `QQ_SEND_FILE: <绝对路径>`（路径须在发送白名单内，默认 QQ 图片缓存目录与 bot 工作目录）。"
+
 export function qqListNormalize(text: string): string {
   const lines = text.split("\n")
   let fence: { ch: string; len: number } | null = null
