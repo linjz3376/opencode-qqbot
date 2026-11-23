@@ -416,7 +416,7 @@ async function handleModel(ctx: MessageContext, args: string, cmdCtx: CommandCon
 
   const model = splitModelId(args)
   if (!model) {
-    return "模型格式不对，请使用 /model <provider/model>"
+    return "模型格式不对，请使用 /models <provider/model>"
   }
 
   // DEF-qqbot-20261111-01：存在性校验——此前仅校格式直写映射，假模型也回「已切换成功」误导用户
@@ -449,7 +449,7 @@ async function handleAgent(ctx: MessageContext, args: string, cmdCtx: CommandCon
       return `${index + 1}. ${isCurrent ? "[当前] " : ""}${agent.label}`
     })
 
-    return ["可用 Agent：", ...lines, "回复 /agent <name> 切换"].join("\n")
+    return ["可用 Agent：", ...lines, "回复 /agents <name> 切换"].join("\n")
   }
 
   const normalized = args.trim().toLowerCase()

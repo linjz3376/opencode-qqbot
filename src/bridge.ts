@@ -181,7 +181,7 @@ export function heartbeatDecision(lastHeartbeatAt: number, now: number, interval
 /** 心跳文案：进行中 + 已运行 + 最近动作 + 内联停滞自检（idle≥30min 明示疑似停滞）。纯函数供测试。 */
 export function heartbeatText(execMin: number, idleMin: number, lastAction?: string): string {
   const action = lastAction ? `，刚才在处理【${lastAction}】` : ""
-  const stale = idleMin >= 30 ? `。⚠️ 注意：已 ${idleMin} 分钟没有任何动静，疑似卡住——可发 /stop 中止后重发` : ""
+  const stale = idleMin >= 30 ? `。⚠️ 注意：已 ${idleMin} 分钟没有任何动静，疑似卡住——可发 /cancel 中止后重发` : ""
   return `⏳ 你的任务还在后台执行：已用时 ${execMin} 分钟${action}${stale}。完成后我会自动把结果发给你。`
 }
 
@@ -2129,7 +2129,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           console.error(`[bridge] 会话被占用（active prompt）sid=${shortId(sessionId)}: ${toErrorMessage(error)}`)
           await safeDeliver(
             ctx,
-            "⏳ 该会话正有回合在执行（可能是桌面端在跑，或上一轮尚未结束），本轮未重复发起。\n发 /stop 可中止当前回合后重试。",
+            "⏳ 该会话正有回合在执行（可能是桌面端在跑，或上一轮尚未结束），本轮未重复发起。\n发 /cancel 可中止当前回合后重试。",
           )
           inflight.settle(trackId, undefined, "error")
         } else {
