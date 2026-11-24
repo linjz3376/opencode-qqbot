@@ -63,7 +63,7 @@ import {
   type PermOrigin,
 } from "./core/permission.js"
 import { truncate } from "./core/util.js"
-import { createDelivery, QQ_LIST_FORMAT_HINT, QQ_SEND_FILE_HINT } from "./core/delivery.js"
+import { createDelivery, qqPromptHints } from "./core/delivery.js"
 import { createNotifySink } from "./core/notify-sink.js"
 import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approval.js"
 import { createFormBridge, renderFormPrompt } from "./core/form-bridge.js"
@@ -728,7 +728,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         )
         const { text: promptBody, files } = augmentPromptWithAttachments(ctx.content, prepared)
         const promptText =
-          (ctx.quoteText ? `> 引用上文：${ctx.quoteText}\n\n${promptBody}` : promptBody) + QQ_LIST_FORMAT_HINT + QQ_SEND_FILE_HINT + QQ_SEND_FILE_HINT + hint
+          (ctx.quoteText ? `> 引用上文：${ctx.quoteText}\n\n${promptBody}` : promptBody) + qqPromptHints() + hint
         // 不阻塞 tick：promptAndWait 异步跑，onAccepted 切换锚点后由本 bgWait 的
         // 既有 tick（完成/停滞/流活性/superseded 全判据）继续监督新回合。
         void client.promptAndWait(sessionId, promptText, {
@@ -2101,7 +2101,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         // Q4 回退（用户评审三连否）：远程备注注入会渲染成独立用户消息、造成"一事两交互"，
         // 画蛇添足。不再注入任何前缀；场景上下文如需要改走 opencode 隐式 instructions 通道。
         const promptText =
-          (ctx.quoteText ? `> 引用上文：${ctx.quoteText}\n\n${promptBody}` : promptBody) + QQ_LIST_FORMAT_HINT + QQ_SEND_FILE_HINT
+          (ctx.quoteText ? `> 引用上文：${ctx.quoteText}\n\n${promptBody}` : promptBody) + qqPromptHints()
         // R 项（2026-10-30）：在途台账落账——派发前记录，送达才销账；
         // 进程中途死亡时启动对账据此恢复。重派回合无真实 msgId，用合成键跟踪。
         trackId = ctx.msgId || `redispatch-${sessionId}-${turnStart}`

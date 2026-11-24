@@ -2,7 +2,7 @@
 // @output: createDelivery
 // @pos:    根层/core - 投递域（O7c 2026-10-15 自 bridge.ts 拆出：统一投递
 //          被动→主动降级、日配额记账与落盘、观察推送节流队列、主动/被动通道发送）
-import { storageFile } from "./storage.js"
+import { storageFile, storageRoot } from "./storage.js"
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, openSync, closeSync, unlinkSync, statSync } from "fs"
 import { join } from "path"
 import { createHash } from "node:crypto"
@@ -81,6 +81,24 @@ export const QQ_LIST_FORMAT_HINT =
  *  此前标记从未告知模型，新会话只能猜（「发文件总要试好几次」根因）。 */
 export const QQ_SEND_FILE_HINT =
   "\n\n如需把本机文件/图片发给 QQ 用户：优先调用 qq_send_file 工具（若工具清单提供，失败会返回精确原因可据以修正）；无该工具时，在回复末尾独立一行写 `QQ_SEND_FILE: <绝对路径>`（路径须在发送白名单内，默认 QQ 图片缓存目录与 bot 工作目录）。"
+
+/** prompt 注入与系统级注入的切换闸（owner 2026-11-24 批准）：
+ *  插件已成功走系统层（entry/hook 模式，状态文件 15min 内新鲜）时，prompt 正文不再携带
+ *  格式与发文件约定——治「输出格式约定以用户消息气泡入史」的显性注入污染；
+ *  状态文件缺失/陈旧/模式未知=系统层不可用，回退 prompt 注入（现状，永不裸奔）。 */
+export function qqPromptHints(): string {
+  try {
+    const file = join(storageRoot(), "qq-system-instructions.json")
+    const st = statSync(file)
+    if (Date.now() - st.mtimeMs < 15 * 60_000) {
+      const parsed = JSON.parse(readFileSync(file, "utf-8")) as { mode?: string }
+      if (parsed?.mode === "entry" || parsed?.mode === "hook") return ""
+    }
+  } catch {
+    // 无状态文件/坏 JSON=回退 prompt 注入
+  }
+  return QQ_LIST_FORMAT_HINT + QQ_SEND_FILE_HINT
+}
 
 export function qqListNormalize(text: string): string {
   const lines = text.split("\n")

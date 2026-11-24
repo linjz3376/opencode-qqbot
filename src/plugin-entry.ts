@@ -18,6 +18,7 @@ import { runNotifyCli } from "./cli/notify.js"
 import { readDotEnvField } from "./core/bot-launcher.js"
 import { electSupervisor } from "./core/supervisor-election.js"
 import { executeQQSendFile } from "./core/send-requests.js"
+import { syncQQInstructions } from "./core/qq-instructions.js"
 
 const ENV_FILE = join(homedir(), ".openqq", ".env")
 const CHECK_INTERVAL_MS = (() => {
@@ -76,6 +77,11 @@ export default Plugin.define({
           )
           return
         }
+        // QQ 系统级指令同步（2026-11-24 owner 批准）：entry 优先/hook 降级，状态文件驱动
+        // bridge 停用 prompt 正文注入——与 supervisor 租约无关，任何存活实例都可幂等同步。
+        void syncQQInstructions(_ctx as never).catch((error) => {
+          console.warn("[opencode-qqbot] QQ 系统指令同步失败（下周期重试）:", error instanceof Error ? error.message : error)
+        })
         // 双触发器归一（2026-11-20 owner 批）：service（计划任务看门狗）与 plugin
         // （本引导器巡检）租约选主——service 持租约时整轮让贤，连 superviseOnce
         // 都不进（零干扰）；service 停排/死亡后租约过期自动接管，双向自愈。
