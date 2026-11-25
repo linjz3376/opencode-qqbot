@@ -11,6 +11,9 @@ import { fileURLToPath } from "node:url"
 import { join, dirname } from "node:path"
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..")
+// argv 必须先于一切分支声明（TDZ 实证 DEF-qqbot-20261125-bin：watchdog/restart/service 分支
+// 曾在本声明之前读取 argv[0]，模块求值即 ReferenceError，全部子命令失效）。
+const argv = process.argv.slice(2)
 
 // 2026-11-09 架构红线：看门狗/重启/自启注册都是包内 TS 产物，经本 shim 统一分发。
 // 传参不改变无参数行为。
@@ -27,7 +30,6 @@ if (argv[0] === "restart" || argv[0] === "service") {
 
 // notify 子命令分发（不改变无参数行为）：CLI 只入队 ~openqq/outbox.json，
 // 发送由 bot 进程 notify-sink 消费；CLI 不联网不取 token 不抢锁。
-const argv = process.argv.slice(2)
 if (argv[0] === "notify") {
   const notifyArgs = argv.slice(1)
   const cliDist = join(root, "dist", "notify-cli.js")
