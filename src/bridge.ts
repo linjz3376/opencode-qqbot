@@ -721,7 +721,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       if (cancelled || finished) return
       resumeCount += 1
       console.log(`[bridge] 后台死回合自动续作 #${resumeCount}/${MAX_RESUME} session=${sessionId} msg=${shortId(trackId)}`)
-      await safeDeliver(ctx, `⚠️ 后台任务底层执行失去响应，已自动中止并续作（第 ${resumeCount}/${MAX_RESUME} 次）；继续后台跟踪，完成自动回传`).catch(() => {})
+      await safeDeliver(ctx, `⚠️ 后台任务底层执行失去响应，已请求中止旧回合（未获已停止确认）并续作（第 ${resumeCount}/${MAX_RESUME} 次）；继续后台跟踪，完成自动回传`).catch(() => {})
       try {
         const prepared = ctx.preparedAttachments ?? await prepareQQAttachments(ctx.attachments, () =>
           getAccessToken(config.qq.appId, config.qq.clientSecret),
