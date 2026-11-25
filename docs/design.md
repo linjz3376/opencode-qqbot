@@ -297,6 +297,13 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 插件引导器巡检 | OpenCode 宿主内每 5min（OpenCode 在线时的主通道） |
 | `openqq restart [--force]` | 人工/脚本请求式入口，复用同一 grace-kill + spawn 原语与强度约束 |
 
+**监督者租约（2026-11-25 定稿：channel 优先级 + 时间戳，pid 仅诊断）**：service（计划任务）与 plugin（宿主内巡检）双触发器的归一仲裁。租约文件 `~/.openqq/supervisor-lease.json` 记 `{channel, until, pid}`——pid 仅作诊断，**不参与选主判定**（旧版按 pid 判定致 `--once` 每轮新 pid 自相让贤、5min 任务变 10min 的实证缺陷已修）。
+
+- **优先级恒定 `service > plugin`**：service 租约新鲜（`until > now`）时 plugin 整轮让贤（连 superviseOnce 都不进、零干扰）；service 停摆致租约过期后 plugin 自动接管；service 恢复即抢回（覆盖写租约，无「后占先」态）。
+- **同 channel 分形态**：service（`--once` 短进程语义）每轮新 pid 照常续租（覆盖写、pid 仅刷新诊断），5min 节奏不被自身进程轮转稀释；plugin（多引擎并发加载）同 channel 不同 pid 且租约新鲜时让贤，防同通道双监督。
+- **fail-open**：租约文件不可写/损坏时放行监督——监督缺失比双触发更糟。
+- 与「监督者认领锁互斥（多入口不双开）」的关系：租约管「谁该当值」（去重），认领锁管「同时不双杀」（互斥）——两层互补，不互相替代。
+
 **监督矩阵（观测 → 动作）**：
 
 | 观测 | 动作 |
