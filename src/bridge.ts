@@ -252,9 +252,11 @@ export interface StreamProbe {
 
 /** 断点续作去重提示（owner 2026-11-23 裁定）：携带模型本没有的事实——哪个工具在飞、其结果未知；
  *  与泛泛「注意去重」不同，模型可据此针对性核查。空名单=无提示。纯函数供测试。 */
-export function deadToolResumeHint(runningTools: string[]): string {
+export function deadToolResumeHint(runningTools: string[], abortConfirmed = true): string {
   if (runningTools.length === 0) return ""
-  return `\n\n【断点续作提示】上一轮在执行工具 ${runningTools.join("、")} 时中断，该工具执行结果未知（可能已生效）。重做任何写操作前，请先用只读手段核实副作用是否已发生（如查 git log、文件内容），避免重复执行。`
+  const base = `\n\n【断点续作提示】上一轮在执行工具 ${runningTools.join("、")} 时中断，该工具执行结果未知（可能已生效）。重做任何写操作前，请先用只读手段核实副作用是否已发生（如查 git log、文件内容），避免重复执行。`
+  if (abortConfirmed) return base
+  return base + "另：上一轮中止未获确认，相关进程可能仍在运行——请先核实相关进程与副作用状态，再决定是否重做写操作。"
 }
 
 /** 续作上限解析（纯函数供测试）：env QQ_BG_RESUME_MAX，默认 3 次；0=关闭自动续作；合法域 0 至 5。 */
@@ -717,11 +719,15 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
      * 本 bgWait 不换班：onAccepted 切换锚点后继续盯梢新回合，盯到完成/再死/被取代。
      * 副作用口径：模型从历史可见死前已执行的动作，自行决定去重——与人工「重发」等价。
      */
-    async function resumeDead(hint = ""): Promise<void> {
+    async function resumeDead(hint = "", abortConfirmed = true): Promise<void> {
       if (cancelled || finished) return
       resumeCount += 1
       console.log(`[bridge] 后台死回合自动续作 #${resumeCount}/${MAX_RESUME} session=${sessionId} msg=${shortId(trackId)}`)
-      await safeDeliver(ctx, `⚠️ 后台任务底层执行失去响应，已请求中止旧回合（未获已停止确认）并续作（第 ${resumeCount}/${MAX_RESUME} 次）；继续后台跟踪，完成自动回传`).catch(() => {})
+      // 中止口径随确认态分流（owner 2026-11-25 令）：确认成功才许说「已中止」
+      const notice = abortConfirmed
+        ? `⚠️ 后台任务底层执行失去响应，已中止旧回合并续作（第 ${resumeCount}/${MAX_RESUME} 次）；继续后台跟踪，完成自动回传`
+        : `⚠️ 后台任务底层执行失去响应，已请求中止旧回合（未获已停止确认，旧进程可能仍在运行）并续作（第 ${resumeCount}/${MAX_RESUME} 次）；继续后台跟踪，完成自动回传`
+      await safeDeliver(ctx, notice).catch(() => {})
       try {
         const prepared = ctx.preparedAttachments ?? await prepareQQAttachments(ctx.attachments, () =>
           getAccessToken(config.qq.appId, config.qq.clientSecret),
@@ -824,13 +830,14 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         const probe = streamLivenessDetail(msgs, promptId, baseline, now, STREAM_DEAD_MS, TOOL_GRACE_MS)
         const live = probe.state
         if (live === "dead" || live === "dead-tool") {
-          // 先关（owner 裁定）：abort 死回合，幂等容忍失败
-          await client.session.abort({ path: { id: sessionId } }).catch(() => undefined)
+          // 先关（owner 裁定）：abort 死回合；中止确认态捕获——成功才许说「已中止」（owner 2026-11-25 令）
+          const abortConfirmed = await client.session.abort({ path: { id: sessionId } }).then(() => true).catch(() => false)
+          // 判据/动作/后果三段留痕（kills.log 级口径，统一日志承载——会话级中止非进程诛杀，不占 kills.log 专线）
+          console.log(`[bridge] 判死处置 session=${sessionId} live=${live} abortConfirmed=${abortConfirmed} resumeCount=${resumeCount}`)
           // 后断点继续：续作上限内自动重发原 prompt（新回合），超限才 expired 放弃。
-          // 死在工具内同样自动续作（owner 2026-11-23 裁定），但携带去重提示——
-          // 哪个工具在飞、结果未知，模型重做写操作前先只读核查副作用。
+          // 死在工具内同样自动续作（owner 2026-11-23 裁定），携带去重提示；中止未确认时追加强制核查措辞。
           if (resumeDecision(resumeCount, MAX_RESUME) === "resume") {
-            await resumeDead(live === "dead-tool" ? deadToolResumeHint(probe.runningTools) : "")
+            await resumeDead(live === "dead-tool" ? deadToolResumeHint(probe.runningTools, abortConfirmed) : "", abortConfirmed)
           } else {
             await finishDead()
           }
