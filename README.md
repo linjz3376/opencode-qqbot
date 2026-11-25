@@ -38,6 +38,7 @@ Built for production, not just message bridging: a self-healing watchdog, an aud
 
 ### What's new in v0.3.18
 
+- **v0.3.19 hotfix** — `bin/openqq.js` TDZ (temporal dead zone) broke every `openqq` subcommand on 0.3.16-0.3.18 with a module-eval `ReferenceError`; declaration order fixed and a bin smoke suite added to the test chain. Also fixes the supervisor lease `--once` self-deferral that diluted 5-min patrols to 10-min (channel-priority + timestamp lease, pid is diagnostics only).
 - **`qq_send_file` first-class tool** — the AI sends local files/images to QQ via a native tool with JSON-Schema contract and precise structured errors (allowlist roots on failure); the old `QQ_SEND_FILE:` text marker survives as a fallback. No more syntax guessing.
 - **System-level channel instructions** — QQ rendering/format rules are injected as session instructions (`<context key="qq">`), not appended to your prompt text. Session history stays clean on the desktop side.
 - **Status cockpit** — `/status` becomes the single dashboard and the only switch entry for observation (`watch`) and digest mirror (`mirror`); standalone `/watch` `/mirror` commands retired.
