@@ -136,13 +136,13 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 |---|---|
 | 调度 | 每 lane 串行（lane 粒度可配，见 §2.3；DEF-qqbot-20261112-01 修法=官方 per-peer 的会话级细腻化）；`pendingSelections`（/sessions /model 序号选择，TTL 60s）；首条消息问候；队列完成回执开关制（`QQ_QUEUE_RECEIPTS`，默认关） |
 | 回合边界 | prompt API 受理返回 promptId 精确锚定；前台直答/后台等待/补投共用 `turnStateOf` 判定，不依赖"下一条 user 消息"启发式 |
-| 后台等待 | `bgWait`：回合转后台后继续等结果（SSE + 1min 轮询兜底，P0-1 收紧自 5min）；停滞提醒（30min 节奏，stallSnapshot 纯函数先取快照再重置，闲置分钟/执行时长跨重启不丢）；后台 15min 进度心跳（BG_HEARTBEAT）；missingIdleDone 完成兜底判定；finalAnswerText 工作稿防误投；**流活性监督（2026-11-19 owner 裁定层）：锚定 assistant 最后活动超 `QQ_BG_STREAM_DEAD_MS`（默认 15min）判死回合（running 工具在 `QQ_BG_TOOL_GRACE_MS` 豁免窗内保活、窗外照样判死；死回合与长跑任务在「无进展」信号上同形，BG101A 实证：流停 3s 后 90 分钟假活），判死先 abort 后断点继续；**自动续作（同 owner 裁定：判死后同会话注入新回合重发原 prompt 由模型读历史续作，单任务上限 `QQ_BG_RESUME_MAX`=3 次，次数落盘 resumeCount 重启不洗白，超限 expired 放弃+放行队列）**；**死态二分与去重提示（2026-11-23 owner 裁定）：纯流式死（dead）与死在工具内（dead-tool）均自动续作，dead-tool 续作 prompt 携带 deadToolResumeHint——点名在飞工具并声明其结果未知，模型重做写操作前须先只读核查副作用（查 git log/文件内容）；missingIdleDone 兜底带工具在飞守卫：边界内有 running 工具时不得按「有正文无 idle」误判完成（防健康长工具被交付半截答案）** |
+| 后台等待 | `bgWait`：回合转后台后继续等结果（SSE + 1min 轮询兜底，P0-1 收紧自 5min）；停滞提醒（30min 节奏，stallSnapshot 纯函数先取快照再重置，闲置分钟/执行时长跨重启不丢）；后台 15min 进度心跳（BG_HEARTBEAT）；missingIdleDone 完成兜底判定；finalAnswerText 工作稿防误投；**流活性监督（2026-11-19 owner 裁定层）：锚定 assistant 最后活动超 `QQ_BG_STREAM_DEAD_MS`（默认 15min）判死回合（running 工具在 `QQ_BG_TOOL_GRACE_MS` 豁免窗内保活、窗外照样判死；死回合与长跑任务在「无进展」信号上同形，BG101A 实证：流停 3s 后 90 分钟假活），判死先 abort 后断点继续；**自动续作（同 owner 裁定：判死后同会话注入新回合重发原 prompt 由模型读历史续作，单任务上限 `QQ_BG_RESUME_MAX`=3 次，次数落盘 resumeCount 重启不洗白，超限 expired 放弃+放行队列）**；**死态二分与去重提示（2026-11-23 owner 裁定）：纯流式死（dead）与死在工具内（dead-tool）均自动续作，dead-tool 续作 prompt 携带 deadToolResumeHint——点名在飞工具并声明其结果未知，模型重做写操作前须先只读核查副作用（查 git log/文件内容）；missingIdleDone 兜底带工具在飞守卫：边界内有 running 工具时不得按「有正文无 idle」误判完成（防健康长工具被交付半截答案）**；**abort 确认硬化（2026-11-25 owner 令）：判死路径捕获 abortConfirmed（成功/失败/异常→失败）并三段留痕（判据/动作/后果，统一日志承载，不占 kills.log 进程专线）——通知随确认态分流（确认成功才说「已中止」，未确认明说「已请求中止（旧进程可能仍在运行）」），未确认时 deadToolResumeHint 追加「先核进程/副作用状态再决定重做写操作」强制条款** |
 | 引用上下文 | context-buffer：引用解析 LRU 缓存（QQ 103 内嵌被引内容权威 + 本地缓存兜底）+ 出站回复登记（供"引用 AI 答案"命中） |
 | 错误救援 | error-rescue：provider 错误分类（402 余额/401 key 失效）+ 恢复路径话术（/model 切换/桌面更新 key），回合失败不甩原始错误 |
 | 审批 | SSE `permission.asked` **即时推送**（裁决前到达）→ 四键卡片（card-approval）→ REST permission reply 结算引擎 deferred（**reject 即 DeclinedError 释放回合，无需额外 cancel**）；真闸来自 steer 前台在场语义；无匹配裁决 fail-closed；拒绝后冲突即告警 |
 | 表单/提问 | REST form 端点 + SSE 事件（form-bridge 渲染/回执/台账；question-form 多题问答：跳过 vs 中止语义，30min TTL，旧挂起作废防串线） |
 | 观察/镜像 | 开关唯一入口=/status 驾驶舱（`/status watch on|off` / `/status mirror on|off`，owner 2026-11-23 定案）：盯当前绑定会话的工具调用/完成摘要实时推送（≥2s 节流合并，主动消息日配额）；/watch /mirror 独立命令已退役（仅留迁移提示），跨会话观察能力正式下线（owner 裁「不用」） |
-| 媒体出站 | send-media：本地文件按标记发送（路径白名单） |
+| 媒体出站 | **主通道=`qq_send_file` 一等工具**（插件经官方 Tools API 注册，JSON Schema+精确错误）：插件宿主写 `~/.openqq/send-requests/` 请求文件，bot 消费器复用 sendLocalFile 全量安全链（白名单/拒识/20MB 上限）发送并回写结果；幂等 dedupeKey 跨重启不重复发；旧 `QQ_SEND_FILE:` 文本标记保留为降级通道（路径白名单同口径） |
 | 服务健康 | SSE 断线退避重连 + `/status` 服务探活；单进程单连接，无子进程看护面 |
 
 命令面（`commands.ts`）：/new /cancel（彻底复位：清队列+abort+杀后台等待+结清+drain）/status（驾驶舱：服务器/会话/模型/Agent/观察/镜像/队列/日志；观察与镜像开关唯一入口 `/status watch|mirror on|off`）/queue（支持 `all` 与裸页码；`/queue <文本>`=steer 默认下的显性入队动词，见 §3.4）/ledger（子命令 orphan/rejected/inflight/settled + 尾号详情 + check + settle confirm，支持页码）/progress /sessions（带目录切换）/models /agents（官方复数命名：列表或切换）/rename /history /send /goal（官方目标模式引擎直通 v2.2.1+：设定/查状态/pause/resume/clear；goal-watch 状态变化通知 + kickoff 🎯 归属标记随桥接层推送）/compact /redo /btw（官方引擎命令直通：压缩会话/恢复撤销/侧问）/undo（对齐官方：撤销上一回合并恢复文件，QQ 侧一次性 stage→commit 无暂存窗）/amend（忙时插话并入当前任务，官方 steer 语义）/help。命令门前置表情规范化（faceType 实体 + emoji 字符剥离，剥后形似命令以命令受理）。
@@ -270,7 +270,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 长文分割 | message-split 按长度切分多气泡 |
 | 出站去重 | delivery-dedupe：投递指纹防重发（补投/重挂路径必经） |
 | 流式节流 | stream-stagger / reply-limiter（主动消息日配额） |
-| 列表平面化 | 行首 `N.␣` → `N、`（仅点号后带空格的行首形态命中；被动通道 100% 保真；代码围栏不动、幂等）+ 纯文本回落 + 提示词约束（QQ_LIST_FORMAT_HINT 随 prompt 注入）三层对策 |
+| 列表平面化 | 行首 `N.␣` → `N、`（仅点号后带空格的行首形态命中；被动通道 100% 保真；代码围栏不动、幂等）+ 纯文本回落 + **系统级通道指令**（`session.instructions.entry` 以 key=qq 注入渲染/发文件规则，`<context key=qq>` 块随会话生效、不入用户消息历史；旧引擎降级=context hook，再降级=prompt 正文注入 `QQ_LIST_FORMAT_HINT`）三层对策 |
 | 受理回执 | 「已收到」开关制（`QQ_ACK_RECEIPT=1` 开启，默认关） |
 
 ### 3.8 镜像与通知
@@ -350,8 +350,8 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 ## 5. 数据与配置
 
 `~/.openqq/`（数据目录，禁止放代码）：`.env`（密钥单点）、`sessions.json`（用户↔会话+目录映射）、
-`inflight.json`（在途台账）、`forms.json`、`gateway-state.json`、`supervisor.json`（重启强度账）、
-`heartbeat`、`*.lock`、`watchdog.log`、`kills.log`（诛杀决策专线，见 §3.9.1）、`bot.out.log`（+ 进程内双写；detached 拉起默认 `~/.openqq/openqq.log`，`QQ_LOG_FILE` 可覆盖）、`outbox.json`、`last-discovered.json`。
+`inflight.json`（在途台账）、`forms.json`、`gateway-state.json`、`supervisor.json`（重启强度账）、`supervisor-lease.json`（监督者租约，见 §3.9.1）、`qq-system-instructions.json`（系统级指令模式状态，见 §3.7）、
+`heartbeat`、`*.lock`、`watchdog.log`、`kills.log`（诛杀决策专线，见 §3.9.1）、`bot.out.log`（+ 进程内双写；detached 拉起默认 `~/.openqq/openqq.log`，`QQ_LOG_FILE` 可覆盖）、`outbox.json`、`send-requests/`（AI 出站发送请求队列目录，见 §3.3 媒体出站）、`last-discovered.json`。
 
 ### 5.1 多角色（单进程多 QQ bot 身份，2026-11-17 owner 裁定）
 
