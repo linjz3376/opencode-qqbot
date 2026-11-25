@@ -622,6 +622,15 @@ export function formatPermissionPrompt(
   // W 项（2026-11-22 宿主侧学习）：官方文档 permissions 页——always 保存工具提案的
   // pattern（shell=命令前缀等）。卡片上明示「总是允许」将保存什么，owner 点之前知道
   // 豁免范围（request.save 即引擎提案的保存规则，仅 always 决策时生效）。
+  // ── 截断语义与判据口径（owner 2026-11-25 批注，勿删）──
+  // truncate(s,120) 的契约=保留前 120 字符**再追加省略号「…」**——被截断时用户可见
+  // 长度=121，不是 120（core/util.ts truncate 全库同此语义：max=保留位数，省略号在预算外）。
+  // UAT 任务书 AC-PRM-002 的判据=「每条 ≤120 字符（省略号计入）」→ 121 越界 1 字符，
+  // 已登记 DEF-qqbot-20261124-03（代码缺陷 off-by-one，P3）；主理人 11-24 裁定「判据
+  // 直接失败、AC 终态 ❌、本轮不改码」；11-25 复核认为该硬阈值本身存争议（观感级
+  // 1 字符，QQ 平台层 121 不触任何组件限制，功能零影响），故保留现状。
+  // 若日后裁定修码：本行改 truncate(s, 119) 即可（可见长度回到 120）；或走判据修订
+  // （任务书口径改 ≤121）——两条路都只需动一处，且须同步本注释与 DEF 条目状态。
   if (request.save && request.save.length > 0) {
     const saves = request.save.slice(0, 3).map((s) => truncate(s, 120))
     lines.push(`总是允许将保存：${saves.join("；")}`)
