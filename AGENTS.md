@@ -1,4 +1,4 @@
-﻿# opencode-qq-bot 项目总则（AGENTS.md）
+﻿# opencode-qqbot 项目总则（AGENTS.md）
 
 > 本文件对**所有在本仓库工作的开发者**（含多个 AI 会话并行作业）与**通过 npm/插件安装的应用者**同效。
 > 红线违反即返工；发版类操作必须 owner **当轮明示同意**，无历史豁免。

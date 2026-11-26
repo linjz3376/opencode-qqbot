@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "opencode-qq-bot",
+      "name": "@linjz/opencode-qqbot",
       "dependencies": {
         "@opencode-ai/sdk": "^1.2.20",
         "ws": "^8.18.0",
@@ -19,6 +19,10 @@
         "@opencode/plugin": "^2.0.0",
         "effect": "^4.0.0",
       },
+      "optionalPeers": [
+        "@opencode/plugin",
+        "effect",
+      ],
     },
   },
   "packages": {

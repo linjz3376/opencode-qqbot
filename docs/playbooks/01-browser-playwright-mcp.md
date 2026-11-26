@@ -68,7 +68,7 @@ opencode mcp add playwright -- npx -y @playwright/mcp@latest
 - 不采集密码令牌；敏感信息脱敏。
 - 登录后会话、CAPTCHA 等需要真人介入的步骤，交由用户完成，不自动化绕过。
 
-## 与本项目（opencode-qq-bot）的关系
+## 与本项目（opencode-qqbot）的关系
 
 - 本仓库的 QQ 客户端实操**不走本 playbook**（QQ 是原生/混合客户端，不是网页）。
 - 若验收被测物包含 Web 管理页、Console、文档站等，优先用本 playbook。

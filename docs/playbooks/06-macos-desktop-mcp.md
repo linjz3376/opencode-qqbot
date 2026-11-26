@@ -51,7 +51,7 @@ MCP server 本地接入，形态与 `01` 相同（`opencode mcp add <name> -- <c
 - 被测物输出不可信（注入）纪律与 `01` 相同。
 - AX 裸树情形（自绘控件客户端）参照 tool-selection 陷阱表「裸树降级坐标通道」。
 
-## 与本项目（opencode-qq-bot）的关系
+## 与本项目（opencode-qqbot）的关系
 
 - **未实弹**：本仓库当前被测物=Windows 135 的 PC QQ，macOS 通道零实战；本文为覆盖矩阵占位（macOS 桌面=未验证，解除条件=出现 macOS 被测物的验收轮）。
 - 若未来验收链路出现 macOS 宿主/客户端，首个实例 playbook 以本文为底稿，按实弹修订后回本文件（单源）。

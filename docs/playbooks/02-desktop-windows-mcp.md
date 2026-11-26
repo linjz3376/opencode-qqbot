@@ -70,10 +70,10 @@
 
 - 桌面自动化默认 `relaxed` 策略即可直接改真实数据；保留人工确认，先读 SAFETY/SECURITY 文档。
 - 必须在已登录、解锁的交互式桌面会话运行；服务/锁屏会话会吞输入。
-- **opencode-qq-bot 项目专属**：遵守其 AGENTS.md §5 进程红线（禁止裸杀、重启唯一入口）；§7 发送前三件套（probe 窗口 / 截图确认当前绑定会话 / 核 `~/.openqq/inflight.json` 在途）；有在途宁等或换会话，不注入、不即兴中断。
+- **opencode-qqbot 项目专属**：遵守其 AGENTS.md §5 进程红线（禁止裸杀、重启唯一入口）；§7 发送前三件套（probe 窗口 / 截图确认当前绑定会话 / 核 `~/.openqq/inflight.json` 在途）；有在途宁等或换会话，不注入、不即兴中断。
 - QQ 客户端若就是 bot 的 persona 面，AI 点击等于对外发消息，必须套用双会话架构纪律。
 
-## 与本项目（opencode-qq-bot）的关系
+## 与本项目（opencode-qqbot）的关系
 
 - 本机 QQ 实操的首选 playbook；与现役 `uat-driver.ps1`（Win32 坐标法）互补：UIA 类名法抗 DPI/窗口漂移，坐标法抗 UIA 缺失。
 - 跨机驱动时用 `03-remote-quickdesk.md` 或现役 WinRM 链；本机时本 playbook。

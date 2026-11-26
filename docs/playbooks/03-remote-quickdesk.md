@@ -73,11 +73,11 @@ A 端 QuickDesk 切 HTTP/SSE 模式并开启 MCP HTTP 服务后，OpenCode 作�
 
 - full token 泄露等于 B 桌面全权失守；用 readonly token 做只读侦察，写操作临时提权。
 - 危险操作拦截不等于沙箱；敏感操作保留人工确认。
-- **opencode-qq-bot 项目专属**：套用其 AGENTS.md §7 发送前三件套；§5 进程红线（禁止裸杀、重启唯一入口）；UI 主证=截图回读，机器读数仅辅证。
+- **opencode-qqbot 项目专属**：套用其 AGENTS.md §7 发送前三件套；§5 进程红线（禁止裸杀、重启唯一入口）；UI 主证=截图回读，机器读数仅辅证。
 - QuickDesk 的 AI 自主点击天然可能绕开在途检查，首次验证务必在专用测试会话、空闲窗口进行。
 - 引入第三方 C++/Rust 组件与信令依赖，评估供应链与网络暴露面。
 
-## 与本项目（opencode-qq-bot）的关系
+## 与本项目（opencode-qqbot）的关系
 
 - 对应 AGENTS.md §7 指挥家工作法：A（AI 会话）经局域网驱动目标机 PC QQ 客户端做实操验证（具体机器与网段属环境数据，见项目侧文档，不入本文）。
 - 现役 WinRM `/it` 计划任务链（`exec135.ps1` → `uat-driver.ps1`）是脚本驱动；QuickDesk 是 AI 看屏驱动的增量选项，二者可并存、先判别实验再考虑替换。

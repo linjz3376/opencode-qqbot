@@ -300,8 +300,8 @@ function sendIdentify(ws: WebSocket, accessToken: string): void {
       shard: [0, 1],
       properties: {
         os: process.platform,
-        browser: "opencode_qq_bot",
-        device: "opencode_qq_bot",
+        browser: "opencode_qqbot",
+        device: "opencode_qqbot",
       },
     },
   }
