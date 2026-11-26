@@ -57,7 +57,7 @@ function saveQuotaMap(file: string, m: ReadonlyMap<string, { day: string; count:
   }
 }
 
-// P 项（2026-10-30，吸收竞品 pendingNotice 模式）：发送彻底失败不静默——
+// P 项（2026-10-30，参考竞品 pendingNotice 模式）：发送彻底失败不静默——
 // 记"有未送达消息"，下一次成功投递时前缀贴条告知用户（导出供测试）。
 export const UNDELIVERED_NOTICE = "（此前有未能送达的消息）\n"
 
@@ -312,8 +312,8 @@ export function createDelivery(
   // 该用户最近主动发送时刻（滚动 60s 窗，内存态——重启即清空，天预算仍落盘兜底）
   const activeMinuteLog = new Map<string, number[]>()
 
-  // B-msgid（2026-10-29，吸收自 dsh-qqbot 的 msgid 缓存机制）：主动降级前尝试让发送
-  // "骑"该用户最近的被动 msg_id——平台窗口内接受则按被动计（不耗主动配额）。
+  // B-msgid（2026-10-29，被动目标缓存思路参考 dsh-qqbot 的 msgid-cache）：
+  // 主动降级前尝试让发送"骑"该用户最近的被动 msg_id——平台窗口内接受则按被动计（不耗主动配额）。
   // 窗口口径保守取 5 分钟（社区亦有 60 分钟说法；骑失败无副作用自动回落真主动，
   // 故从保守值起步，可用 QQ_PASSIVE_RIDE_WINDOW_MS 调整）。
   const RIDE_WINDOW_MS = (() => {
@@ -332,8 +332,9 @@ export function createDelivery(
   // P 项：彻底投递失败的用户集合（贴条状态），下次成功投递时消化
   const undelivered = new Set<string>()
   const activeQuota = new Map<string, { day: string; count: number; warned: boolean }>()
-  // B1（2026-10-29，吸收自 openclaw-qqbot reply-limiter）：被动回复限额预判——
+  // B1（2026-10-29，限额规则与降级方式参考 openclaw-qqbot reply-limiter）：
   // 单 msgId 4 次/1h 窗口，耗尽/过期直接转主动，省一次注定被拒的 API 往返。
+  // 该派生实现的上游版权与许可见 THIRD_PARTY_NOTICES.md。
   // 记账点在 sendReply 成功路径（统一出口，bridge 直调与 deliver 共用）。
   const passiveLimiter = new ReplyLimiter()
   // O5：恢复落盘配额（非当日条目由 deliver 按 day 字段自然重置）
@@ -445,7 +446,7 @@ export function createDelivery(
       }
     }
 
-    // B-msgid（吸收 dsh msgid-cache，2026-10-29）：主动降级前尝试"骑"该用户最近
+    // B-msgid（参考 dsh-qqbot msgid-cache 的被动目标缓存思路，2026-10-29）：主动降级前尝试"骑"该用户最近
     // 的被动 msg_id——平台窗口内接受则按被动计（不耗主动配额、记 B1 账本）；
     // 骑失败无副作用，回落下方真主动流程。
     const rideMsgId = selectRideMsgId(lastCtx.get(ctx.userId), ctx, Date.now(), RIDE_WINDOW_MS)

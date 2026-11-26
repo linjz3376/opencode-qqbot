@@ -263,7 +263,7 @@ export async function apiRequest<T = unknown>(
     console.log("[qqbot-api] >>> Body:", JSON.stringify(logBody, null, 2))
   }
 
-  // O 项（2026-10-30，吸收竞品 opencode-qq-v2 postWithRetry）：HTTP 429 限流时
+  // O 项（2026-10-30，参考竞品 opencode-qq-v2 postWithRetry）：HTTP 429 限流时
   // 尊重 Retry-After 退避重试（最多再试 2 次，单次等待封顶 30s）；其余错误不重试。
   // 429 语义=请求被拒绝未生效，重试无副作用。
   let res: Response | undefined

@@ -471,7 +471,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   // Q2：会话工具统计（/progress 手动查询用，本地事件源，零模型成本）
   const turnStats = new Map<string, { tools: number; failed: number; lastTool: string; lastAt: number }>()
 
-  // E（2026-10-29 同步升级，吸收 dsh session/idle-evictor）：闲置会话回收——
+  // E（2026-10-29 同步升级，参考 dsh session/idle-evictor）：闲置会话回收——
   // 长期无活动的会话退订 SSE，降 opencode 服务端事件扇出；/watch 显式盯着的
   // 会话豁免；用户再来消息时 subscribeSession 会重新挂上。env QQ_SESSION_IDLE_HOURS。
   const sessionLastActivity = new Map<string, number>()
@@ -2081,7 +2081,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
             anchorDirectory
         }
 
-        // 缺口 1（引用上下文，吸收自官方 quote-ref 中间件）：本条消息的引用解析
+        // 缺口 1（引用上下文，参考官方 quote-ref 中间件的解析思路）：本条消息的引用解析
         // 先于本条登记（顺序不可反：本条入缓存后才能被后续消息引用）
         // N 项（2026-10-30）：双通道——QQ 事件内嵌被引内容（message_type=103）
         // 为权威来源优先；缺失才回落本地缓存（跨重启/老消息引用也能解析）。
@@ -2189,7 +2189,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           // 超长回合可能已超被动窗口：deliver 被动失败自动降级主动，答案不丢
           // 直答出口统一脱敏（DEF-qqbot-20261106-2）：与 history/mirror/form 同一脱敏器，
           // 防 AI 复述的密钥/令牌经直答气泡明文外泄。
-          // Y-1 cron 提醒（2026-11-23 学习吸收 openclaw）：正文内嵌 QQBOT_PAYLOAD 标记
+          // Y-1 cron 提醒（2026-11-23 学习参考 openclaw）：正文内嵌 QQBOT_PAYLOAD 标记
           // → 注册一次性提醒并剥离标记；剥净为空则以确认句回执（不留脚手架痕迹）。
           let outboundText = extracted.text
           const cronHit = parseCronReminder(extracted.text, Date.now())

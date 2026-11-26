@@ -1,6 +1,6 @@
 // @input:  音频字节 + OpenAI 兼容 STT 端点配置（fetch 可注入，测试用）
 // @output: sttConfigured / sttTranscribe
-// @pos:    core - 语音外部转写回退（2026-11-23 学习吸收 AD 项，源=hermes-agent adapter.py P0 邻接）
+// @pos:    core - 语音外部转写回退（2026-11-23 学习参考 AD 项，源=hermes-agent adapter.py P0 邻接）
 //
 // 链路：QQ 内置 ASR（asr_refer_text，免费优先）→ 空时回退本模块（GLM-ASR/Whisper/
 // 任意 OpenAI 兼容 /audio/transcriptions 端点）。未配置三键时本模块整体离线——

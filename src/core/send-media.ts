@@ -87,10 +87,10 @@ export interface SendLocalFileDeps {
 }
 
 /**
- * 本地路径规范化（X 项，2026-11-22 学习吸收 openclaw local-file-router P0）：
- * file:// 前缀剥离（含 Windows file:///C:/ 三斜杠形态）→ URL decode（非法编码按原样）
- * → ~ 展开为家目录。白名单/拒绝名单判定必须先于或基于规范化结果，否则同一文件
- * 因写法不同得到两种判定。
+ * normalizeLocalPath 派生修订自 openclaw local-file-router 的 normalizePath：
+ * 保留 file:// 前缀剥离（含 Windows file:///C:/ 三斜杠形态）→ URL decode（非法编码按原样）
+ * → ~ 展开为家目录的相同处理顺序。白名单/拒绝名单判定必须先于或基于规范化结果，
+ * 否则同一文件因写法不同得到两种判定。该函数来源见 THIRD_PARTY_NOTICES.md。
  */
 export function normalizeLocalPath(p: string): string {
   let r = p.trim()
@@ -115,8 +115,8 @@ export async function sendLocalFile(
   filePath: string,
   deps: SendLocalFileDeps,
 ): Promise<string> {
-  // X 项（2026-11-22 学习吸收，源=openclaw local-file-router P0）：路径规范化先行——
-  // file:// 前缀剥离、URL decode、~ 展开；规范化在拒绝名单/白名单之前（否则
+  // X 项（2026-11-22）：上述 normalizeLocalPath 为派生修订，来源已登记；其余发送、
+  // 拒绝名单/白名单、上传流程为项目实现。规范化在拒绝名单/白名单之前（否则
   // file:///C:/x 与 C:/x 同一文件两种判定结果）。非法编码按原样不炸。
   const trimmed = normalizeLocalPath(filePath)
   // DEF-qqbot-20261112-03：文件级拒绝优先于目录白名单（穿越解析落白名单根也拦）

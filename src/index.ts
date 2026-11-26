@@ -102,7 +102,7 @@ async function main(): Promise<void> {
     allowedUsers: r.allowedUsers,
   })
 
-  // M 项（2026-10-30，吸收竞品 proper-lockfile 方案零依赖手写）：单实例锁防多开——
+  // M 项（2026-10-30，参考竞品 proper-lockfile 方案零依赖手写）：单实例锁防多开——
   // 双实例同 bot 会被 QQ 网关互踢。后到实例待命轮询，宿主退出/暴毙（30s 僵尸判定）
   // 后自动接管。QQ_INSTANCE_LOCK=false 关闭；=try 则抢不到即退出（插件引导器拉起
   // 场景：多 location 并发拉起时防待命实例堆积）。

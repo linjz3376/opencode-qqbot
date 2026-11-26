@@ -144,7 +144,7 @@ function scheduleReconnect(state: GatewayState, connect: () => Promise<void>, cu
   }, delayMs)
 }
 
-// —— AB：快断连风暴守卫（2026-11-23 学习吸收，源=hermes-agent adapter.py P0 邻接）——
+// —— AB：快断连风暴守卫（2026-11-23 学习参考，源=hermes-agent adapter.py P0 邻接）——
 // 背景：指数退避（1s→30s）只放缓单个重连，挡不住「坏凭据/网络抖动」的无限循环——
 // bot 会在 1~30s 档永远空转且日志无声。守卫口径：窗口内快断连（建连后秒挂）累计
 // 达上限 → 升级 5min 静默冷却 + 高声错误日志（排障信号），冷却后再犯重新累计。

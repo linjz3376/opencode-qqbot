@@ -1,7 +1,7 @@
 // @input:  无依赖（纯文本工具）
 // @output: cmdInput/cmdEnter 标签构造、stripInteractionTags 兜底剥离、NOTICE 文案目录
-// @pos:    core - 通知文案目录（2026-11-22 学习吸收轮：融合 dsh-qqbot errors.ts/session-notice.ts
-//          目录制之长——用户可见文案单一出口、可测；P0 佐证=QQ 官方文档「文本交互」
+// @pos:    core - 通知文案目录（2026-11-22：参考 dsh-qqbot errors.ts/session-notice.ts
+//          的文案目录化设计，用户可见文案单一出口、可测；P0 佐证=QQ 官方文档「文本交互」
 //          bot.q.qq.com/wiki api-v2，2026-10-26 更新版，<qqbot-cmd-input>/<qqbot-cmd-enter> 形状确认）
 //
 // ⚠️ 平台边界（官方文档原文）：

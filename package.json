@@ -31,7 +31,9 @@
     "bin",
     "src",
     "dist",
-    "tsconfig.json"
+    "tsconfig.json",
+    "THIRD_PARTY_NOTICES.md",
+    "PRIVACY.md"
   ],
   "keywords": [
     "opencode-plugin",

@@ -1,6 +1,8 @@
 // @input:  纯文本（无依赖）
 // @output: stripScaffolding
-// @pos:    core - 出站脚手架消毒（2026-11-23 学习吸收 Z 项，源=openclaw outbound/sanitize.ts P0）
+// @pos:    core - 出站脚手架消毒（2026-11-23 派生修订 Z 项，源=openclaw outbound/sanitize.ts P0）
+// 本文件保留上游主要正则与剥离顺序，合并残留标签规则并调整返回处理，属于派生修订。
+// 上游版权与许可见 THIRD_PARTY_NOTICES.md。
 //
 // 背景：模型偶发把内部推理/脚手架块写进正文（ thinking/system-reminder 等），
 // QQ 会把原始标签渲染给用户。出站前统一剥离——主路径（formatForQQMarkdown）与

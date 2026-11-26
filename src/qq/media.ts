@@ -93,7 +93,7 @@ export async function downloadQQAttachment(
   if (isVoice && att.asr_refer_text?.trim()) {
     return { voice: att.asr_refer_text.trim() }
   }
-  // AD（2026-11-23 学习吸收）：QQ 内置 ASR 无转写 → 外部 STT 回退（hermes 双级链同款）。
+  // AD（2026-11-23 学习参考）：QQ 内置 ASR 无转写 → 外部 STT 回退（hermes 双级链同款）。
   // 需 QQ_STT_BASE_URL+QQ_STT_API_KEY 齐配（QQ_STT_MODEL 默认 whisper-1）；未配置保持
   // 既有「不支持」路径零变化。音频仍走 QQ 域白名单+token 重试，10MB 上限同图片口径。
   if (isVoice && sttConfigured()) {

@@ -6,8 +6,9 @@
 // 限额耗尽或窗口过期后继续"被动回复"必然被平台拒绝，白白浪费一次 API 往返
 // 且推迟送达。本模块在被动尝试前预判：不可被动 → 直接走主动通道（调用方
 // 负责主动配额记账），可被动 → 放行并在发送成功后记账。
-// 设计吸收自 tencent-connect/openclaw-qqbot（MIT）
-// src/outbound/reply-limiter.ts——P0 官方实现，语义与默认参数照抄。
+// 实现参考 tencent-connect/openclaw-qqbot（MIT）：src/outbound/reply-limiter.ts。
+// 本文件与该实现具有相同的接口、默认参数和核心状态机，属于派生修订而非独立原创。
+// 上游版权与许可全文见 THIRD_PARTY_NOTICES.md；本项目保留来源声明，不删除或淡化归属。
 export interface ReplyLimiterConfig {
   /** 每条消息最大被动回复次数（官方规则 4） */
   limit?: number

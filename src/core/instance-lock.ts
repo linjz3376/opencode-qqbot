@@ -2,7 +2,7 @@
 // @output: acquireInstanceLock, acquireInstanceLockAt（测试用）, waitInstanceLock, INSTANCE_LOCK_DISABLED_ENV
 // @pos:    core - 单实例锁（防多开：双实例互踩 QQ 网关会互踢下线）
 //
-// M 项（2026-10-30，方案吸收竞品 opencode-qq-v2 的 proper-lockfile 设计，
+// M 项（2026-10-30，方案参考竞品 opencode-qq-v2 的 proper-lockfile 设计，
 // 零依赖手写以守"官方/三方包不进 dependencies"红线）：
 //   - wx 原子创建锁文件（含 pid+启动时间），抢到即宿主
 //   - 持锁者每 10s 刷新 mtime 作心跳

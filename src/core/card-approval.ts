@@ -5,9 +5,10 @@
 //          handleApprovalInteraction
 // @pos:    core - 卡片按钮审批（A 项 2026-10-29）
 //
-// 设计吸收自 P0 官方源：dsh-qqbot src/features/{button-utils,approval-channel}.ts
-// （button_data 明文 JSON + t 判别字段）与 @tencent-connect/qqbot-nodejs
-// protocol/types.ts（KeyboardButton/InlineKeyboard 形状）。
+// 设计参考 dsh-qqbot 的 button-data 判别及 approval-channel 的挂起、旧卡防伪机制，
+// 以及 @tencent-connect/qqbot-nodejs protocol/types.ts 的 KeyboardButton/InlineKeyboard 形状。
+// 本项目改用 request.id 防伪，并扩展四键决策、文字降级和项目权限状态机；
+// 上游来源与许可见 THIRD_PARTY_NOTICES.md。
 // 与文字菜单并行不互拆：卡片优先，发送失败自动降级文字；文字通道原样保留。
 // 安全基线（fail-closed）：忽略按钮=不决策（权限保持挂起至 TTL）；
 // button_data 内嵌 request.id，槽位已被新请求替换时旧按钮点击直接拒识。

@@ -82,7 +82,7 @@ export function formatForQQ(text: string): string {
     processed = processed.replace(`\x00CB${i}\x00`, codeBlocks[i])
   }
 
-  // 交互标签兜底剥离（2026-11-22 学习吸收轮）：<qqbot-cmd-input> 等仅 markdown 消息生效，
+  // 交互标签兜底剥离（2026-11-22 学习参考）：<qqbot-cmd-input> 等仅 markdown 消息生效，
   // 纯文本通道必须把标签降级为可读文本，否则尖括号原样糊给用户（AstrBot#8755 同款坑）。
   // 围栏内是代码字面量，不动。
   let inStripFence = false
@@ -145,12 +145,13 @@ function utf8Bytes(s: string): number {
   return encoder.encode(s).length
 }
 
-// —— 结构化分条（2026-10-29 固化：设计吸收自 dsh-qqbot 分条器 chunker，P0）——
-// dsh 语义：GFM 表格聚成原子单元不跨片拆散 + 按行边界打包；
-// 我方在 dsh 之上补两件事：① 字节预算（QQ 按 UTF-8 字节限长，dsh 按字符数会
-// 踩中文 3 字节坑）② 围栏修补——在代码块中间切断时给前片补闭合、后片补开围栏
-// （带语言），保证每片 markdown 独立可渲染。围栏识别与出站兜底共用 core/markdown
+// —— 结构化分条（2026-10-29 固化）——
+// 设计参考 dsh-qqbot 的 chunker：GFM 表格作为原子单元并按行边界打包。
+// 本实现按项目需求独立扩展：① UTF-8 字节预算，避免中文字符数与字节数不一致；
+// ② 代码块跨片时前片补闭合、后片补开围栏（带语言），使每片独立可渲染；
+// ③ 超长单元按段落/换行/码点分级切分。围栏识别与出站兜底共用 core/markdown
 // （2026-11-10：补 ~~~ 与 4+ 标记长度，避免波浪围栏被当正文切碎）。
+// 上游来源与许可见 THIRD_PARTY_NOTICES.md。
 const GFM_TABLE_LINE = /^\s*\|.*\|\s*$/
 
 interface LineUnit {

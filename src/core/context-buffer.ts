@@ -2,11 +2,11 @@
 // @output: recordMessage, resolveQuote, scopeKeyOf, resetContextBuffer（测试用）
 // @pos:    core - 消息上下文索引缓存（引用消息解析）
 //
-// 设计吸收自 P0：qqbot-nodejs middleware/quote-ref.ts（MemoryRefIndexStore +
-// msgIdx 索引 + 解析）。QQ C2C/群消息的引用经由 message_reference.message_id
-// 透传；QQ 不提供 C2C 历史消息拉取，故引用解析只能靠本缓存——我方发出的回复
-// 也记录（消息 id 取服务端回执 MessageResponse.id），保证"引用 AI 答案"可解析。
-// 单进程 bot 用进程内 LRU（每域 200 条）足够；跨重启引用解析为空属可接受降级。
+// 引用索引与回退思路参考 qqbot-nodejs 的 quote-ref 中间件。
+// QQ C2C/群消息的引用经由 message_reference.message_id 透传；QQ 不提供 C2C 历史
+// 消息拉取，故引用解析需本地缓存——我方发出的回复也记录（消息 id 取服务端回执
+// MessageResponse.id），保证"引用 AI 答案"可解析。此处按项目会话域以 Map 实现
+// 每域 200 条的进程内缓存；跨重启引用解析为空属可接受降级。上游见 THIRD_PARTY_NOTICES.md。
 interface RefEntry {
   text: string
   at: number
@@ -46,7 +46,7 @@ export function resolveQuote(scope: string, referencedMsgId: string): string | n
   return entry?.text ?? null
 }
 
-// N 项（2026-10-30，吸收竞品 opencode-qq-v2 util/quote.js）：引用消息双通道——
+// N 项（2026-10-30，参考竞品 opencode-qq-v2 的引用消息双通道思路）：
 // QQ 在 message_type=103 时把被引内容嵌在 msg_elements 里随事件透传（官方未完全
 // 文档化结构，做防御性递归提取）；命中即权威来源，不再依赖本缓存（跨重启/引用
 // 老消息也能解析）。提取为空时调用方回落 resolveQuote 缓存通道。

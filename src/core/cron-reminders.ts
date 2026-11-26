@@ -1,6 +1,6 @@
 // @input:  纯文本（无依赖）+ setTimeout（调度器）
 // @output: parseCronReminder / ReminderScheduler
-// @pos:    core - 定时提醒（2026-11-23 学习吸收 Y-1，源=openclaw outbound/cron-scheduler.ts P0）
+// @pos:    core - 定时提醒（2026-11-23 学习参考 Y-1，源=openclaw outbound/cron-scheduler.ts P0）
 //
 // 触发形态（AI 在正文内嵌标记，与 openclaw 同款）：
 //   QQBOT_PAYLOAD: {"type":"cron_reminder","at":"in 30m","text":"去开评审会"}
