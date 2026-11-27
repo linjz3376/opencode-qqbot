@@ -18,9 +18,12 @@ interface UserSession {
 
 const STORE_FILE = storageFile("sessions.json")
 
+export type SessionBindingListener = (userId: string, sessionId: string | null) => void
+
 export class SessionManager {
   private sessions = new Map<string, UserSession>()
   private client: OpencodeClient
+  private readonly bindingListeners = new Set<SessionBindingListener>()
   /** DEF-qqbot-20261112-7：持久化路径可注入——单测必须写临时文件，禁写生产映射
    *  （2026-11-12 实证：session-model/status-title 套件直写 ~/.openqq/sessions.json，
    *    夹具 u1-u4/sid2-4 垃圾入库；多管理器陈旧整图回写还把 owner 绑定顶回去） */
@@ -67,6 +70,20 @@ export class SessionManager {
     }
   }
 
+  /** 绑定目标变化通知：只在新增、换绑、驱逐后触发；标题/目录/模型回写不触发。 */
+  onBindingChange(listener: SessionBindingListener): () => void {
+    this.bindingListeners.add(listener)
+    return () => this.bindingListeners.delete(listener)
+  }
+
+  private emitBindingChange(userId: string, sessionId: string | null): void {
+    for (const listener of this.bindingListeners) {
+      try { listener(userId, sessionId) } catch (error) {
+        console.error("[sessions] 绑定变化通知失败:", error)
+      }
+    }
+  }
+
   async getOrCreate(userId: string): Promise<UserSession> {
     const existing = this.sessions.get(userId)
     if (existing) return existing
@@ -79,6 +96,7 @@ export class SessionManager {
     }
     this.sessions.set(userId, session)
     this.saveSessions()
+    this.emitBindingChange(userId, session.sessionId)
     await this.enforceLocation(userId, session.sessionId, directory)
     return session
   }
@@ -99,6 +117,7 @@ export class SessionManager {
     }
     this.sessions.set(userId, session)
     this.saveSessions()
+    if (!prev || prev.sessionId !== session.sessionId) this.emitBindingChange(userId, session.sessionId)
     if (inheritedModel) {
       void this.client.session
         .setModel({ path: { id: session.sessionId }, body: { model: inheritedModel } })
@@ -132,6 +151,7 @@ export class SessionManager {
     // 是会话级状态（桌面端同语义），不得用本用户在此前会话的偏好覆盖目标会话；
     // 反向从目标会话回读真实设置写回映射（/status 与后续 /model 以目标为准）。
     if (changed) {
+      this.emitBindingChange(userId, sessionId)
       void this.refreshSettingsFromServer(userId)
     }
   }
@@ -219,8 +239,13 @@ export class SessionManager {
   }
 
   // 枚举全部映射（摘要镜像订阅、会话→用户反查、interactionTick 权限分仓轮询用）
-  all(): Array<{ userId: string; sessionId: string; directory?: string }> {
-    return [...this.sessions.entries()].map(([userId, s]) => ({ userId, sessionId: s.sessionId, directory: s.directory }))
+  all(): Array<{ userId: string; sessionId: string; title?: string; directory?: string }> {
+    return [...this.sessions.entries()].map(([userId, s]) => ({
+      userId,
+      sessionId: s.sessionId,
+      ...(s.title ? { title: s.title } : {}),
+      directory: s.directory,
+    }))
   }
 
   /**
@@ -231,6 +256,7 @@ export class SessionManager {
     const had = this.sessions.delete(userId)
     if (had) {
       this.saveSessions()
+      this.emitBindingChange(userId, null)
       console.log(`[sessions] 驱逐失效映射 userId=${userId.slice(0, 8)}…（400/404 三连判死）`)
     }
     return had

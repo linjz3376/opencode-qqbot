@@ -5,7 +5,7 @@
 // 引用索引与回退思路参考 qqbot-nodejs 的 quote-ref 中间件。
 // QQ C2C/群消息的引用经由 message_reference.message_id 透传；QQ 不提供 C2C 历史
 // 消息拉取，故引用解析需本地缓存——我方发出的回复也记录（消息 id 取服务端回执
-// MessageResponse.id），保证"引用 AI 答案"可解析。此处按项目会话域以 Map 实现
+// MessageResponse.id；0.3.20 起同时登记 ext_info.ref_idx），保证"引用 AI 答案"可解析。此处按项目会话域以 Map 实现
 // 每域 200 条的进程内缓存；跨重启引用解析为空属可接受降级。上游见 THIRD_PARTY_NOTICES.md。
 interface RefEntry {
   text: string

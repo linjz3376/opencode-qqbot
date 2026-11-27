@@ -8,7 +8,14 @@ import { join } from "path"
 import { createHash } from "node:crypto"
 import type { Config } from "../config.js"
 import type { MessageContext } from "../qq/types.js"
-import { getAccessToken, sendC2CMessage, sendGroupMessage, getNextMsgSeq } from "../qq/api.js"
+import {
+  getAccessToken,
+  sendC2CMessage,
+  sendGroupMessage,
+  getNextMsgSeq,
+  type MessageResponse,
+  type SentMessageReceipt,
+} from "../qq/api.js"
 import { replyToQQ } from "../qq/sender.js"
 import { matchFence, normalizeOutboundMarkdown } from "./markdown.js"
 import { ReplyLimiter } from "./reply-limiter.js"
@@ -279,14 +286,16 @@ export function selectRideMsgId(
   return last.msgId
 }
 
+export type OnSentMessage = (receipt: SentMessageReceipt) => void | Promise<void>
+
 export interface Delivery {
   /** anchorSessionId=该观察行的锚定会话（出站推送门按它校验当前绑定，design §3.4） */
   enqueuePush: (userId: string, line: string, anchorSessionId?: string) => void
   /** 返回 true=实际出站成功；false=24h 去重拦截或推送门拦截（DEF-qqbot-20261110-9：调用方据此刻画销账口径） */
-  deliver: (ctx: MessageContext, text: string) => Promise<boolean>
+  deliver: (ctx: MessageContext, text: string, onSent?: OnSentMessage) => Promise<boolean>
   /** 同 deliver；彻底失败时贴条待下次消化并返回 false */
-  safeDeliver: (ctx: MessageContext, text: string) => Promise<boolean>
-  sendReply: (ctx: MessageContext, text: string) => Promise<void>
+  safeDeliver: (ctx: MessageContext, text: string, onSent?: OnSentMessage) => Promise<boolean>
+  sendReply: (ctx: MessageContext, text: string, onSent?: OnSentMessage) => Promise<void>
 }
 
 // 投递域门面。lastCtx 为跨域共享状态（bridge 拥有写权），本域只读——
@@ -391,13 +400,28 @@ export function createDelivery(
     }
   }
 
+  function recordSent(scope: string, text: string, receipt: SentMessageReceipt): void {
+    recordMessage(scope, receipt.id, text)
+    if (receipt.refIdx && receipt.refIdx !== receipt.id) recordMessage(scope, receipt.refIdx, text)
+  }
+
+  async function emitSent(onSent: OnSentMessage | undefined, receipt: SentMessageReceipt): Promise<void> {
+    if (!onSent) return
+    try {
+      await onSent(receipt)
+    } catch (error) {
+      // QQ 已真实发送：回执簿记失败绝不能触发被动→主动降级而重复发一条。
+      console.error("[delivery] onSent 回执处理失败（QQ 消息已发送）:", error)
+    }
+  }
+
   // 统一投递：被动回复优先（ctx.msg_id，5 分钟窗口内、无配额消耗）；
   // 窗口过期/失败降级主动消息（计日配额，超限告警一次）。
   // 观察推送与最终回复共用——超长回合（>被动窗口）的答案靠它送达
   //（2026-10-13 实测教训：回合 >5 分钟时旧路径答案永久丢失）。
   // P 项贴条包装：deliver 入口消化贴条状态——有待贴条则前缀拼入正文；
   // 投递失败则把贴条放回（留待下次），成功才算消化。
-  async function deliver(ctx: MessageContext, text: string): Promise<boolean> {
+  async function deliver(ctx: MessageContext, text: string, onSent?: OnSentMessage): Promise<boolean> {
     // 出站推送门（design §3.4，owner 2026-11-14 会话隔离裁定）：QQ 窗只呈现当前绑定
     // 会话——锚定会话≠当前绑定即不推（结果已入锚定会话历史，可经历史/桌面端回读）。
     if (ctx.anchorSessionId && pushGate && !pushGate(ctx.userId, ctx.anchorSessionId)) {
@@ -417,7 +441,7 @@ export function createDelivery(
     // QQ 渲染适配：有序列表改写，防 QQ 端跨段落续编（桌面所见=QQ 所见）
     const body = qqListNormalize(hadNotice ? UNDELIVERED_NOTICE + text : text)
     try {
-      await deliverCore(ctx, body)
+      await deliverCore(ctx, body, onSent)
       return true
     } catch (error) {
       // 发送失败不占去重位，后续恢复/重试仍可送达。
@@ -427,7 +451,7 @@ export function createDelivery(
     }
   }
 
-  async function deliverCore(ctx: MessageContext, text: string): Promise<void> {
+  async function deliverCore(ctx: MessageContext, text: string, onSent?: OnSentMessage): Promise<void> {
     // B1：被动尝试前预判额度，耗尽/过期直接走主动（避免注定被拒的被动请求）
     const passive = ctx.msgId ? passiveLimiter.checkLimit(ctx.msgId) : null
     if (passive?.shouldFallbackToProactive) {
@@ -436,7 +460,7 @@ export function createDelivery(
       )
     } else {
       try {
-        await sendReply(ctx, text)
+        await sendReply(ctx, text, onSent)
         return
       } catch (error) {
         console.warn(
@@ -452,9 +476,12 @@ export function createDelivery(
     const rideMsgId = selectRideMsgId(lastCtx.get(ctx.userId), ctx, Date.now(), RIDE_WINDOW_MS)
     if (rideMsgId) {
       try {
-        const rideIds = await sendActive(ctx, text, rideMsgId)
+        const rideReceipts = await sendActive(ctx, text, rideMsgId)
         passiveLimiter.record(rideMsgId)
-        for (const id of rideIds) recordMessage(scopeKeyOf(ctx), id, text)
+        for (const receipt of rideReceipts) {
+          recordSent(scopeKeyOf(ctx), text, receipt)
+          await emitSent(onSent, receipt)
+        }
         console.log(`[bridge] 主动降级已骑被动窗口 msgId=${rideMsgId}，省一次主动配额`)
         return
       } catch {
@@ -481,15 +508,18 @@ export function createDelivery(
       }
       throw new Error("主动消息已达 QQ 官方日上限，本条无法送达")
     }
-    const activeIds = await sendActive(ctx, text)
-    for (const id of activeIds) recordMessage(scopeKeyOf(ctx), id, text)
+    const activeReceipts = await sendActive(ctx, text)
+    for (const receipt of activeReceipts) {
+      recordSent(scopeKeyOf(ctx), text, receipt)
+      await emitSent(onSent, receipt)
+    }
     q.count++
     saveQuotaMap(QUOTA_FILE, activeQuota) // O5：计数落盘，跨重启不归零
   }
 
-  async function safeDeliver(c: MessageContext, text: string): Promise<boolean> {
+  async function safeDeliver(c: MessageContext, text: string, onSent?: OnSentMessage): Promise<boolean> {
     try {
-      return await deliver(c, text)
+      return await deliver(c, text, onSent)
     } catch (error) {
       undelivered.add(c.userId) // P 项：最终失败 → 贴条待下次消化
       console.error("[bridge] 消息无法送达（被动+主动均失败）:", error)
@@ -499,8 +529,8 @@ export function createDelivery(
 
   // 主动消息（不带 msg_id）：markdown 优先，失败回退纯文本。
   // passiveMsgId（B-msgid 2026-10-29）："骑"被动窗口时传入，平台接受则按被动计。
-  // 返回服务端回执消息 id 列表（引用解析缓存登记用）。
-  async function sendActive(ctx: MessageContext, text: string, passiveMsgId?: string): Promise<string[]> {
+  // 返回每个服务端消息回执（id + 可选 refIdx）。
+  async function sendActive(ctx: MessageContext, text: string, passiveMsgId?: string): Promise<SentMessageReceipt[]> {
     // 分钟维节流（官方 20 条/分钟，2026-11-18 严格官方化）：滚动窗满 → 睡到窗口滑动再发。
     // 骑被动窗口的投递（passiveMsgId 非空）平台按被动计，不占主动分钟窗。
     if (!passiveMsgId) {
@@ -515,43 +545,50 @@ export function createDelivery(
     const isGroup = ctx.type === "group" && ctx.groupId
     // 主动 markdown 同样走围栏归一（与被动回复同口径，防未闭合/空围栏对渲染成空卡片）
     const mdText = normalizeOutboundMarkdown(text)
-    const record = (ids: string[]): string[] => {
+    const record = (response: MessageResponse | undefined): SentMessageReceipt[] => {
+      const receipts = response?.id ? [{
+        id: response.id,
+        ...(response.ext_info?.ref_idx ? { refIdx: response.ext_info.ref_idx } : {}),
+      }] : []
       // 发送成功才记主动分钟窗（失败不计，同被动限额器口径）
-      if (!passiveMsgId && ids.length > 0) logActiveSend(activeMinuteLog, ctx.userId, Date.now())
-      return ids
+      if (!passiveMsgId && receipts.length > 0) logActiveSend(activeMinuteLog, ctx.userId, Date.now())
+      return receipts
     }
     try {
       if (isGroup) {
         const r = await sendGroupMessage(token, ctx.groupId!, mdText, passiveMsgId, seq, true)
-        return record(r?.id ? [r.id] : [])
+        return record(r)
       }
       const r = await sendC2CMessage(token, ctx.userId, mdText, passiveMsgId, seq, true)
-      return record(r?.id ? [r.id] : [])
+      return record(r)
     } catch (error) {
       console.error("[bridge] 主动 markdown 发送失败，回退纯文本:", error)
     }
     if (isGroup) {
       const r = await sendGroupMessage(token, ctx.groupId!, text, passiveMsgId, seq, false)
-      return record(r?.id ? [r.id] : [])
+      return record(r)
     }
     const r = await sendC2CMessage(token, ctx.userId, text, passiveMsgId, seq, false)
-    return record(r?.id ? [r.id] : [])
+    return record(r)
   }
 
-  async function sendReply(ctx: MessageContext, text: string): Promise<void> {
+  async function sendReply(ctx: MessageContext, text: string, onSent?: OnSentMessage): Promise<void> {
     const accessToken = await getAccessToken(config.qq.appId, config.qq.clientSecret)
-    // J-轻：伪流式错峰（多片时隔 300ms 逐段到达）；replyToQQ 返回片数与服务端消息 id
+    const scope = scopeKeyOf(ctx)
+    // J-轻：伪流式错峰（多片时隔 300ms 逐段到达）。每片成功立即登记，后续片失败
+    // 也不丢已发片的引用缓存/摘要锚点；严禁等整批成功后才补记。
     const result = await replyToQQ(accessToken, ctx, text, {
       staggerMs: STREAM_STAGGER_MS,
+      onReceipt: async (receipt) => {
+        recordSent(scope, text, receipt)
+        await emitSent(onSent, receipt)
+      },
     })
     // B1：被动回复成功才记额度（失败不计，避免虚耗）；按片记账——平台限额按"条"计，
     // 多片回复此前少计 N-1（J-轻顺手修正）；bridge 直调与 deliver 共用此出口
     if (ctx.msgId) {
       for (let i = 0; i < result.chunks; i++) passiveLimiter.record(ctx.msgId)
     }
-    // 缺口 1：我方出站回复登记进上下文缓存（引用解析可命中 AI 答案）
-    const scope = scopeKeyOf(ctx)
-    for (const id of result.ids) recordMessage(scope, id, text)
   }
 
   return { enqueuePush, deliver, safeDeliver, sendReply }

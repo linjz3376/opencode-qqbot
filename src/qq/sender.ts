@@ -5,7 +5,13 @@
 // QQ 机器人自定义 Markdown（msg_type=2）已对单聊/群聊全量开放，无需模板。
 // QQ markdown 能完整渲染标准语法: 表格、行内代码/代码块、加粗、标题、列表、链接、引用等。
 // 因此主路径直接透传 AI 的 markdown 原文，交给 QQ 渲染；仅在发送失败时回退纯文本。
-import { sendC2CMessage, sendGroupMessage, getNextMsgSeq, type MessageResponse } from "./api.js"
+import {
+  sendC2CMessage,
+  sendGroupMessage,
+  getNextMsgSeq,
+  type MessageResponse,
+  type SentMessageReceipt,
+} from "./api.js"
 import type { MessageContext } from "./types.js"
 import { normalizeOutboundMarkdown, matchFence, type FenceToken } from "../core/markdown.js"
 import { stripInteractionTags } from "../core/notices.js"
@@ -329,12 +335,16 @@ async function sendChunk(
 export interface ReplyToQQOptions {
   /** J-轻（2026-10-30）：伪流式错峰——多片发送时片间间隔 ms（默认 0=一次性全发） */
   staggerMs?: number
+  /** 每片真实发送成功立即回调；后续分片失败也不丢已发分片的锚点。 */
+  onReceipt?: (receipt: SentMessageReceipt) => void | Promise<void>
 }
 
 export interface ReplyResult {
   chunks: number
-  /** 服务端回执的消息 id（引用解析缓存登记用） */
+  /** 服务端回执的消息 id（兼容既有引用缓存调用方） */
   ids: string[]
+  /** 每个真实分片的完整回执：refIdx 才是摘要锚点 lookup 键。 */
+  receipts: SentMessageReceipt[]
 }
 
 export async function replyToQQ(
@@ -352,14 +362,26 @@ export async function replyToQQ(
   const plainChunks = splitMessage(plainFormatted, PLAIN_MAX_BYTES)
 
   const delays = staggerDelays(mdChunks.length, options?.staggerMs ?? 0)
-  const ids: string[] = []
+  const receipts: SentMessageReceipt[] = []
   for (let i = 0; i < mdChunks.length; i++) {
     if (i > 0 && delays[i - 1]) await sleep(delays[i - 1])
     const msgSeq = getNextMsgSeq(ctx.msgId)
     // 纯文本分片可能与 markdown 分片数量不一致，按索引兜底取对应/最后一片
     const plainChunk = plainChunks[i] ?? plainChunks[plainChunks.length - 1] ?? mdChunks[i]
     const res = await sendChunk(accessToken, ctx, mdChunks[i], plainChunk, msgSeq)
-    if (res?.id) ids.push(res.id)
+    if (res?.id) {
+      const receipt: SentMessageReceipt = {
+        id: res.id,
+        ...(res.ext_info?.ref_idx ? { refIdx: res.ext_info.ref_idx } : {}),
+      }
+      receipts.push(receipt)
+      try {
+        await options?.onReceipt?.(receipt)
+      } catch (error) {
+        // 已发分片的簿记错误不得中断后续发送，更不能触发上层降级重发。
+        console.error("[qq-sender] 分片回执回调失败:", error)
+      }
+    }
   }
-  return { chunks: mdChunks.length, ids }
+  return { chunks: mdChunks.length, ids: receipts.map((receipt) => receipt.id), receipts }
 }

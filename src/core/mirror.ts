@@ -7,8 +7,17 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs"
 import type { MessageContext } from "../qq/types.js"
 import type { OpencodeClient } from "../opencode/client.js"
 import { createEventStream } from "../opencode/eventstream.js"
-import { buildDigest, digestAnchorUserId, digestTurnKey } from "../opencode/mirror.js"
+import {
+  buildDigest,
+  clipDigestTitle,
+  digestAnchorUserId,
+  digestSessionLabel,
+  digestTurnKey,
+} from "../opencode/mirror.js"
 import { laneKeyOf } from "./message-queue.js"
+import { redactSecrets } from "../opencode/history.js"
+import type { OnSentMessage } from "./delivery.js"
+import type { MirrorAnchorStore } from "./mirror-anchors.js"
 import type { SessionManager } from "../opencode/sessions.js"
 import type { MirrorApi } from "../commands.js"
 
@@ -55,11 +64,13 @@ export interface MirrorDeps {
   eventStream: EventStream
   client: OpencodeClient
   lastCtx: ReadonlyMap<string, MessageContext> // bridge 拥有写权，本域只读
-  safeDeliver: (ctx: MessageContext, text: string) => Promise<boolean>
+  safeDeliver: (ctx: MessageContext, text: string, onSent?: OnSentMessage) => Promise<boolean>
   bgWaits: ReadonlyMap<string, { cancel: () => void }> // 后台等待在途则不解锁
   busyUsers: ReadonlySet<string> // 会话主人在忙则不解锁（5 秒宽限内再判定）
   /** 多角色（2026-11-17）：镜像开关文件可按角色注入；缺省 legacy 全局 settings.json */
   settingsFile?: string
+  /** 角色级摘要回复锚点；缺省仅用于轻量组件测试，不持久化。 */
+  anchorStore?: MirrorAnchorStore
   /** A 方案（2026-11-23）：摘要投递前过 cron 标记钩——注册提醒并返回剥净正文。
    *  桌面端发起的回合也会输出 QQBOT_PAYLOAD，不经此钩会原样泄漏到 QQ。 */
   onDigest?: (userId: string, digest: string) => string
@@ -89,28 +100,52 @@ export function createMirror(deps: MirrorDeps): Mirror {
   // 本册，镜像前核对摘要锚定的用户消息 id 是否命中——重放再迟也改变不了消息来源。
   const qqPromptIds = new Map<string, Set<string>>() // sessionId -> QQ 派发过的 promptId 环
   const QQ_PROMPT_ID_CAP = 200
+  const MIRROR_SESSION_STATE_CAP = 500
   function markQqPrompt(sessionId: string, promptId: string): void {
     if (!promptId) return
-    let set = qqPromptIds.get(sessionId)
-    if (!set) {
-      set = new Set()
-      qqPromptIds.set(sessionId, set)
-    }
+    const set = qqPromptIds.get(sessionId) ?? new Set<string>()
+    qqPromptIds.delete(sessionId) // LRU：最近使用移到末尾
     if (set.size >= QQ_PROMPT_ID_CAP) {
       const first = set.values().next().value
       if (first !== undefined) set.delete(first)
     }
     set.add(promptId)
+    qqPromptIds.set(sessionId, set)
+    while (qqPromptIds.size > MIRROR_SESSION_STATE_CAP) {
+      const oldest = qqPromptIds.keys().next().value
+      if (oldest === undefined) break
+      qqPromptIds.delete(oldest)
+    }
   }
   const mirroredTurns = new Map<string, string>() // 逻辑回合幂等：多 location/重复完成事件只投一次
+  function rememberMirroredTurn(sessionId: string, turnKey: string): void {
+    mirroredTurns.delete(sessionId)
+    mirroredTurns.set(sessionId, turnKey)
+    while (mirroredTurns.size > MIRROR_SESSION_STATE_CAP) {
+      const oldest = mirroredTurns.keys().next().value
+      if (oldest === undefined) break
+      mirroredTurns.delete(oldest)
+    }
+  }
   const mirrorState = { enabled: loadMirrorEnabled(deps.settingsFile) }
 
   // ===== 摘要镜像（E 阶段 A 方案）：桌面会话轮次完成 → QQ 摘要卡 =====
   // 与 /watch 观察推送互补：观察给过程里程碑，镜像给问答正文摘要。
   // QQ 自己发起的轮次由 promptAndWait 正常回复，不重复镜像（qqTurnActive 守卫）。
+  // 订阅不是历史累加：始终是「当前绑定 sessionId 去重集」的幂等投影。
   function ensureMirrorSubs(): void {
-    if (!mirrorState.enabled) return
-    for (const { sessionId } of sessions.all()) {
+    const desired = new Set(
+      (mirrorState.enabled ? sessions.all() : []).map((binding) => binding.sessionId),
+    )
+    let added = 0
+    let removed = 0
+    for (const [sessionId, unsub] of [...mirrorUnsubs]) {
+      if (desired.has(sessionId)) continue
+      unsub()
+      mirrorUnsubs.delete(sessionId)
+      removed++
+    }
+    for (const sessionId of desired) {
       if (mirrorUnsubs.has(sessionId)) continue
       mirrorUnsubs.set(
         sessionId,
@@ -124,13 +159,21 @@ export function createMirror(deps: MirrorDeps): Mirror {
           void mirrorTurn(sessionId)
         }),
       )
+      added++
+    }
+    if (added > 0 || removed > 0) {
+      console.log(
+        `[mirror-reconcile] desired=${desired.size} added=${added} removed=${removed} actual=${mirrorUnsubs.size}`,
+      )
     }
   }
 
-  function disableMirrorSubs(): void {
-    for (const unsub of mirrorUnsubs.values()) unsub()
-    mirrorUnsubs.clear()
+  // 所有绑定变更即时对账；60s 周期只作遗漏兜底。定时器不阻止进程退出。
+  if (typeof sessions.onBindingChange === "function") {
+    sessions.onBindingChange(() => ensureMirrorSubs())
   }
+  const reconcileTimer = setInterval(ensureMirrorSubs, 60_000)
+  reconcileTimer.unref?.()
 
   // QQ 轮次结束后延迟解锁镜像：SSE 完成事件可能晚于 promptAndWait 返回，
   // 5 秒宽限内若又有新 QQ 回合/后台等待在途则不解锁（防竞态开窗）。
@@ -149,11 +192,21 @@ export function createMirror(deps: MirrorDeps): Mirror {
 
   async function mirrorTurn(sessionID: string): Promise<void> {
     try {
-      const owners = sessions.all().filter((x) => x.sessionId === sessionID).map((x) => x.userId)
+      const bindings = sessions.all().filter((x) => x.sessionId === sessionID)
+      const owners = bindings.map((x) => x.userId)
       if (owners.length === 0) {
         console.log(`[mirror] 跳过：会话无映射主人 session=${sessionID}`)
         return
       }
+      let title: string | undefined
+      if (typeof client.session.get === "function") {
+        try {
+          title = (await client.session.get({ path: { id: sessionID } }))?.data?.title
+        } catch {
+          // 标题只是展示元数据：服务端读取失败走映射缓存，不阻断摘要正文。
+        }
+      }
+      title ??= bindings.find((binding) => binding.title?.trim())?.title
       const listJson = await client.session.messages({ path: { id: sessionID } })
       const messages = listJson?.data ?? []
       const turnKey = digestTurnKey(messages)
@@ -167,16 +220,19 @@ export function createMirror(deps: MirrorDeps): Mirror {
       const anchorId = digestAnchorUserId(messages)
       if (anchorId && qqPromptIds.get(sessionID)?.has(anchorId)) {
         console.log(`[mirror] 跳过：QQ 直答回合（来源身份核对命中）session=${sessionID} prompt=${anchorId}`)
-        if (turnKey) mirroredTurns.set(sessionID, turnKey)
+        if (turnKey) rememberMirroredTurn(sessionID, turnKey)
         return
       }
-      const digest = buildDigest(messages, deps.goalObjectiveOf?.(sessionID))
+      const digest = buildDigest(messages, deps.goalObjectiveOf?.(sessionID), {
+        sessionId: sessionID,
+        title,
+      })
       if (!digest) {
         console.log(`[mirror] 跳过：无可摘要内容（空轮/纯工具轮）session=${sessionID}`)
         return
       }
       // 在投递前占位：两个完成事件并发到达时，后到的回调也会命中同一回合并被去重。
-      if (turnKey) mirroredTurns.set(sessionID, turnKey)
+      if (turnKey) rememberMirroredTurn(sessionID, turnKey)
       for (const userId of owners) {
         // 无最近 ctx（重启后尚未收到新消息）→ 构造主动通道 ctx，
         // deliver 的被动尝试失败会自然降级为主动消息（D4 配额内）。
@@ -188,7 +244,31 @@ export function createMirror(deps: MirrorDeps): Mirror {
         const cronHook = deps.onDigest
         const outText = cronHook ? cronHook(userId, digest) : digest
         if (!outText.trim()) continue // 纯提醒标记的摘要：注册即全部语义，无可镜像内容
-        await safeDeliver(ctx, outText)
+        const onSent: OnSentMessage = (receipt) => {
+          if (!deps.anchorStore) return
+          if (!receipt.refIdx) {
+            console.warn(
+              `[mirror-anchor] QQ 未返回 ref_idx，摘要不可安全路由 session=${sessionID} user=${userId.slice(0, 8)}…`,
+            )
+            return
+          }
+          try {
+            deps.anchorStore.record({
+              refIdx: receipt.refIdx,
+              messageId: receipt.id,
+              userId,
+              sessionId: sessionID,
+              title: clipDigestTitle(redactSecrets(title ?? "")),
+              sentAt: Date.now(),
+            })
+            console.log(
+              `[mirror-anchor] 已登记 session=${digestSessionLabel(sessionID)} user=${userId.slice(0, 8)}…`,
+            )
+          } catch (error) {
+            console.error("[mirror-anchor] 锚点落盘失败，后续引用将 fail-closed:", error)
+          }
+        }
+        await safeDeliver(ctx, outText, onSent)
       }
       console.log(`[mirror] 会话 ${sessionID} 摘要已镜像给 ${owners.length} 个用户`)
     } catch (error) {
@@ -204,17 +284,18 @@ export function createMirror(deps: MirrorDeps): Mirror {
       if (enabled) {
         if (!prev) ensureMirrorSubs()
       } else {
-        disableMirrorSubs()
+        ensureMirrorSubs()
       }
       return enabled
         ? "✅ 摘要镜像已开启：桌面会话轮次完成后推送问答摘要"
         : "🔇 摘要镜像已关闭（/status mirror on 重新开启）"
     },
     status() {
+      const bindings = sessions.all().length
       const subs = mirrorUnsubs.size
       return mirrorState.enabled
-        ? `📋 摘要镜像：开（已挂 ${subs} 个会话订阅）`
-        : "📋 摘要镜像：关（/status mirror on 开启）"
+        ? `📋 摘要镜像：开（绑定 ${bindings} 个用户 / ${subs} 个会话订阅）`
+        : `📋 摘要镜像：关（绑定 ${bindings} 个用户 / ${subs} 个会话订阅，/status mirror on 开启）`
     },
   }
 

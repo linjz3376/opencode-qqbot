@@ -10,6 +10,43 @@ import { redactSecrets } from "./history.js"
 import { labelBlock } from "../core/markdown.js"
 
 const USER_CLIP = 160
+export const DIGEST_TITLE_MAX_WIDTH = 20 // 10 个中文，或 20 个 ASCII 的等效显示宽度
+
+function isWideCodePoint(cp: number): boolean {
+  return cp >= 0x1100 && (
+    cp <= 0x115f || cp === 0x2329 || cp === 0x232a ||
+    (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe10 && cp <= 0xfe19) ||
+    (cp >= 0xfe30 && cp <= 0xfe6f) ||
+    (cp >= 0xff00 && cp <= 0xff60) ||
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x1f000 && cp <= 0x1faff) ||
+    (cp >= 0x20000 && cp <= 0x3fffd)
+  )
+}
+
+/** 会话标题按终端等效显示宽度截断：中文/全角/emoji 2 列，ASCII 1 列。 */
+export function clipDigestTitle(value: string | undefined, maxWidth = DIGEST_TITLE_MAX_WIDTH): string {
+  const title = (value ?? "").replace(/\s+/g, " ").trim() || "未命名会话"
+  let width = 0
+  let out = ""
+  for (const char of title) {
+    const cp = char.codePointAt(0) ?? 0
+    const charWidth = /\p{Mark}/u.test(char) || cp === 0x200d || (cp >= 0xfe00 && cp <= 0xfe0f)
+      ? 0
+      : isWideCodePoint(cp) ? 2 : 1
+    if (width + charWidth > maxWidth) return `${out}...`
+    out += char
+    width += charWidth
+  }
+  return out
+}
+
+export function digestSessionLabel(sessionId: string): string {
+  return sessionId.length > 10 ? `${sessionId.slice(0, 10)}…` : sessionId
+}
 
 // E2（2026-10-29，用户要求"摘要回全文"）：答案截断上限改为运行时可配——
 // 默认 0=不截断回全文（投递层 splitMessage 自动分条送达）；设
@@ -50,8 +87,17 @@ export function digestTurnKey(messages: SessionMessage[]): string | null {
   return null
 }
 
+export interface DigestIdentity {
+  sessionId: string
+  title?: string
+}
+
 // 构建最近一轮问答的摘要卡；返回 null = 无可镜像正文。
-export function buildDigest(messages: SessionMessage[], goalObjective?: string): string | null {
+export function buildDigest(
+  messages: SessionMessage[],
+  goalObjective?: string,
+  identity?: DigestIdentity,
+): string | null {
   const ordered = [...messages].reverse()
 
   // A 方案第三桶（owner 2026-11-23）：回合边界消息 type=synthetic = 引擎自主注入
@@ -90,7 +136,13 @@ export function buildDigest(messages: SessionMessage[], goalObjective?: string):
   }
   if (!answer) return null
 
-  const lines = [goalDriven ? "🎯 目标续跑摘要" : "📋 桌面问答摘要"]
+  const kind = goalDriven ? "🎯 目标续跑摘要" : "📋 桌面问答摘要"
+  const lines = [
+    identity
+      ? `${kind} · ${clipDigestTitle(identity.title)} · ${digestSessionLabel(identity.sessionId)}`
+      : kind,
+  ]
+  if (identity) lines.push("↩️ 引用回复仅在该会话仍为当前绑定时受理")
   if (userText) lines.push(`🧑 ${clip(userText, USER_CLIP)}`)
   const clipLimit = answerClipLimit()
   if (clipLimit > 0) {

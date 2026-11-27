@@ -346,8 +346,16 @@ export async function getGatewayUrl(accessToken: string): Promise<string> {
  * QQ 发消息成功后的通用响应结构。
  */
 export interface MessageResponse {
+  /** 新发出的 QQ 消息 ID（撤回等用途），不是后续引用 lookup 的键。 */
   id: string
   timestamp: number | string
+  /** 官方引用索引：机器人消息被长按回复时，入站 ref_msg_idx 对应此 ref_idx。 */
+  ext_info?: { ref_idx?: string }
+}
+
+export interface SentMessageReceipt {
+  id: string
+  refIdx?: string
 }
 
 /**

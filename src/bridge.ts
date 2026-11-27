@@ -38,6 +38,11 @@ import {
   type WatchApi,
 } from "./commands.js"
 import { createMirror } from "./core/mirror.js"
+import {
+  createMirrorAnchorStore,
+  type MirrorAnchorEntry,
+} from "./core/mirror-anchors.js"
+import { clipDigestTitle, digestSessionLabel } from "./opencode/mirror.js"
 import { MessageQueue, laneKeyOf, laneScope, sessionIdOfLane, userIdOfLane, previewText, agoLabel, intentKeyOf } from "./core/message-queue.js"
 import { classifyProviderError, rescueText } from "./core/error-rescue.js"
 import { NOTICE } from "./core/notices.js"
@@ -101,6 +106,43 @@ export { parsePermissionDecision, formatPermissionPrompt, formatPermissionConfli
 export function isSessionBusyError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
   return /active prompt|[-−]32603/.test(message)
+}
+
+export function isMirrorDigestText(text: string | null | undefined): boolean {
+  const value = text?.trim() ?? ""
+  return value.startsWith("📋 桌面问答摘要") || value.startsWith("🎯 目标续跑摘要")
+}
+
+export function commandNeedsMirrorAnchorGate(content: string): boolean {
+  const match = content.trim().match(/^\/(queue|amend|goal|btw)\b([\s\S]*)$/i)
+  if (!match) return false
+  const args = (match[2] ?? "").trim()
+  if (!args) return false
+  if (match[1]?.toLowerCase() === "queue" && /^(?:all(?:\s+\d+)?|clear|drop\s+\d+|\d+)$/i.test(args)) {
+    return false
+  }
+  return true
+}
+
+export type MirrorAnchorGateDecision =
+  | { kind: "pass" }
+  | { kind: "match"; anchor: MirrorAnchorEntry }
+  | { kind: "conflict"; anchor: MirrorAnchorEntry }
+  | { kind: "unknown" }
+
+/** 纯路由判定：只有本人有效摘要锚点与入站绑定快照相同才允许沿摘要语境继续。 */
+export function decideMirrorAnchorGate(input: {
+  anchor?: MirrorAnchorEntry
+  quoteText?: string | null
+  currentSessionId: string | null
+}): MirrorAnchorGateDecision {
+  if (input.anchor) {
+    return input.currentSessionId && input.anchor.sessionId === input.currentSessionId
+      ? { kind: "match", anchor: input.anchor }
+      : { kind: "conflict", anchor: input.anchor }
+  }
+  if (isMirrorDigestText(input.quoteText)) return { kind: "unknown" }
+  return { kind: "pass" }
 }
 
 // E 闲置回收纯函数（导出供测试，2026-10-29）：返回应回收的闲置会话 id——
@@ -418,6 +460,7 @@ export function createBridge(
   const roleFile = (name: string): string => storageFile(name, storageAppId)
   // 在途台账按角色绑定实例（同进程多角色并发不互踩，见 inflight-journal 工厂）
   const inflight = createInflightJournal(storageAppId ? roleFile("inflight.json") : undefined)
+  const mirrorAnchors = createMirrorAnchorStore(roleFile("mirror-anchors.json"))
   // H2 停滞提醒文案状态开关就用现成 env 读取风格；这里同步实现⑦开关——
   // 2026-11-03 用户拍板：「已收到」回执默认不发（非调试无价值），调试期在
   // ~/.openqq/.env 设 QQ_ACK_RECEIPT=1 开启。loadEnvFile 全量注入 process.env，
@@ -929,6 +972,55 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     }
   }
 
+  const mirrorQuoteCache = new WeakMap<MessageContext, { embedded: string | null; quoted: string | null }>()
+  function quoteContextOf(ctx: MessageContext): { embedded: string | null; quoted: string | null } {
+    const cached = mirrorQuoteCache.get(ctx)
+    if (cached) return cached
+    const embedded = extractEmbeddedQuote(ctx.rawEvent)
+    const quoted = embedded ?? (ctx.referencedMsgId ? resolveQuote(scopeKeyOf(ctx), ctx.referencedMsgId) : null)
+    const result = { embedded, quoted }
+    mirrorQuoteCache.set(ctx, result)
+    return result
+  }
+
+  function mirrorAnchorDecision(ctx: MessageContext, currentSessionId: string | null): MirrorAnchorGateDecision {
+    const { quoted } = quoteContextOf(ctx)
+    const anchor = mirrorAnchors.resolve(ctx.userId, ctx.referencedMsgId)
+    return decideMirrorAnchorGate({ anchor, quoteText: quoted, currentSessionId })
+  }
+
+  function anchorRejectText(
+    decision: Extract<MirrorAnchorGateDecision, { kind: "conflict" | "unknown" }>,
+    currentSessionId: string | null,
+    userId: string,
+  ): string {
+    if (decision.kind === "unknown") {
+      return "⚠️ 无法确认这条旧摘要所属会话，本次未发送。请去掉引用后重发，或先通过 /sessions 切换到摘要所属会话。"
+    }
+    const source = `${clipDigestTitle(redactSecrets(decision.anchor.title))}（${digestSessionLabel(decision.anchor.sessionId)}）`
+    const current = sessions.getSession(userId)
+    const currentLabel = currentSessionId
+      ? `${clipDigestTitle(redactSecrets(current?.title ?? ""))}（${digestSessionLabel(currentSessionId)}）`
+      : "无绑定会话"
+    return `⚠️ 这条回复引用的是 ${source} 的摘要，当前绑定为 ${currentLabel}。\n为避免误操作，本次未发送。请用 /sessions 切回该会话后重发；或去掉引用，明确发送到当前会话。`
+  }
+
+  async function rejectMirrorAnchor(
+    ctx: MessageContext,
+    decision: Extract<MirrorAnchorGateDecision, { kind: "conflict" | "unknown" }>,
+    currentSessionId: string | null,
+  ): Promise<void> {
+    const anchor = decision.kind === "conflict" ? decision.anchor.sessionId : "unknown"
+    console.log(
+      `[anchor-gate] result=${decision.kind} user=${ctx.userId.slice(0, 8)}… anchor=${anchor === "unknown" ? anchor : digestSessionLabel(anchor)} current=${currentSessionId ? digestSessionLabel(currentSessionId) : "∅"}`,
+    )
+    // 拒绝回执属于控制面：不得携带旧摘要锚，否则会被 notifyUser 的 push gate 自己拦掉。
+    await notifyUser(
+      { ...ctx, anchorSessionId: undefined },
+      anchorRejectText(decision, currentSessionId, ctx.userId),
+    )
+  }
+
   // O7b：审批域门面（挂起槽/等待/裁决/跨重启恢复全在 core/permission.ts）
   // ★ 结合部契约（2026-11-17 固化）：onPermission（回合内即时推送，SSE permission.asked）
   // 与常驻交互监听（桌面端源审批 pushExternal）是同一挂起槽的两个入口——裁决/TTL/
@@ -1015,6 +1107,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
     busyUsers,
     // 多角色：镜像开关按角色分文件（缺省 legacy 全局）
     settingsFile: storageAppId ? roleFile("settings.json") : undefined,
+    anchorStore: mirrorAnchors,
     // A 方案（owner 2026-11-23）：桌面端回合的摘要同样过 cron 钩——注册提醒+剥净标记
     onDigest: (userId, digest) => {
       const hit = parseCronReminder(digest, Date.now())
@@ -1862,6 +1955,12 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       inflight.settle(ctx.msgId, undefined, reason)
       console.log(`[queue] release-early msg=${shortId(ctx.msgId)} reason=${reason}${note ? ` note=${note}` : ""}`)
     }
+    const releaseAnchorClaim = (note: "anchor-conflict" | "anchor-unknown"): void => {
+      if (ctx.msgId && claimedContexts.has(ctx)) {
+        inflight.markStage(ctx.msgId, "claimed", { lastError: note }, { force: true })
+      }
+      releaseClaimed("blocked", note)
+    }
     try {
       // P1 修复（2026-11-03，外部复盘核验）：拒绝时记录 openid——新用户无任何
       // 途径获取自己的 openid 填 ALLOWED_USERS，首配死锁；白名单内不打印（无需）。
@@ -1916,6 +2015,14 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       const gateContent = normalizeForCommandGate(content)
       if (isCommand(gateContent)) {
         const gateCtx = gateContent === content ? ctx : { ...ctx, content: gateContent }
+        if (commandNeedsMirrorAnchorGate(gateContent)) {
+          const decision = mirrorAnchorDecision(gateCtx, anchorSid)
+          if (decision.kind === "conflict" || decision.kind === "unknown") {
+            releaseAnchorClaim(decision.kind === "conflict" ? "anchor-conflict" : "anchor-unknown")
+            await rejectMirrorAnchor(ctx, decision, anchorSid)
+            return
+          }
+        }
         const reply = await handleCommand(gateCtx, commandContext)
         await notifyUser(ctx, reply)
         releaseClaimed("dropped")
@@ -1972,6 +2079,13 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           claimedContexts.add(ctx)
         }
         claimedMsgId = ctx.msgId
+      }
+
+      const mirrorGate = mirrorAnchorDecision(ctx, anchorSid)
+      if (mirrorGate.kind === "conflict" || mirrorGate.kind === "unknown") {
+        releaseAnchorClaim(mirrorGate.kind === "conflict" ? "anchor-conflict" : "anchor-unknown")
+        await rejectMirrorAnchor(ctx, mirrorGate, anchorSid)
+        return
       }
 
       if (busyUsers.has(lane) && !claimedContexts.has(ctx)) {
@@ -2085,8 +2199,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
         // 先于本条登记（顺序不可反：本条入缓存后才能被后续消息引用）
         // N 项（2026-10-30）：双通道——QQ 事件内嵌被引内容（message_type=103）
         // 为权威来源优先；缺失才回落本地缓存（跨重启/老消息引用也能解析）。
-        const embeddedQuote = extractEmbeddedQuote(ctx.rawEvent)
-        const quoted = embeddedQuote ?? (ctx.referencedMsgId ? resolveQuote(scopeKeyOf(ctx), ctx.referencedMsgId) : null)
+        const { quoted } = quoteContextOf(ctx)
         if (quoted) ctx.quoteText = quoted
         recordMessage(scopeKeyOf(ctx), ctx.msgId, ctx.content)
         // 新回合取代旧的后台等待（steer 合并运行时只投递一次合并结果）

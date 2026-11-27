@@ -35,6 +35,8 @@ export interface C2CMessageEvent {
   timestamp: string
   message_scene?: {
     source: string
+    /** 官方 103 引用事件：ref_msg_idx=<发送响应 ext_info.ref_idx> */
+    ext?: string[]
   }
   attachments?: MessageAttachment[]
   /** 长按回复引用的消息 id（QQ 客户端引用消息） */
@@ -78,6 +80,7 @@ export interface GroupMessageEvent {
   timestamp: string
   group_id: string
   group_openid: string
+  message_scene?: { source: string; ext?: string[] }
   attachments?: MessageAttachment[]
   /** 长按回复引用的消息 id（QQ 客户端引用消息） */
   message_reference?: { message_id: string }
@@ -141,7 +144,7 @@ export interface MessageContext {
   groupId?: string
   msgId: string
   content: string
-  /** 长按回复引用的消息 id（经 message_reference 透传） */
+  /** 长按回复的引用索引：官方 ref_msg_idx 优先，兼容 message_reference.message_id */
   referencedMsgId?: string
   /** 解析后的引用上文（bridge 从 context-buffer 解析得到，注入 prompt 前缀） */
   quoteText?: string

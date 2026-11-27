@@ -248,6 +248,17 @@ function briefAttachments(atts: MessageAttachment[]): unknown[] {
   })
 }
 
+export function referencedMessageId(
+  event: Pick<C2CMessageEvent, "message_scene" | "message_reference">,
+): string | undefined {
+  const prefix = "ref_msg_idx="
+  const official = event.message_scene?.ext
+    ?.find((item) => typeof item === "string" && item.startsWith(prefix))
+    ?.slice(prefix.length)
+    .trim()
+  return official || event.message_reference?.message_id
+}
+
 function toC2CMessageContext(event: C2CMessageEvent): MessageContext {
   return {
     type: "c2c",
@@ -256,7 +267,7 @@ function toC2CMessageContext(event: C2CMessageEvent): MessageContext {
     content: normalizeMessageContent(event.content),
     // DEF-qqbot-20261111-P2：纯表情标记随 ctx 传递，bridge 丢弃点据此刻回有据提示（不再静默吞）
     ...(isEmojiOnlyContent(event.content) ? { emojiOnly: true } : {}),
-    referencedMsgId: event.message_reference?.message_id,
+    referencedMsgId: referencedMessageId(event),
     attachments: event.attachments,
     timestamp: event.timestamp,
     rawEvent: event,
@@ -272,7 +283,7 @@ function toGroupMessageContext(event: GroupMessageEvent): MessageContext {
     content: stripGroupAtPrefix(event.content),
     // DEF-qqbot-20261111-P2：群聊同口径（纯表情有据提示不静默）
     ...(isEmojiOnlyContent(event.content) ? { emojiOnly: true } : {}),
-    referencedMsgId: event.message_reference?.message_id,
+    referencedMsgId: referencedMessageId(event),
     attachments: event.attachments,
     timestamp: event.timestamp,
     rawEvent: event,
