@@ -64,7 +64,7 @@ export function createNotifySink(options: NotifySinkOptions): NotifySink {
     const ctx = entry.ctx as MessageContext
     // fail-closed 校验在入队端（CLI）完成；消费端不再重复校验，outbox 快照不可篡改。
     // maxAttempts 由 start 透传到 recover/flush：失败达到上限后保持 failed，不再无限退避。
-    return options.deliver(ctx, text).then(() => ({ delivered: true, text: text.slice(0, 120) }))
+    return options.deliver(ctx, text).then((delivered) => ({ delivered, text: text.slice(0, 120) }))
   })
   outbox.start({ recover: true, maxAttempts }).catch((error) => {
     console.error("[notify-sink] 启动恢复失败:", error instanceof Error ? error.message : error)

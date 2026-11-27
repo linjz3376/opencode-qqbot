@@ -16,7 +16,7 @@ import {
   type MessageResponse,
   type SentMessageReceipt,
 } from "../qq/api.js"
-import { replyToQQ } from "../qq/sender.js"
+import { PartialReplyError, replyToQQ } from "../qq/sender.js"
 import { matchFence, normalizeOutboundMarkdown } from "./markdown.js"
 import { ReplyLimiter } from "./reply-limiter.js"
 import { recordMessage, scopeKeyOf } from "./context-buffer.js"
@@ -67,6 +67,8 @@ function saveQuotaMap(file: string, m: ReadonlyMap<string, { day: string; count:
 // P 项（2026-10-30，参考竞品 pendingNotice 模式）：发送彻底失败不静默——
 // 记"有未送达消息"，下一次成功投递时前缀贴条告知用户（导出供测试）。
 export const UNDELIVERED_NOTICE = "（此前有未能送达的消息）\n"
+export const PARTIAL_DELIVERY_NOTICE =
+  "⚠️ 本轮消息仅部分送达。为避免重复，已阻止自动全文重发；完整结果请发 /history 查看，或重新提问。"
 
 // QQ 渲染适配（2026-11-03 用户双端截图实证）：QQ 官方 markdown 渲染器把跨
 // 段落的有序列表续接编号（原文 1./2. 渲染成 3./4.），与桌面端所见不一致。
@@ -288,14 +290,21 @@ export function selectRideMsgId(
 
 export type OnSentMessage = (receipt: SentMessageReceipt) => void | Promise<void>
 
+export interface DeliveryContentOptions {
+  /** 仅加到第 2 片及后续分片；切分后添加，保证身份标记不会留在上一片。 */
+  continuationPrefix?: string
+}
+
 export interface Delivery {
   /** anchorSessionId=该观察行的锚定会话（出站推送门按它校验当前绑定，design §3.4） */
   enqueuePush: (userId: string, line: string, anchorSessionId?: string) => void
-  /** 返回 true=实际出站成功；false=24h 去重拦截或推送门拦截（DEF-qqbot-20261110-9：调用方据此刻画销账口径） */
-  deliver: (ctx: MessageContext, text: string, onSent?: OnSentMessage) => Promise<boolean>
+  /** 返回 true=完整出站成功；false=24h 去重、推送门或分片部分失败（调用方据此刻画销账口径） */
+  deliver: (ctx: MessageContext, text: string, onSent?: OnSentMessage, content?: DeliveryContentOptions) => Promise<boolean>
   /** 同 deliver；彻底失败时贴条待下次消化并返回 false */
-  safeDeliver: (ctx: MessageContext, text: string, onSent?: OnSentMessage) => Promise<boolean>
-  sendReply: (ctx: MessageContext, text: string, onSent?: OnSentMessage) => Promise<void>
+  safeDeliver: (ctx: MessageContext, text: string, onSent?: OnSentMessage, content?: DeliveryContentOptions) => Promise<boolean>
+  sendReply: (ctx: MessageContext, text: string, onSent?: OnSentMessage, content?: DeliveryContentOptions) => Promise<void>
+  /** 消费一次部分失败标记，供 bridge 区分「部分失败」与「24h 同文去重」。 */
+  consumePartialFailure: (ctx: MessageContext) => boolean
 }
 
 // 投递域门面。lastCtx 为跨域共享状态（bridge 拥有写权），本域只读——
@@ -340,6 +349,7 @@ export function createDelivery(
   const pushQueues = new Map<string, PushQueue>()
   // P 项：彻底投递失败的用户集合（贴条状态），下次成功投递时消化
   const undelivered = new Set<string>()
+  const partialFailures = new WeakSet<MessageContext>()
   const activeQuota = new Map<string, { day: string; count: number; warned: boolean }>()
   // B1（2026-10-29，限额规则与降级方式参考 openclaw-qqbot reply-limiter）：
   // 单 msgId 4 次/1h 窗口，耗尽/过期直接转主动，省一次注定被拒的 API 往返。
@@ -421,7 +431,12 @@ export function createDelivery(
   //（2026-10-13 实测教训：回合 >5 分钟时旧路径答案永久丢失）。
   // P 项贴条包装：deliver 入口消化贴条状态——有待贴条则前缀拼入正文；
   // 投递失败则把贴条放回（留待下次），成功才算消化。
-  async function deliver(ctx: MessageContext, text: string, onSent?: OnSentMessage): Promise<boolean> {
+  async function deliver(
+    ctx: MessageContext,
+    text: string,
+    onSent?: OnSentMessage,
+    content?: DeliveryContentOptions,
+  ): Promise<boolean> {
     // 出站推送门（design §3.4，owner 2026-11-14 会话隔离裁定）：QQ 窗只呈现当前绑定
     // 会话——锚定会话≠当前绑定即不推（结果已入锚定会话历史，可经历史/桌面端回读）。
     if (ctx.anchorSessionId && pushGate && !pushGate(ctx.userId, ctx.anchorSessionId)) {
@@ -441,17 +456,36 @@ export function createDelivery(
     // QQ 渲染适配：有序列表改写，防 QQ 端跨段落续编（桌面所见=QQ 所见）
     const body = qqListNormalize(hadNotice ? UNDELIVERED_NOTICE + text : text)
     try {
-      await deliverCore(ctx, body, onSent)
+      await deliverCore(ctx, body, onSent, content)
       return true
     } catch (error) {
-      // 发送失败不占去重位，后续恢复/重试仍可送达。
+      if (error instanceof PartialReplyError) {
+        partialFailures.add(ctx)
+        console.error(
+          `[delivery] 分片部分失败，禁止全文降级 sent=${error.receipts.length} failedChunk=${error.failedChunkIndex + 1}`,
+        )
+        // 已发前缀不能重复；保留原去重占位，阻止 outbox/恢复路径立即重发同一全文。
+        try {
+          await sendActive(ctx, PARTIAL_DELIVERY_NOTICE)
+        } catch (alertError) {
+          undelivered.add(ctx.userId)
+          console.error("[delivery] 部分失败告警也未能送达:", alertError)
+        }
+        return false
+      }
+      // 完全未发出时不占去重位，后续恢复/重试仍可送达。
       releaseDeliveryAttempt(ctx.userId, text, now)
       if (hadNotice) undelivered.add(ctx.userId)
       throw error
     }
   }
 
-  async function deliverCore(ctx: MessageContext, text: string, onSent?: OnSentMessage): Promise<void> {
+  async function deliverCore(
+    ctx: MessageContext,
+    text: string,
+    onSent?: OnSentMessage,
+    content?: DeliveryContentOptions,
+  ): Promise<void> {
     // B1：被动尝试前预判额度，耗尽/过期直接走主动（避免注定被拒的被动请求）
     const passive = ctx.msgId ? passiveLimiter.checkLimit(ctx.msgId) : null
     if (passive?.shouldFallbackToProactive) {
@@ -460,9 +494,10 @@ export function createDelivery(
       )
     } else {
       try {
-        await sendReply(ctx, text, onSent)
+        await sendReply(ctx, text, onSent, content)
         return
       } catch (error) {
+        if (error instanceof PartialReplyError) throw error
         console.warn(
           "[bridge] 被动回复失败（可能超 5 分钟窗口），降级主动消息:",
           error instanceof Error ? error.message : error,
@@ -517,9 +552,14 @@ export function createDelivery(
     saveQuotaMap(QUOTA_FILE, activeQuota) // O5：计数落盘，跨重启不归零
   }
 
-  async function safeDeliver(c: MessageContext, text: string, onSent?: OnSentMessage): Promise<boolean> {
+  async function safeDeliver(
+    c: MessageContext,
+    text: string,
+    onSent?: OnSentMessage,
+    content?: DeliveryContentOptions,
+  ): Promise<boolean> {
     try {
-      return await deliver(c, text, onSent)
+      return await deliver(c, text, onSent, content)
     } catch (error) {
       undelivered.add(c.userId) // P 项：最终失败 → 贴条待下次消化
       console.error("[bridge] 消息无法送达（被动+主动均失败）:", error)
@@ -572,13 +612,19 @@ export function createDelivery(
     return record(r)
   }
 
-  async function sendReply(ctx: MessageContext, text: string, onSent?: OnSentMessage): Promise<void> {
+  async function sendReply(
+    ctx: MessageContext,
+    text: string,
+    onSent?: OnSentMessage,
+    content?: DeliveryContentOptions,
+  ): Promise<void> {
     const accessToken = await getAccessToken(config.qq.appId, config.qq.clientSecret)
     const scope = scopeKeyOf(ctx)
     // J-轻：伪流式错峰（多片时隔 300ms 逐段到达）。每片成功立即登记，后续片失败
     // 也不丢已发片的引用缓存/摘要锚点；严禁等整批成功后才补记。
     const result = await replyToQQ(accessToken, ctx, text, {
       staggerMs: STREAM_STAGGER_MS,
+      continuationPrefix: content?.continuationPrefix,
       onReceipt: async (receipt) => {
         recordSent(scope, text, receipt)
         await emitSent(onSent, receipt)
@@ -591,6 +637,16 @@ export function createDelivery(
     }
   }
 
-  return { enqueuePush, deliver, safeDeliver, sendReply }
+  return {
+    enqueuePush,
+    deliver,
+    safeDeliver,
+    sendReply,
+    consumePartialFailure(ctx): boolean {
+      if (!partialFailures.has(ctx)) return false
+      partialFailures.delete(ctx)
+      return true
+    },
+  }
 }
 

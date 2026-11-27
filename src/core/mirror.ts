@@ -16,7 +16,7 @@ import {
 } from "../opencode/mirror.js"
 import { laneKeyOf } from "./message-queue.js"
 import { redactSecrets } from "../opencode/history.js"
-import type { OnSentMessage } from "./delivery.js"
+import type { DeliveryContentOptions, OnSentMessage } from "./delivery.js"
 import type { MirrorAnchorStore } from "./mirror-anchors.js"
 import type { SessionManager } from "../opencode/sessions.js"
 import type { MirrorApi } from "../commands.js"
@@ -64,7 +64,12 @@ export interface MirrorDeps {
   eventStream: EventStream
   client: OpencodeClient
   lastCtx: ReadonlyMap<string, MessageContext> // bridge 拥有写权，本域只读
-  safeDeliver: (ctx: MessageContext, text: string, onSent?: OnSentMessage) => Promise<boolean>
+  safeDeliver: (
+    ctx: MessageContext,
+    text: string,
+    onSent?: OnSentMessage,
+    content?: DeliveryContentOptions,
+  ) => Promise<boolean>
   bgWaits: ReadonlyMap<string, { cancel: () => void }> // 后台等待在途则不解锁
   busyUsers: ReadonlySet<string> // 会话主人在忙则不解锁（5 秒宽限内再判定）
   /** 多角色（2026-11-17）：镜像开关文件可按角色注入；缺省 legacy 全局 settings.json */
@@ -268,7 +273,9 @@ export function createMirror(deps: MirrorDeps): Mirror {
             console.error("[mirror-anchor] 锚点落盘失败，后续引用将 fail-closed:", error)
           }
         }
-        await safeDeliver(ctx, outText, onSent)
+        await safeDeliver(ctx, outText, onSent, {
+          continuationPrefix: `📋 摘要续 · ${digestSessionLabel(sessionID)}\n`,
+        })
       }
       console.log(`[mirror] 会话 ${sessionID} 摘要已镜像给 ${owners.length} 个用户`)
     } catch (error) {

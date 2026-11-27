@@ -68,7 +68,7 @@ import {
   type PermOrigin,
 } from "./core/permission.js"
 import { truncate } from "./core/util.js"
-import { createDelivery, qqPromptHints } from "./core/delivery.js"
+import { createDelivery, qqPromptHints, UNDELIVERED_NOTICE } from "./core/delivery.js"
 import { createNotifySink } from "./core/notify-sink.js"
 import { handleApprovalInteraction, sendApprovalCard } from "./core/card-approval.js"
 import { createFormBridge, renderFormPrompt } from "./core/form-bridge.js"
@@ -109,8 +109,14 @@ export function isSessionBusyError(error: unknown): boolean {
 }
 
 export function isMirrorDigestText(text: string | null | undefined): boolean {
-  const value = text?.trim() ?? ""
-  return value.startsWith("📋 桌面问答摘要") || value.startsWith("🎯 目标续跑摘要")
+  let value = text?.trim() ?? ""
+  if (value.startsWith(UNDELIVERED_NOTICE.trim())) {
+    value = value.slice(UNDELIVERED_NOTICE.trim().length).trimStart()
+  }
+  return value.startsWith("📋 桌面问答摘要") ||
+    value.startsWith("🎯 目标续跑摘要") ||
+    value.startsWith("📋 摘要续") ||
+    value.startsWith("🎯 摘要续")
 }
 
 export function commandNeedsMirrorAnchorGate(content: string): boolean {
@@ -949,7 +955,7 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   }
 
   // O7c：投递域门面（统一投递/降级/配额/节流队列/被动回复全在 core/delivery.ts）
-  const { enqueuePush, safeDeliver, sendReply, deliver } = createDelivery(
+  const { enqueuePush, safeDeliver, sendReply, deliver, consumePartialFailure } = createDelivery(
     config,
     lastCtx,
     isBoundSession,
@@ -2322,6 +2328,10 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
           if (ctx.anchorSessionId && !isBoundSession(ctx.userId, ctx.anchorSessionId)) {
             console.log(`[push-gate] 回合结果按历史可回读结清 answered msg=${shortId(trackId)}`)
             inflight.settle(trackId, undefined, "answered")
+          } else if (consumePartialFailure(ctx)) {
+            // 部分失败告警已由 delivery 发出；不得再冒称「24h 同文去重」。
+            inflight.settle(trackId, undefined, "error")
+            console.log(`[journal] 分片部分失败结清 error msg=${shortId(trackId)}`)
           } else {
             await safeDeliver(ctx, "⚠️ 本轮结果与 24h 内已发送内容重复，已被防重拦截（未重复投递）。如非预期请重发或换个说法")
             inflight.settle(trackId, undefined, "error")

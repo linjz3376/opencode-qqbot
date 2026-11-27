@@ -337,6 +337,19 @@ export interface ReplyToQQOptions {
   staggerMs?: number
   /** 每片真实发送成功立即回调；后续分片失败也不丢已发分片的锚点。 */
   onReceipt?: (receipt: SentMessageReceipt) => void | Promise<void>
+  /** 第 2 片起的受控身份前缀；先预留字节、切分后再添加。 */
+  continuationPrefix?: string
+}
+
+export class PartialReplyError extends Error {
+  readonly name = "PartialReplyError"
+  constructor(
+    readonly receipts: readonly SentMessageReceipt[],
+    readonly failedChunkIndex: number,
+    readonly originalError: unknown,
+  ) {
+    super(`QQ 分片发送中断：第 ${failedChunkIndex + 1} 片失败，此前已成功 ${receipts.length} 片`)
+  }
 }
 
 export interface ReplyResult {
@@ -358,8 +371,16 @@ export async function replyToQQ(
 
   // 关键：按 UTF-8 字节切分（上限见文件头考据注释：2 万字实测），不能用字符数 maxLength，
   // 否则中文长消息会超限被 QQ 静默丢弃（看似"答非所问"，实则是答案没发出去）。
-  const mdChunks = splitMessage(mdFormatted, MARKDOWN_MAX_BYTES)
-  const plainChunks = splitMessage(plainFormatted, PLAIN_MAX_BYTES)
+  const continuationPrefix = options?.continuationPrefix ?? ""
+  const continuationBytes = utf8Bytes(continuationPrefix)
+  if (continuationBytes >= Math.min(MARKDOWN_MAX_BYTES, PLAIN_MAX_BYTES) - 1024) {
+    throw new Error("continuationPrefix 过长，无法为正文预留分片空间")
+  }
+  // 所有片都预留续片前缀字节，续片在切分后再加标记——身份绝不会被切到上一片。
+  const mdChunks = splitMessage(mdFormatted, MARKDOWN_MAX_BYTES - continuationBytes)
+    .map((chunk, index) => index > 0 ? continuationPrefix + chunk : chunk)
+  const plainChunks = splitMessage(plainFormatted, PLAIN_MAX_BYTES - continuationBytes)
+    .map((chunk, index) => index > 0 ? continuationPrefix + chunk : chunk)
 
   const delays = staggerDelays(mdChunks.length, options?.staggerMs ?? 0)
   const receipts: SentMessageReceipt[] = []
@@ -368,7 +389,13 @@ export async function replyToQQ(
     const msgSeq = getNextMsgSeq(ctx.msgId)
     // 纯文本分片可能与 markdown 分片数量不一致，按索引兜底取对应/最后一片
     const plainChunk = plainChunks[i] ?? plainChunks[plainChunks.length - 1] ?? mdChunks[i]
-    const res = await sendChunk(accessToken, ctx, mdChunks[i], plainChunk, msgSeq)
+    let res: MessageResponse | null
+    try {
+      res = await sendChunk(accessToken, ctx, mdChunks[i], plainChunk, msgSeq)
+    } catch (error) {
+      if (receipts.length > 0) throw new PartialReplyError(receipts, i, error)
+      throw error
+    }
     if (res?.id) {
       const receipt: SentMessageReceipt = {
         id: res.id,
