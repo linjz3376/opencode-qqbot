@@ -298,11 +298,13 @@ export function createMirror(deps: MirrorDeps): Mirror {
         : "🔇 摘要镜像已关闭（/status mirror on 重新开启）"
     },
     status() {
-      const bindings = sessions.all().length
-      const subs = mirrorUnsubs.size
-      return mirrorState.enabled
-        ? `📋 摘要镜像：开（绑定 ${bindings} 个用户 / ${subs} 个会话订阅）`
-        : `📋 摘要镜像：关（绑定 ${bindings} 个用户 / ${subs} 个会话订阅，/status mirror on 开启）`
+      if (!mirrorState.enabled) return "📋 摘要镜像：关（/status mirror on 开启）"
+      const desired = new Set(sessions.all().map((binding) => binding.sessionId))
+      const actual = mirrorUnsubs.size
+      const aligned = desired.size === actual && [...desired].every((sessionId) => mirrorUnsubs.has(sessionId))
+      return aligned
+        ? "📋 摘要镜像：开"
+        : `⚠️ 摘要镜像：开 · 订阅对账异常（期望 ${desired.size} / 实际 ${actual}）`
     },
   }
 
