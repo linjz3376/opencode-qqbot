@@ -118,7 +118,7 @@
 | `sessions.ts` | 用户↔会话映射 | 持久化 `~/.openqq/sessions.json`；目录继承链；/new 一次性继承模型/Agent，切换不继承并回读服务端设置 |
 | `eventstream.ts` | 全局 SSE 订阅 | 单连接、按 sessionID 分流；`permission.asked` 即时推送（裁决前送达）；坏帧容错、退避重连、200KB 缓冲上限 |
 | `history.ts` | 历史渲染/脱敏 | 回复文本收集、redactSecrets |
-| `mirror.ts` | 镜像摘要投影 | — |
+| `mirror.ts` | 镜像摘要投影 | 绑定订阅对账、摘要来源身份、QQ `ref_idx` 回复锚点（机制契约见 §3.8） |
 
 ### 3.3 桥接层（`src/bridge.ts`，系统中枢）
 
@@ -126,7 +126,7 @@
 
 ```
 gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.ts）
-  → 队列（message-queue）→ 在途台账落账（inflight-journal）
+  → 摘要锚点门（仅摘要引用，先于 steer/入队）→ 队列（message-queue）→ 在途台账落账（inflight-journal）
   → steer prompt（REST，串行链）→ SSE 流式聚合 → 回合边界判定（promptId 锚定，turnStateOf）
   → 投递（delivery：分割/去重/节流/渲染）→ 台账销账
   → 超时/重启时：对账补投 或 重挂后台等待
@@ -137,11 +137,11 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 调度 | 每 lane 串行（lane 粒度可配，见 §2.3；DEF-qqbot-20261112-01 修法=官方 per-peer 的会话级细腻化）；`pendingSelections`（/sessions /model 序号选择，TTL 60s）；首条消息问候；队列完成回执开关制（`QQ_QUEUE_RECEIPTS`，默认关） |
 | 回合边界 | prompt API 受理返回 promptId 精确锚定；前台直答/后台等待/补投共用 `turnStateOf` 判定，不依赖"下一条 user 消息"启发式 |
 | 后台等待 | `bgWait`：回合转后台后继续等结果（SSE + 1min 轮询兜底，P0-1 收紧自 5min）；停滞提醒（30min 节奏，stallSnapshot 纯函数先取快照再重置，闲置分钟/执行时长跨重启不丢）；后台 15min 进度心跳（BG_HEARTBEAT）；missingIdleDone 完成兜底判定；finalAnswerText 工作稿防误投；**流活性监督（2026-11-19 owner 裁定层）：锚定 assistant 最后活动超 `QQ_BG_STREAM_DEAD_MS`（默认 15min）判死回合（running 工具在 `QQ_BG_TOOL_GRACE_MS` 豁免窗内保活、窗外照样判死；死回合与长跑任务在「无进展」信号上同形，BG101A 实证：流停 3s 后 90 分钟假活），判死先 abort 后断点继续；**自动续作（同 owner 裁定：判死后同会话注入新回合重发原 prompt 由模型读历史续作，单任务上限 `QQ_BG_RESUME_MAX`=3 次，次数落盘 resumeCount 重启不洗白，超限 expired 放弃+放行队列）**；**死态二分与去重提示（2026-11-23 owner 裁定）：纯流式死（dead）与死在工具内（dead-tool）均自动续作，dead-tool 续作 prompt 携带 deadToolResumeHint——点名在飞工具并声明其结果未知，模型重做写操作前须先只读核查副作用（查 git log/文件内容）；missingIdleDone 兜底带工具在飞守卫：边界内有 running 工具时不得按「有正文无 idle」误判完成（防健康长工具被交付半截答案）**；**abort 确认硬化（2026-11-25 owner 令）：判死路径捕获 abortConfirmed（成功/失败/异常→失败）并三段留痕（判据/动作/后果，统一日志承载，不占 kills.log 进程专线）——通知随确认态分流（确认成功才说「已中止」，未确认明说「已请求中止（旧进程可能仍在运行）」），未确认时 deadToolResumeHint 追加「先核进程/副作用状态再决定重做写操作」强制条款** |
-| 引用上下文 | context-buffer：引用解析 LRU 缓存（QQ 103 内嵌被引内容权威 + 本地缓存兜底）+ 出站回复登记（供"引用 AI 答案"命中） |
+| 引用上下文 | context-buffer：引用解析 LRU 缓存（QQ 103 内嵌被引内容权威 + 本地缓存兜底）+ 出站回复登记（供"引用 AI 答案"命中）；摘要另以 `ref_idx` 持久化会话锚点，入站锚点门见 §3.8.3 |
 | 错误救援 | error-rescue：provider 错误分类（402 余额/401 key 失效）+ 恢复路径话术（/model 切换/桌面更新 key），回合失败不甩原始错误 |
 | 审批 | SSE `permission.asked` **即时推送**（裁决前到达）→ 四键卡片（card-approval）→ REST permission reply 结算引擎 deferred（**reject 即 DeclinedError 释放回合，无需额外 cancel**）；真闸来自 steer 前台在场语义；无匹配裁决 fail-closed；拒绝后冲突即告警 |
 | 表单/提问 | REST form 端点 + SSE 事件（form-bridge 渲染/回执/台账；question-form 多题问答：跳过 vs 中止语义，30min TTL，旧挂起作废防串线） |
-| 观察/镜像 | 开关唯一入口=/status 驾驶舱（`/status watch on|off` / `/status mirror on|off`，owner 2026-11-23 定案）：盯当前绑定会话的工具调用/完成摘要实时推送（≥2s 节流合并，主动消息日配额）；/watch /mirror 独立命令已退役（仅留迁移提示），跨会话观察能力正式下线（owner 裁「不用」） |
+| 观察/镜像 | 开关唯一入口=/status 驾驶舱（`/status watch on|off` / `/status mirror on|off`，owner 2026-11-23 定案）：盯当前绑定会话的工具调用/完成摘要实时推送（≥2s 节流合并，主动消息日配额）；镜像订阅按当前绑定集合幂等对账，摘要带会话身份与回复锚点（§3.8）；/watch /mirror 独立命令已退役（仅留迁移提示），跨会话观察能力正式下线（owner 裁「不用」） |
 | 媒体出站 | **主通道=`qq_send_file` 一等工具**（插件经官方 Tools API 注册，JSON Schema+精确错误）：插件宿主写 `~/.openqq/send-requests/` 请求文件，bot 消费器复用 sendLocalFile 全量安全链（白名单/拒识/20MB 上限）发送并回写结果；幂等 dedupeKey 跨重启不重复发；旧 `QQ_SEND_FILE:` 文本标记保留为降级通道（路径白名单同口径） |
 | 服务健康 | SSE 断线退避重连 + `/status` 服务探活；单进程单连接，无子进程看护面 |
 
@@ -168,6 +168,8 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 入队回执：`已排队 #N（第M位，前面还有 X 条）`；拒绝回执（队列满）固定文案并指向 /queue。
 
 **出站推送门（persona 面单活绑定，owner 2026-11-14 裁定）**：QQ 窗只呈现用户**当前绑定会话**的对话流——一切出站（直答/队列回执/摘要镜像/milestone 观察/审批卡/保险网告警）在投递时校验「锚定会话 = 当前绑定」；绑定已切走 → 本条不推（`[push-gate]` 日志留痕），只能经历史对话/桌面端回读。锚定会话随消息/事件携带（`ctx.anchorSessionId`，入队/派发时快照），门在 deliver 单点实施；审批卡与 nudge 告警走同一门（切走后不推，回合由 30min TTL 自然收尾）。
+
+**入站摘要锚点门（与出站推送门对称）**：已送达的旧摘要不会因切绑而消失，故引用回复必须先以 QQ `ref_msg_idx` 查明摘要来源；来源 ≠ 当前绑定或来源无法证明时 fail-closed 拒绝，禁止默认落到当前绑定，也禁止一次性写入旧会话。判定位置、持久化键与兼容边界见 §3.8.2 至 §3.8.3。
 
 **派生视图（queue-view，`deriveQueueView` 纯函数）**——输入固定（台账条目 + 队列 job + 运行态 + now），输出可复算；不制造新事实，join 键优先级 `msgId > queueId > fingerprint`。
 
@@ -236,7 +238,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | ownerPid | 受理进程 pid | 跨进程归属诊断（对账判断"原执行进程是否已死"） |
 | lastError | 错误摘要（截 200 字） | /ledger 详情与对账 |
 
-**结清原因（settleReason）枚举**：`answered`（已答）/ `queue-full`（排队已满拒入）/ `duplicate-msgid` / `duplicate-intent`（K2 幂等拦截）/ `cancelled`（/cancel 与 /queue clear）/ `dropped`（/queue drop）/ `expired`（超 24h 清账）/ `error`（派发/执行失败）/ `redispatch`（旧账结清、重派新账）/ `manual`（人工 /ledger settle）/ `blocked`（审批挂起未派发早退）/ `superseded`（同会话新输入接管旧回合）。
+**结清原因（settleReason）枚举**：`answered`（已答）/ `queue-full`（排队已满拒入）/ `duplicate-msgid` / `duplicate-intent`（K2 幂等拦截）/ `cancelled`（/cancel 与 /queue clear）/ `dropped`（/queue drop）/ `expired`（超 24h 清账）/ `error`（派发/执行失败）/ `redispatch`（旧账结清、重派新账）/ `manual`（人工 /ledger settle）/ `blocked`（安全门拦截未派发：审批挂起早退 / 摘要锚点冲突或未知）/ `superseded`（同会话新输入接管旧回合）。
 
 **台账操作**：落账（claim，含指纹与 attemptId）/ 阶段标记（markStage）/ 结清（settle：msgId + attemptId + 原因，文件锁原子读写）/ 视图导出（listView：派生视图输入）。
 
@@ -275,8 +277,59 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 
 ### 3.8 镜像与通知
 
-`mirror.ts`（摘要镜像，开关在 /status 驾驶舱，盯当前绑定会话；跨会话观察已下线）、`linkwatch.ts`（链接/文件监视）、`notify-sink.ts` + `outbox.ts`
-（离线通知出队：TTL/日配额/幂等键，bot 不在时也能入队、恢复后送达）。
+#### 3.8.1 镜像订阅：绑定集合的幂等对账
+
+镜像只跟随**当前绑定**，不恢复跨会话旁听。每角色维护一份订阅表，但其期望状态不是历史会话的累加，而是从当前事实派生：
+
+```
+desired = mirrorEnabled ? distinct(sessions.all().sessionId) : ∅
+actual  = mirrorUnsubs.keys()
+对账 = 取消 actual - desired，补齐 desired - actual；已存在的订阅保持不变
+```
+
+- **物理去重**：一个用户至多一个绑定，但多个用户可绑定同一会话；物理监听按 sessionId 去重，投递时仍按 owners 逐用户判定。`/status` 分开显示「绑定用户数 / 会话订阅数」，不得把二者混为一谈。
+- **触发点**：启动、每次绑定新增/替换/驱逐、镜像开关切换后立即对账；60s 周期对账只作遗漏兜底，不替代绑定变更的同步触发。关闭镜像时 `desired=∅`，必须释放全部监听，而不是直接返回。
+- **并发与释放**：对账幂等，重复调用不得重复订阅；仅当某 sessionId 已无任何绑定用户时才取消该物理监听并释放其回调闭包。退订/重订不得立即清洗 `mirroredTurns`、`qqPromptIds` 等逻辑回合幂等与来源身份状态，否则会把已镜像或 QQ 已直答的回合再次推送；这些记录按独立 TTL/LRU 收口，而不是跟随订阅增删。角色停止时清对账定时器并退订全部监听。
+- **分层防线**：订阅对账只决定「可能收到哪些事件」；`mirrorTurn` 仍按当前 `sessions.all()` 重算 owners，`deliver` 的推送门再核对「锚定会话 = 当前绑定」。即使取消订阅前已有回调排队，也不会向已切绑用户投递。
+
+#### 3.8.2 摘要身份与回复锚点
+
+摘要卡必须自报身份。首行在现有「桌面问答摘要 / 目标续跑摘要」类型标记后追加**会话标题 + sessionId 短码**，第二行说明「引用回复仅在该会话仍为当前绑定时受理」。标题取服务端会话事实，获取失败时降级为 sessionId 短码，不得因标题失败放弃摘要；标题压成单行并限长。长文拆成多个 QQ 气泡时，每个气泡都可独立作为回复锚点。
+
+**锚点协议键必须使用 QQ 引用索引，不得误用消息 ID**：发送成功响应的 `id` 是消息 ID（可用于撤回），`ext_info.ref_idx` 才是机器人消息后续被引用时使用的索引；入站 103 引用事件在 `message_scene.ext` 中以 `ref_msg_idx` 带回。网关归一化层同时兼容官方 `ref_msg_idx` 与存量 `message_reference.message_id`，前者优先，统一写入 `ctx.referencedMsgId`；103 内嵌被引正文只用于 `quoteText`，锚点查询必须独立使用引用索引，不能被内嵌文本短路。锚点表以 `(role, userId, refIdx)` 为实际隔离与查找边界，条目保存：
+
+| 字段 | 语义 |
+|---|---|
+| `refIdx` | 发送响应的 `ext_info.ref_idx`；入站 `ref_msg_idx` 的 lookup 主键 |
+| `messageId` | 发送响应的 `id`；仅诊断/撤回关联，不参与引用 lookup |
+| `userId / sessionId` | 摘要接收者 / 摘要来源会话；二者共同约束回复归属 |
+| `title / sentAt` | 冲突提示所用的发送时标题快照 / 实际发送成功时刻 |
+
+- **登记时机**：push gate 放行且 QQ 每个分片真实发送成功后，才登记该分片的锚点；发送失败、被去重抑制或被推送门拦截均不得产生锚点。发送管线通过可选 `onSent(receipt)` 回调把每个分片的 `id + ref_idx` 回传镜像层，保留 `deliver` 现有 boolean 受理语义，避免对象返回值被旧调用方误判为 true。
+- **持久化**：角色数据目录下 `mirror-anchors.json`，原子写并串行化同角色更新；启动加载，保留 24h、每用户最多 500 条，读写与启动时清理过期/超量项。文件缺失按空表启动，损坏时保留原件供诊断并 fail-closed，不得自动把未知引用当成当前会话。
+- **降级**：QQ 未返回 `ref_idx` 或锚点落盘失败时，不重发摘要、不伪报已可路由；记录显式告警。后续引用该摘要按「锚点未知」拒绝，避免无保护回落。
+
+#### 3.8.3 入站锚点门：只允许当前绑定，禁止一次性跨会话写入
+
+摘要引用锚点门位于**命令/待选择项分流之后，忙时 steer、显性 `/queue <文本>` 入队及普通 FIFO 入队之前**，确保任何执行路径都先过同一判定。摘要识别先查锚点；未命中时只检查 QQ 103 **内嵌被引正文**是否以受控摘要类型前缀开头，不能用用户本次新输入的文本来触发或绕过该判定。
+
+| 入站形态 | 判定与动作 |
+|---|---|
+| 无引用 | 维持现状，以当前绑定建立 `ctx.anchorSessionId` 快照 |
+| 引用命中本人有效摘要锚点，且锚定会话 = 当前绑定 | 接受，显式把锚定 sessionId 写入 ctx；后续队列仍按既有锚定快照语义执行 |
+| 引用命中本人有效摘要锚点，但锚定会话 ≠ 当前绑定 | **拒绝**：不 steer、不入队、不下发 prompt；提示摘要来源与当前绑定，要求经 `/sessions` 切回后重发 |
+| 引用可识别为摘要，但锚点缺失、过期、跨用户或存储不可读 | **fail-closed 拒绝**：提示无法确认来源；用户可去掉引用后明确发送到当前绑定 |
+| 非摘要引用 | 保留现有「引用文本作为上下文、发送到当前绑定」语义，不借本功能扩张跨会话路由 |
+
+这里的「当前绑定」专指**该消息入站开始时的 `anchorSid` 快照**，与队列跟随入队锚的既有语义一致；不得在排队后另读实时绑定覆盖此判定。无当前绑定的摘要引用同样拒绝。拒绝回执使用当前绑定锚或无会话锚的控制面上下文，严禁携带旧摘要锚，否则回执自身会被 push gate 拦截。
+
+拒绝时若已建立在途账，以 `blocked` 结清并记录 `lastError=anchor-conflict|anchor-unknown`；K1/K2 幂等仍覆盖平台重推。全局查询/控制命令与序号选择不被旧摘要引用劫持；`/queue <文本>`、`/amend` 等会向会话注入用户输入的入口必须执行同一锚点门。锚点门必须先于 `mirror.beginTurn`、busy lane 占用及任何引擎调用，拒绝后不得遗留 busy/draining/activeIntent 状态。
+
+**不做方案 A（一次性路由到旧摘要会话）**：它会绕过 persona 面单活绑定，且其结果仍会被出站推送门拦截，形成「旧会话已执行、QQ 看不到结果」的静默写操作。锚点门也不自动切换绑定、不引入 follow/旁听。普通消息、非摘要引用、队列锚定、忙时 steer 与出站推送门的既有语义不变。
+
+观测固定前缀：`[mirror-reconcile]`（desired/added/removed/actual）、`[mirror-anchor]`（登记/裁剪/持久化降级）、`[anchor-gate]`（match/conflict/unknown 与脱敏后的双方 sessionId）；不得记录完整引用正文或完整 refIdx。
+
+`linkwatch.ts`（链接/文件监视）、`notify-sink.ts` + `outbox.ts` 负责离线通知出队：TTL/日配额/幂等键，bot 不在时也能入队、恢复后送达。
 
 ### 3.9 运维监督
 
@@ -338,6 +391,8 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 | 在途台账 | 一切"重启后要记住"的状态落盘；退出路径必须结账 | 内存态即缺陷候选；孤儿/幽灵必须可观测、可修复、禁静默删除 |
 | 队列恢复语义 | 重启后 queued 条目重建队列"继续排队"，非重跑；重建按 (用户,锚定会话) lane 归组 | "重跑一条"会重复副作用；"继续排队"保持用户意图 |
 | 会话隔离（DEF-qqbot-20261112-01 修法①） | 队列/忙锁按 (用户,会话) lane；入队锚定 sessionId 快照、drain 按锚定派发；出站推送门=锚定≠当前绑定不推 | 僵尸/长回合只堵所在会话；persona 面单活绑定的出站语义（owner 2026-11-14） |
+| 镜像订阅对账 | 期望订阅集=镜像开启时当前绑定 sessionId 的去重集合，关闭时为空；绑定变化即时对账 + 周期兜底 + 投递时 owners/push gate 重核 | 订阅是绑定事实的投影，不是只增不删的历史积累；同会话多绑定用户共享物理监听但不共享投递语义 |
+| 摘要回复 fail-closed | 摘要携带会话身份；以发送回执 `ref_idx` 持久化用户×会话锚点；引用回复仅允许锚点=当前绑定，冲突/未知拒绝且不执行 | 旧摘要送达后无法随切绑撤回；一次性跨会话写入会形成被执行但被 push gate 隐去的危险操作 |
 | 僵尸收割（DEF-qqbot-20261112-02 修法②） | 引擎核实后的自动清障：已完回合补投+answered、静默回合单会话 abort+expired；动作前重验同 attemptId | 悬挂态无自然 TTL 可等；真人 /cancel 发现=无人值守失败（owner 2026-11-14） |
 | 回合边界 | promptId 精确锚定（turnStateOf），不依赖消息启发式 | 共享会话里"下一条 user/assistant"启发式必然张冠李戴 |
 | 超时语义 | 会话没有超时限，只有弹窗有 TTL：30min 只通知转后台，24h 硬上限兜底 | 长任务合法；误杀长回合会造成 -32603 级联 |
@@ -350,7 +405,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 ## 5. 数据与配置
 
 `~/.openqq/`（数据目录，禁止放代码）：`.env`（密钥单点）、`sessions.json`（用户↔会话+目录映射）、
-`inflight.json`（在途台账）、`forms.json`、`gateway-state.json`、`supervisor.json`（重启强度账）、`supervisor-lease.json`（监督者租约，见 §3.9.1）、`qq-system-instructions.json`（系统级指令模式状态，见 §3.7）、
+`inflight.json`（在途台账）、`forms.json`、`gateway-state.json`、`mirror-anchors.json`（摘要回复锚点，24h + 每用户 500 条，见 §3.8.2）、`supervisor.json`（重启强度账）、`supervisor-lease.json`（监督者租约，见 §3.9.1）、`qq-system-instructions.json`（系统级指令模式状态，见 §3.7）、
 `heartbeat`、`*.lock`、`watchdog.log`、`kills.log`（诛杀决策专线，见 §3.9.1）、`bot.out.log`（+ 进程内双写；detached 拉起默认 `~/.openqq/openqq.log`，`QQ_LOG_FILE` 可覆盖）、`outbox.json`、`send-requests/`（AI 出站发送请求队列目录，见 §3.3 媒体出站）、`last-discovered.json`。
 
 ### 5.1 多角色（单进程多 QQ bot 身份，2026-11-17 owner 裁定）
@@ -358,7 +413,7 @@ gateway 事件 → inbound-dedupe（K1/K2 幂等）→ 命令分流（commands.t
 参考 openclaw-qqbot 具名账号表：`QQ_BOTS`（JSON 数组）配置多个角色，单进程同时挂全部
 appId——每角色独立 token 刷新/会话映射/bridge/网关连接/白名单，互不互踢（连接按 appId
 独立）。角色运行时数据物理隔离在 `~/.openqq/roles/<appId>/`（台账/审批/表单/配额/
-观察/问候/sessions/gateway-state），进程级文件（heartbeat/日志/supervisor）保持全局一份。
+观察/问候/sessions/gateway-state/mirror-anchors），进程级文件（heartbeat/日志/supervisor）保持全局一份。
 单实例锁本就按 appId 分文件（`openqq-<appId>.lock`），多角色各持各锁。未配置 `QQ_BOTS`
 = legacy 单角色，全部路径与行为零变化。**三级隔离模型与失效模式见 §2.3（隔离权威口径）**。
 
@@ -380,6 +435,7 @@ appId——每角色独立 token 刷新/会话映射/bridge/网关连接/白名�
   npm registry 通道产物逐字节一致。安装态兼容层：OpenCode 2.2.1 全局插件目录扫描器只认根级 exports 目标，
   故解包后覆盖最小 package.json（exports→./index.js）并生成根 index.js shim 转发 dist bundle（deploy 脚本内
   哈希对账跳过这两件）；经 npm plugins 数组安装的用户不受影响。
+- **镜像与锚点回归**：组件测试覆盖期望集增删/幂等、多用户共绑、开关清空、绑定驱逐、标题降级、每分片 `ref_idx` 登记、TTL/LRU、跨用户/跨角色拒识、重启恢复；路由测试必须证明冲突与未知引用在普通、忙时 steer、显式入队三条路径均为零引擎调用且台账结清。真实链路至少完成「切绑后桌面回合有摘要」「引用当前摘要可回复」「引用旧摘要不执行且提示可见」「重启后旧锚仍可判定」四例，并以 QQ UI、引擎会话历史、三类新日志和台账互证。
 - **验证门禁**：`bun run verify`（tsc + 全套件）全绿才可提交部署；部署后必复验日志/心跳/台账。
 - **日志规范**：结构化 `k=v` 行；队列/台账关键动作固定前缀（`[queue]`/`[journal]`）；文件日志常开 + 轮转。
 
