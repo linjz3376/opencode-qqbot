@@ -193,7 +193,7 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `QQ_ORPHAN_MS` | 90000 | 孤儿判定阈值（受理后无下文超此时长记孤儿；合法 5s 至 60min，非法回退默认） |
 | `QQ_WATCHDOG_INTERVAL_MS` | 300000 | 插件引导器巡检间隔（5min；计划任务侧由 service install 注册，默认 10min） |
 | `QQ_PERM_DEFER_MS` | 500 | 审批弹卡延迟判定窗（0 至 10s）：窗口内 ask 已被其他端处置则不推 QQ 卡，与桌面静默放行对齐 |
-| `QQ_PERM_SEND_GRACE_MS` | 500 | 审批卡调 QQ API 前的可取消发送窗（0 至 10s，0 关闭）：窗内请求已被其他端处置则弃发，防“已处理通知先到、死卡后到” |
+| `QQ_PERM_SEND_GRACE_MS` | 1000 | 审批卡调 QQ API 前的可取消发送窗（0 至 10s，0 关闭）：窗内请求已被其他端处置则弃发，防“已处理通知先到、死卡后到”；与延迟判定窗合计 1500ms 总窗口 |
 | `QQ_QUEUE_RECEIPTS` | 关 | 队列完成回执「队列 #N 完成」（批量排空防刷，默认关） |
 | `QQ_LOG_FILE` | `~/.openqq/openqq.log`（统一日志，bot 与看门狗同文件） | 进程内文件日志路径；滚动 20MB×4 代、总预算 100MB（`QQ_LOG_MAX_MB`/`QQ_LOG_KEEP`/`QQ_LOG_TOTAL_MB` 可调） |
 | `QQBOT_DEFAULT_CWD` | bot 进程工作目录 | 新会话默认项目目录（目录继承链兜底值） |

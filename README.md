@@ -197,7 +197,7 @@ launchctl load ~/Library/LaunchAgents/net.opencode-qqbot.plist
 | `QQ_ORPHAN_MS` | 90000 | Orphan threshold (accepted but silent beyond this; valid 5s–60min, invalid falls back) |
 | `QQ_WATCHDOG_INTERVAL_MS` | 300000 | Plugin bootstrap patrol interval (5min; the service-side autostart default is 10min) |
 | `QQ_PERM_DEFER_MS` | 500 | Approval card deferral window (0–10s): if the request is resolved elsewhere within the window, no QQ card — aligns with desktop silent handling |
-| `QQ_PERM_SEND_GRACE_MS` | 500 | Cancellable grace window before the QQ API call for approval cards (0–10s, 0 disables): if the request is resolved inside the window, the card is abandoned to prevent "resolved notice first, dead card later" |
+| `QQ_PERM_SEND_GRACE_MS` | 1000 | Cancellable grace window before the QQ API call for approval cards (0–10s, 0 disables): if the request is resolved inside the window, the card is abandoned to prevent "resolved notice first, dead card later"; totals 1500ms with the defer window |
 | `QQ_QUEUE_RECEIPTS` | off | Queue-completion receipt "queue #N done" (off by default to prevent batch spam) |
 | `QQ_LOG_FILE` | `~/.openqq/openqq.log` (unified log, bot + watchdog in one file) | In-process file log path; 20MB × 4 generations, 100MB total budget (`QQ_LOG_MAX_MB`/`QQ_LOG_KEEP`/`QQ_LOG_TOTAL_MB` tunable) |
 | `QQBOT_DEFAULT_CWD` | bot process cwd | Default project directory for new sessions |

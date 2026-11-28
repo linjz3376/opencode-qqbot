@@ -105,11 +105,13 @@ export function resolvePermDeferMs(envValue: string | undefined): number {
   return Number.isFinite(n) && n >= 0 && n <= 10_000 ? n : 500
 }
 
-/** QQ_PERM_SEND_GRACE_MS 解析（默认 500ms，0=关闭）：审批卡真正调 QQ API 前的可取消发送窗。 */
+/** QQ_PERM_SEND_GRACE_MS 解析（默认 1000ms，0=关闭）：审批卡真正调 QQ API 前的可取消发送窗。
+ *  默认 1000ms 与延迟判定窗 500ms 合计 1500ms 总可取消窗口（2026-11-28 owner 裁定：
+ *  覆盖桌面自动审批实测延迟分布 <500-933ms 并留余量；用户按习惯经 config.json 微调）。 */
 export function resolvePermSendGraceMs(envValue: string | undefined): number {
-  if (envValue === undefined || envValue.trim() === "") return 500
+  if (envValue === undefined || envValue.trim() === "") return 1000
   const n = Number(envValue)
-  return Number.isFinite(n) && n >= 0 && n <= 10_000 ? n : 500
+  return Number.isFinite(n) && n >= 0 && n <= 10_000 ? n : 1000
 }
 
 export const DECISION_LABELS: Record<PermissionDecision, string> = {
