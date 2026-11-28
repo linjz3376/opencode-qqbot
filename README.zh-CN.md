@@ -51,16 +51,20 @@
 2. **OpenCode V2** 在本机运行（bot 连接其后台服务 API）。
 3. **运行时**：bun 或 node 任一（推荐 bun；node ≥ 20 亦可，自动改用内置运行包）。
 
-### 选形态（二选一）
+### 安装形态（默认 = 插件）
 
-| | 插件形态（推荐） | 独立部署形态 |
+本项目**出厂形态即 OpenCode 插件**：默认安装就是插件。独立部署只是面向「无桌面 OpenCode 的服务器 / 自管守护进程」场景的显式备选，不是平级二选一。两形态并存时仲裁已内置：显式注册的 service 通道优先保活，插件通道自动让贤；摘掉 service 自启即回归插件默认（插件升级也才真正生效）。
+
+| | 插件形态（默认） | 独立部署形态（显式备选） |
 |---|---|---|
-| 适合 | 本机已有 opencode，想装完即用 | 服务器/自定义常驻方式 |
+| 适合 | 默认选择：本机有 opencode 就用它 | 仅当明确声明需要：无桌面 opencode 的服务器 / 自管守护 |
 | 安装 | `opencode plugin add @linjz/opencode-qqbot`（或 plugins 数组加 `"@linjz/opencode-qqbot"`） | `npm i -g @linjz/opencode-qqbot`（或 `github:linjz3376/opencode-qqbot`） |
 | 常驻 | 插件自动拉起 bot，serve 重启自动恢复 | 自管：`openqq` 前台 / systemd / 任务计划 |
 | 配置入口 | `npx @linjz/opencode-qqbot setup`（扫码）或手写 `~/.openqq/.env` | 同上（装完全局命令也可用 `openqq-setup`） |
 
 开发者从源码直装插件形态：`bun run deploy:plugin`（全量包解到全局插件目录，与应用者拿到的发布物一致）。
+
+> **我这套算不算插件安装？** 看两层：代码装在哪（OpenCode 插件体系 vs npm 全局目录）＋ 谁在保活（插件巡检 vs OS 自启；当前当值者见 `~/.openqq/supervisor-lease.json` 的 `channel`）。两层都在插件侧才是完整插件形态；任一落在独立侧即属独立部署，按上表右侧管理。
 
 ### 配置（`~/.openqq/.env`，单点密钥）
 

@@ -56,16 +56,20 @@ Why QQ instead of the official mobile app: the official OpenCode Mobile (TestFli
 2. **OpenCode V2** running on the same machine (the bot connects to its background service API).
 3. **Runtime**: bun or node, either one (bun recommended; node ≥ 20 also works via the bundled runtime build).
 
-### Pick a flavor (either one)
+### Installation flavor (default = plugin)
 
-| | Plugin flavor (recommended) | Standalone flavor |
+**This project IS an OpenCode plugin by design**: the default install is the plugin. The standalone flavor is an explicit opt-in for headless servers (no desktop OpenCode) or self-managed daemons — not an equal alternative. Coexistence is arbitrated at runtime: an explicitly registered service channel wins keep-alive and the plugin channel yields; remove the service autostart to return to the plugin default (and to make plugin upgrades actually take effect).
+
+| | Plugin flavor (default) | Standalone flavor (explicit opt-in) |
 |---|---|---|
-| Best for | OpenCode already installed locally, zero-config | Servers / your own daemon setup |
+| Best for | The default: use it whenever OpenCode is present | Only when explicitly needed: headless servers / self-managed daemons |
 | Install | `opencode plugin add @linjz/opencode-qqbot` (or add `"@linjz/opencode-qqbot"` to the plugins array) | `npm i -g @linjz/opencode-qqbot` (or `github:linjz3376/opencode-qqbot`) |
 | Keep-alive | The plugin auto-launches the bot and recovers when the OpenCode service restarts | Self-managed: `openqq` in foreground / systemd / Task Scheduler |
 | Config entry | `npx @linjz/opencode-qqbot setup` (QR scan) or hand-write `~/.openqq/.env` | Same (the global `openqq-setup` command also works) |
 
 Developers installing from source: `bun run deploy:plugin` (full package unpacked into the global plugin directory — byte-identical to what npm users get).
+
+> **Is my install "the plugin"?** Check two layers: where the code lives (OpenCode plugin system vs global npm directory) and who keeps the bot alive (plugin patrol vs OS autostart — the current winner is the `channel` in `~/.openqq/supervisor-lease.json`). Both answers on the plugin side = full plugin form; either answer on the standalone side = standalone deployment — manage it per the right column above.
 
 ### Configuration (`~/.openqq/.env`, single point of secrets)
 
