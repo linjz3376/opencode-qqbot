@@ -60,7 +60,7 @@
 | 适合 | 默认选择：本机有 opencode 就用它 | 仅当明确声明需要：无桌面 opencode 的服务器 / 自管守护 |
 | 安装 | `opencode plugin add @linjz/opencode-qqbot`（或 plugins 数组加 `"@linjz/opencode-qqbot"`） | `npm i -g @linjz/opencode-qqbot`（或 `github:linjz3376/opencode-qqbot`） |
 | 常驻 | 插件自动拉起 bot，serve 重启自动恢复 | 自管：`openqq` 前台 / systemd / 任务计划 |
-| 配置入口 | `npx @linjz/opencode-qqbot setup`（扫码）或手写 `~/.openqq/.env` | 同上（装完全局命令也可用 `openqq-setup`） |
+| 配置入口 | `openqq-setup`（扫码 + 默认注册插件）或手写 `~/.openqq/.env` | `openqq-setup --standalone`（扫码 + 独立形态指引） |
 
 开发者从源码直装插件形态：`bun run deploy:plugin`（全量包解到全局插件目录，与应用者拿到的发布物一致）。
 
@@ -68,11 +68,11 @@
 
 ### 配置（`~/.openqq/.env`，单点密钥）
 
-手机 QQ 扫码绑定（自动写凭据；connector 按需临时安装）：
+手机 QQ 扫码绑定（自动写凭据 + **默认自动注册插件形态**，等价 `opencode plugin add`；connector 按需临时安装）：
 
 ```bash
-npx @linjz/opencode-qqbot setup
-# 独立部署形态装过 -g 的话也可直接：openqq-setup
+npx -p @linjz/opencode-qqbot openqq-setup
+# 显式独立部署形态：openqq-setup --standalone（已装 -g 直接可用；npx 形式同样追加该旗标）
 ```
 
 或手工创建：

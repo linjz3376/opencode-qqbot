@@ -47,4 +47,20 @@ if (!seen.has("QQ_APP_SECRET")) merged.push(`QQ_APP_SECRET=${creds.appSecret}`)
 fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 })
 fs.writeFileSync(ENV_FILE, merged.join("\n"), { mode: 0o600 })
 console.log(`凭据已写入 ${ENV_FILE}`)
-console.log("现在可以运行 openqq 启动 bot 了。")
+
+// 形态分流（2026-11-28 owner 裁定：默认插件形态安装，--standalone 显式独立部署）
+const { parseSetupArgs, registerPluginForm } = await import("./setup-flavor.mjs")
+const { standalone } = parseSetupArgs(process.argv.slice(2))
+if (standalone) {
+  console.log("独立部署形态（显式选择）：`openqq` 前台运行；常驻用 `openqq service install` 注册 OS 自启。")
+  console.log("提示：service 通道在监督选举中优先于插件通道；回插件默认执行 `openqq service uninstall` 即可。")
+} else {
+  const r = await registerPluginForm({})
+  if (!r.ok) {
+    console.log("请手动完成插件注册（二选一）：")
+    console.log("  1) opencode plugin add @linjz/opencode-qqbot")
+    console.log('  2) 在 opencode.json(c) 的 plugins 数组加入 "@linjz/opencode-qqbot"')
+  }
+  console.log("如确需独立部署形态（无桌面 opencode 的服务器/自管守护）：openqq-setup --standalone")
+  console.log("若曾 npm i -g 安装本包：插件形态下全局副本不参与运行，可 npm uninstall -g @linjz/opencode-qqbot 清理（保留亦无冲突）。")
+}

@@ -65,7 +65,7 @@ Why QQ instead of the official mobile app: the official OpenCode Mobile (TestFli
 | Best for | The default: use it whenever OpenCode is present | Only when explicitly needed: headless servers / self-managed daemons |
 | Install | `opencode plugin add @linjz/opencode-qqbot` (or add `"@linjz/opencode-qqbot"` to the plugins array) | `npm i -g @linjz/opencode-qqbot` (or `github:linjz3376/opencode-qqbot`) |
 | Keep-alive | The plugin auto-launches the bot and recovers when the OpenCode service restarts | Self-managed: `openqq` in foreground / systemd / Task Scheduler |
-| Config entry | `npx @linjz/opencode-qqbot setup` (QR scan) or hand-write `~/.openqq/.env` | Same (the global `openqq-setup` command also works) |
+| Config entry | `openqq-setup` (QR scan + registers plugin by default) or hand-write `~/.openqq/.env` | `openqq-setup --standalone` (QR scan + standalone guidance) |
 
 Developers installing from source: `bun run deploy:plugin` (full package unpacked into the global plugin directory — byte-identical to what npm users get).
 
@@ -73,11 +73,11 @@ Developers installing from source: `bun run deploy:plugin` (full package unpacke
 
 ### Configuration (`~/.openqq/.env`, single point of secrets)
 
-Bind by scanning a QR code with your phone (writes credentials automatically; the connector installs on demand):
+Bind by scanning a QR code with your phone (writes credentials + **registers the plugin form by default**, equivalent to `opencode plugin add`; the connector installs on demand):
 
 ```bash
-npx @linjz/opencode-qqbot setup
-# standalone flavor with -g: openqq-setup
+npx -p @linjz/opencode-qqbot openqq-setup
+# explicit standalone flavor: openqq-setup --standalone (same flag via npx)
 ```
 
 Or create it manually:

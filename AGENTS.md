@@ -103,6 +103,8 @@ owner 当轮的开发/测试/部署指令 = 该轮内**本地 commit** 的授权
 ```bash
 opencode plugin add @linjz/opencode-qqbot        # 或在 opencode.json(c) 的 plugins 数组加包名
 npx -p @linjz/opencode-qqbot openqq-setup        # 手机 QQ 扫码绑定，自动写 ~/.openqq/.env
+                                                 # （2026-11-28 起：setup 默认自动执行插件注册（幂等，等价 plugin add）；
+                                                 #  --standalone 显式转独立部署——owner 裁定：默认插件形态，独立须声明）
 openqq service install                           # 自启注册（win=计划任务 / linux=systemd / mac=launchd）
 ```
 - 常驻：插件引导器在 OpenCode 在线时自动拉起 bot 并巡检（看门狗内嵌）；serve 重启自动恢复。
@@ -114,7 +116,7 @@ openqq service install                           # 自启注册（win=计划任�
 ### 4.2 形态 B：独立部署（无 opencode 桌面环境的机器）
 ```bash
 npm i -g @linjz/opencode-qqbot
-openqq-setup                                  # 扫码配置（同 setup）
+openqq-setup --standalone                     # 扫码配置（显式独立形态；裸跑 openqq-setup 默认注册插件）
 openqq                    # 前台运行 bot
 openqq watchdog --loop --interval-min 10      # 或注册自启：openqq service install
 ```

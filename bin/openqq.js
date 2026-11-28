@@ -27,6 +27,10 @@ if (argv[0] === "watchdog") {
 if (argv[0] === "restart" || argv[0] === "stop" || argv[0] === "service") {
   runChild("node", [join(root, "dist", "openqq-cli.js"), ...argv])
 }
+// setup 子命令（2026-11-28）：扫码绑定 + 形态分流（默认注册插件，--standalone 显式独立）。
+if (argv[0] === "setup") {
+  runChild("node", [join(root, "bin", "openqq-setup.mjs"), ...argv.slice(1)])
+}
 
 // notify 子命令分发（不改变无参数行为）：CLI 只入队 ~openqq/outbox.json，
 // 发送由 bot 进程 notify-sink 消费；CLI 不联网不取 token 不抢锁。
