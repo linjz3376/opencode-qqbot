@@ -375,6 +375,8 @@ export interface SuperviseDeps {
   alert?: (message: string) => void
   statePath?: string
   claimPath?: string
+  /** manual-stop 持有标记路径（测试注入临时文件；缺省 ~/.openqq/supervisor-hold.json） */
+  holdPath?: string
   /** 监督动作审计日志路径（测试注入临时文件，避免污染真实 watchdog.log） */
   auditLogPath?: string
   /**
@@ -406,6 +408,47 @@ function readJson<T>(path: string, fallback: T): T {
     return { ...fallback, ...(JSON.parse(readFileSync(path, "utf-8")) as T) }
   } catch {
     return fallback
+  }
+}
+
+export interface SupervisorHold {
+  version: 1
+  reason: string
+  by: string
+  at: number
+}
+
+function defaultHoldPath(): string {
+  return join(homedir(), ".openqq", "supervisor-hold.json")
+}
+
+export function readSupervisorHold(path = defaultHoldPath()): SupervisorHold | null {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf-8")) as Partial<SupervisorHold>
+    if (raw?.version === 1 && typeof raw.reason === "string" && typeof raw.by === "string" && typeof raw.at === "number") {
+      return raw as SupervisorHold
+    }
+  } catch {
+    /* 缺失/损坏视为无 hold */
+  }
+  return null
+}
+
+export function writeSupervisorHold(path: string, reason: string, by: string): void {
+  try {
+    writeFileSync(path, JSON.stringify({ version: 1, reason, by, at: Date.now() } satisfies SupervisorHold))
+  } catch {
+    /* hold 落盘失败不阻断停止动作本身；下次巡检仍可能拉起，日志已留痕 */
+  }
+}
+
+export function clearSupervisorHold(path: string): boolean {
+  try {
+    if (!existsSync(path)) return false
+    unlinkSync(path)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -455,6 +498,25 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
   try {
     const health = readBotHealth(deps.paths, now)
     const state = readJson<SupervisorState>(statePath, { restartLog: [] })
+    const holdPath = deps.holdPath ?? defaultHoldPath()
+    const hold = readSupervisorHold(holdPath)
+
+    // manual-stop 持有标记：stop 是耐久停止，不是“停到下次巡检前”。健康巡检见 hold 且
+    // bot 未运行即让贤；bot 已在运行说明 hold 已陈旧（人工/外部已拉起），自动失效恢复监督。
+    if (hold && (!deps.request || deps.request === "health-check")) {
+      if (health.lockPid === null || health.pidAlive === false) {
+        log(`[supervisor] manual-stop hold 生效（${hold.reason}），跳过拉起`)
+        return { action: "yield", detail: `manual-stop hold 生效：${hold.reason}`, killedPid: null, spawnedPid: null }
+      }
+      if (clearSupervisorHold(holdPath)) {
+        log(`[supervisor] manual-stop hold 失效：bot 已在运行，恢复常规监督`)
+      }
+    }
+    // 人工重启是 hold 的显式解除入口：先清 hold 再走重启，避免“stop 后永远拉不起”。
+    if (deps.request === "manual-restart" && hold) {
+      if (clearSupervisorHold(holdPath)) log(`[supervisor] manual-stop hold 已解除（openqq restart）`)
+    }
+
     let action = decideSupervise(health, state, now, policy)
 
     // 人工请求停止（design §3.9.1 生命周期入口）：停止是用户显式意图，必须可执行——
@@ -596,9 +658,10 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
     // 人工停止：与重启共用认领互斥/优雅杀/清锁/审计，但不拉起、不计重启强度账。
     // bot 独立存活是故障隔离语义，不是脱离用户控制；stop 是显式生命周期终点。
     if (deps.request === "manual-stop") {
+      writeSupervisorHold(holdPath, action.reason, "openqq stop")
       const detail = killedPid
-        ? `${action.reason}；已优雅停 pid=${killedPid}；锁已清`
-        : `${action.reason}；锁已清`
+        ? `${action.reason}；已优雅停 pid=${killedPid}；锁已清；hold 已立（巡检不拉起）`
+        : `${action.reason}；锁已清；hold 已立（巡检不拉起）`
       if (killedPid !== null) {
         appendKillLog({
           kind: "decision",

@@ -94,7 +94,7 @@ QQ_SANDBOX=false
 
 ### Stop and uninstall (to avoid confusion)
 
-- **Stop the bot**: `openqq stop` (waits for in-flight turns by default, then performs a supervised graceful stop without spawning a replacement).
+- **Stop the bot**: `openqq stop` (waits for in-flight turns by default, then performs a supervised graceful stop without spawning a replacement; supervisors will not revive it until `openqq restart` clears the hold).
 - **Remove autostart only**: `openqq service uninstall` (the bot may keep running).
 - **Full shutdown**: `openqq service uninstall --stop-bot` (remove autostart, then stop the bot through the same supervised path).
 - **Plugin removal boundary**: `opencode plugin remove @linjz/opencode-qqbot` removes only the in-host bootstrap and patrol; it **does not stop an already independent bot process**. Run `openqq service uninstall --stop-bot` for a complete shutdown.

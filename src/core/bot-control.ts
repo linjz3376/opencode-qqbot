@@ -221,7 +221,11 @@ export async function stopBot(opts: StopOptions = {}): Promise<StopResult> {
     log,
   })
   if (r.action === "stopped") {
-    return { action: "stopped", killedPid: r.killedPid, reason: r.killedPid ? "已优雅停止（经监督矩阵）" : "bot 未运行，已清锁" }
+    return {
+      action: "stopped",
+      killedPid: r.killedPid,
+      reason: r.killedPid ? "已优雅停止并持有（巡检不拉起，restart 解除）" : "bot 未运行，已清锁并持有（巡检不拉起）",
+    }
   }
   return { action: "skipped", killedPid: null, reason: r.detail }
 }

@@ -350,10 +350,10 @@ actual  = mirrorUnsubs.keys()
 | 计划任务看门狗 | 每 10min `--once`（schtasks 注册，常驻兜底） |
 | 插件引导器巡检 | OpenCode 宿主内每 5min（OpenCode 在线时的主通道） |
 | `openqq restart [--force]` | 人工/脚本请求式重启，复用同一 grace-kill + spawn 原语与强度约束 |
-| `openqq stop [--timeout-min N]` | 人工受控停止：默认等在途空闲，manual-stop 优雅杀后不拉起、不计重启强度账 |
+| `openqq stop [--timeout-min N]` | 人工受控停止：默认等在途空闲，manual-stop 优雅杀后不拉起、不计重启强度账，并立 supervisor-hold（健康巡检不复活，restart 解除） |
 | `openqq service uninstall --stop-bot` | 完整卸载组合：先注销自启，再按同一 manual-stop 停止 bot |
 
-**生命周期语义（防误解）**：bot 独立存活是**故障隔离**能力——OpenCode 重启、插件重载、宿主短时离线不应打断 QQ 消息链路；它不是脱离 OpenCode/用户控制的“游离进程”。三层动作必须分清：插件卸载只移除宿主内引导与巡检，不停止已独立运行的 bot；`service uninstall` 只注销 OS 自启；`openqq stop` / `service uninstall --stop-bot` 才是 bot 的显式生命周期终点。manual-stop 与 manual-restart 一样跳过杀前复核（人工意图即权威），但不被重启强度/冷却拦截，也不把停止计入重启强度账。
+**生命周期语义（防误解）**：bot 独立存活是**故障隔离**能力——OpenCode 重启、插件重载、宿主短时离线不应打断 QQ 消息链路；它不是脱离 OpenCode/用户控制的“游离进程”。三层动作必须分清：插件卸载只移除宿主内引导与巡检，不停止已独立运行的 bot；`service uninstall` 只注销 OS 自启；`openqq stop` / `service uninstall --stop-bot` 才是 bot 的显式生命周期终点。manual-stop 与 manual-restart 一样跳过杀前复核（人工意图即权威），但不被重启强度/冷却拦截，也不把停止计入重启强度账。stop 的耐久性由 `supervisor-hold.json` 保证：hold 存在且 bot 未运行时，健康巡检让贤不拉起；bot 已在运行则 hold 自动失效；`openqq restart` 显式清除 hold 后恢复拉起。
 
 **监督者租约（2026-11-25 定稿：channel 优先级 + 时间戳，pid 仅诊断）**：service（计划任务）与 plugin（宿主内巡检）双触发器的归一仲裁。租约文件 `~/.openqq/supervisor-lease.json` 记 `{channel, until, pid}`——pid 仅作诊断，**不参与选主判定**（旧版按 pid 判定致 `--once` 每轮新 pid 自相让贤、5min 任务变 10min 的实证缺陷已修）。
 

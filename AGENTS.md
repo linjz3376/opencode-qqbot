@@ -106,8 +106,8 @@ npx -p @linjz/opencode-qqbot openqq-setup        # 手机 QQ 扫码绑定，自�
 openqq service install                           # 自启注册（win=计划任务 / linux=systemd / mac=launchd）
 ```
 - 常驻：插件引导器在 OpenCode 在线时自动拉起 bot 并巡检（看门狗内嵌）；serve 重启自动恢复。
-- 生命周期边界：插件移除只停止宿主内引导/巡检，不停止已独立运行的 bot；完整停用用
-  `openqq service uninstall --stop-bot`（或先 `service uninstall` 再 `openqq stop`）。
+- 生命周期边界：插件移除只停止宿主内引导/巡检，不停止已独立运行的 bot；`openqq stop` 会立
+  supervisor-hold（巡检不复活，`openqq restart` 解除）；完整停用用 `openqq service uninstall --stop-bot`。
 - 升级：`opencode plugin add @linjz/opencode-qqbot@latest`（重装同目录即更新），
   然后 `openqq restart`（等空闲）激活新代码。
 
