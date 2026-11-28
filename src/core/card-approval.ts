@@ -105,12 +105,22 @@ export async function sendApprovalCard(
   request: PermissionRequest,
   mainSessionId: string,
   origin?: PermOrigin,
+  isCancelled?: () => boolean,
 ): Promise<boolean> {
   try {
     const token = await getAccessToken(deps.appId, deps.clientSecret)
+    // 死卡竞态防线：token 获取可能耗时，期间桌面端/引擎已处理——QQ API 前必须再查。
+    if (isCancelled?.()) {
+      console.log(`[card-approval] 发卡取消：请求已解决 user=${ctx.userId.slice(0, 8)}… request=${request.id}`)
+      return false
+    }
     const keyboard = buildApprovalKeyboard(request, ctx.userId)
     // 正文复用现有格式化（用户看到的字段与文字菜单完全一致）；origin 标注发起来源
     const text = formatPermissionPrompt(request, mainSessionId, origin)
+    if (isCancelled?.()) {
+      console.log(`[card-approval] 发卡取消：请求已解决 user=${ctx.userId.slice(0, 8)}… request=${request.id}`)
+      return false
+    }
     if (ctx.type === "group" && ctx.groupId) {
       await sendGroupMessage(token, ctx.groupId, text, ctx.msgId, undefined, true, keyboard)
     } else {

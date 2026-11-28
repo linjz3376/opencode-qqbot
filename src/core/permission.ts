@@ -187,12 +187,14 @@ export interface PermissionGateDeps {
   client: OpencodeClient
   sendReply: (ctx: MessageContext, text: string) => Promise<void>
   safeDeliver: (ctx: MessageContext, text: string) => Promise<boolean>
-  /** A 项（2026-10-29）：卡片按钮审批发送通道；返回 false 时本域自动降级文字菜单 */
+  /** A 项（2026-10-29）：卡片按钮审批发送通道；返回 false 时本域自动降级文字菜单。
+   *  isCancelled：发卡途中槽位被清/请求已解决时返回 true，发送层必须在 QQ API 前放弃。 */
   sendApprovalPrompt?: (
     ctx: MessageContext,
     request: PermissionRequest,
     mainSessionId: string,
     origin?: PermOrigin,
+    isCancelled?: () => boolean,
   ) => Promise<boolean>
   /** 槽位清空的唤醒钩子（用户裁决/TTL 自动拒绝均触发）：审批挂起期间 drainQueue 被守卫
    *  挡回，裁决后须由调用方重新放行队列——否则挂起期间入队的消息要等用户再发一条才动
@@ -226,6 +228,8 @@ export interface PermissionGate {
    *  若该 requestID 在挂起槽中（无论来源 bot/external），清槽 + QQ 回执「源头已处理」，
    *  并唤醒队列。返回 true=确有槽被清。无匹配槽返回 false（正常：QQ 已先裁决）。 */
   clearIfResolved: (sessionID: string | undefined, requestID: string, reply: unknown) => boolean
+  /** 请求近期已被解决（清槽/裁决/TTL）——发卡全链取消判据，防在飞死卡。 */
+  wasResolvedRecently: (requestID: string) => boolean
 }
 
 // 审批域门面：挂起槽 + 等待/裁决 + 跨重启恢复。所有状态与文件读写收在本域。
@@ -234,6 +238,31 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
   const PERSIST_FILE = deps.persistFile ?? PENDING_PERM_FILE
   const { client, sendReply, safeDeliver } = deps
   const pendingPermissions = new Map<string, PendingPermission>()
+  // 发卡取消语义（2026-11-28 死卡竞态修复）：请求被清槽/裁决/TTL 后短 TTL 记名——
+  // clearIfResolved 只能清槽，不能撤回已在飞的 sendApprovalPrompt；发卡全链据此放弃。
+  const RESOLVED_RECENT_TTL_MS = 5 * 60_000
+  const resolvedRecently = new Map<string, number>()
+  function markResolvedRecently(requestID: string): void {
+    resolvedRecently.set(requestID, Date.now() + RESOLVED_RECENT_TTL_MS)
+    if (resolvedRecently.size > 500) {
+      const now = Date.now()
+      for (const [id, exp] of resolvedRecently) if (exp <= now) resolvedRecently.delete(id)
+      while (resolvedRecently.size > 500) {
+        const first = resolvedRecently.keys().next().value
+        if (first === undefined) break
+        resolvedRecently.delete(first)
+      }
+    }
+  }
+  function wasResolvedRecently(requestID: string): boolean {
+    const exp = resolvedRecently.get(requestID)
+    if (exp === undefined) return false
+    if (exp <= Date.now()) {
+      resolvedRecently.delete(requestID)
+      return false
+    }
+    return true
+  }
   // DEF-qqbot-20261112-5（2026-11-12 ZERO4 实测卡风暴实证）：同一回合并联发起多个
   // ask（异 request id）时，单挂槽跨请求覆写 + 双推送路径竞态会让先到的请求被重复
   // 推卡（A 卡×2/B 卡×1 实证）。已推卡请求 id 环：同步认领（check+mark 原子，闭掉
@@ -303,6 +332,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         adopted.alertTimer = startNudgeTimer(ctx.userId, request.id, ctx)
         adopted.timer = setTimeout(() => {
           if (pendingPermissions.get(ctx.userId)?.request.id === request.id) {
+            markResolvedRecently(request.id)
             pendingPermissions.delete(ctx.userId)
             savePendingPermMap(pendingPermissions, PERSIST_FILE)
             deps.onDecision?.(ctx.userId) // TTL 自动拒绝也要唤醒被守卫挡回的队列
@@ -326,6 +356,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       const alertTimer = startNudgeTimer(ctx.userId, request.id, ctx)
       const timer = setTimeout(() => {
         if (pendingPermissions.get(ctx.userId)?.request.id === request.id) {
+          markResolvedRecently(request.id)
           pendingPermissions.delete(ctx.userId)
           savePendingPermMap(pendingPermissions, PERSIST_FILE)
           deps.onDecision?.(ctx.userId) // TTL 自动拒绝也要唤醒被守卫挡回的队列
@@ -354,9 +385,21 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       // 的请求（并发异请求覆写场景被其他路径推过）不再重复推卡。
       if (claimCardPush(request.id)) {
         void (async () => {
+          const isCancelled = () =>
+            wasResolvedRecently(request.id) || pendingPermissions.get(ctx.userId)?.request.id !== request.id
+          // 发卡前复查：clearIfResolved/resolve/TTL 可能已在异步任务起跑前清槽——死卡不得再发。
+          if (isCancelled()) {
+            console.log(`[perm] 发卡前复查：槽已清，放弃发卡 request=${request.id}`)
+            return
+          }
           const sentByCard = deps.sendApprovalPrompt
-            ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, "bot").catch(() => false)
+            ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, "bot", isCancelled).catch(() => false)
             : false
+          const stillPending = () => pendingPermissions.get(ctx.userId)?.request.id === request.id
+          if (!stillPending()) {
+            console.log(`[perm] 发卡途中槽被清：卡片将迟到（死卡，平台无撤回），request=${request.id}`)
+            return
+          }
           if (!sentByCard) {
             await sendReply(ctx, formatPermissionPrompt(request, mainSessionId, "bot")).catch((error) => {
               console.error("[bridge] 发送审批请求失败:", error)
@@ -370,6 +413,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
   function resolve(userId: string, decision: PermissionDecision): void {
     const entry = pendingPermissions.get(userId)
     if (!entry) return
+    markResolvedRecently(entry.request.id)
     clearTimers(entry)
     pendingPermissions.delete(userId)
     savePendingPermMap(pendingPermissions, PERSIST_FILE)
@@ -491,6 +535,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     const directory = deps.directoryOf?.(userId)
     const timer = setTimeout(() => {
       if (pendingPermissions.get(userId)?.request.id !== request.id) return
+      markResolvedRecently(request.id)
       pendingPermissions.delete(userId)
       savePendingPermMap(pendingPermissions, PERSIST_FILE)
       deps.onDecision?.(userId) // 外部审批 TTL 拒绝也要唤醒队列
@@ -519,23 +564,24 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     // 场景下本请求已被他路推过而重复推卡。
     if (claimCardPush(request.id)) {
       void (async () => {
-        // DEF-qqbot-20261114-P5（owner 2026-11-14「全修剩下缺陷」批）：发卡有 token+网络
-        // 耗时（实测 834ms 慢管道），期间桌面端可能已处理（联动清槽）。单线程语义下推卡
-        // 与清槽同 tick 不可交错——卡的「发送前复查」是死守卫（如实移除）；有效防线=
-        // ①发送后槽被清→日志留痕（卡在途不可撤，平台无撤回 API，至少时序可归因）
-        // ②文字降级前复查槽位——不发迟到死菜单（否则时序上早于「已处理」通知，用户困惑）。
+        // DEF-qqbot-20261114-P5 + 2026-11-28 死卡竞态修复：发卡有 token+网络耗时，
+        // 期间桌面端可能已处理（联动清槽）。有效防线=①发卡前复查 ②发送层 isCancelled
+        // （token 后/QQ API 前放弃）③发送后槽位复查 ④文字降级前复查。
+        const isCancelled = () =>
+          wasResolvedRecently(request.id) || pendingPermissions.get(userId)?.request.id !== request.id
+        if (isCancelled()) {
+          console.log(`[perm] 发卡前复查：槽已清，放弃发卡 request=${request.id}`)
+          return
+        }
         const sentByCard = deps.sendApprovalPrompt
-          ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, origin).catch(() => false)
+          ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, origin, isCancelled).catch(() => false)
           : false
         const stillPending = () => pendingPermissions.get(userId)?.request.id === request.id
         if (!stillPending()) {
           console.log(`[perm] 发卡途中槽被清：卡片将迟到（死卡，平台无撤回），request=${request.id}`)
+          return
         }
         if (!sentByCard) {
-          if (!stillPending()) {
-            console.log(`[perm] 文字降级前复查：槽已清（他端已处理），跳过文字菜单 request=${request.id}`)
-            return
-          }
           await sendReply(ctx, formatPermissionPrompt(request, mainSessionId, "external")).catch((error) => {
             console.error("[bridge] 发送审批请求失败:", error)
           })
@@ -552,6 +598,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       if (entry.request.id !== requestID) continue
       if (sessionID && entry.request.sessionID && sessionID !== entry.request.sessionID) continue
       const e = entry
+      markResolvedRecently(requestID)
       clearTimers(e)
       pendingPermissions.delete(uid)
       savePendingPermMap(pendingPermissions, PERSIST_FILE)
@@ -574,7 +621,16 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     return false
   }
 
-  return { hasPending, getPending, waitForDecision, resolve, restore, pushExternal: pushExternalImpl, clearIfResolved }
+  return {
+    hasPending,
+    getPending,
+    waitForDecision,
+    resolve,
+    restore,
+    pushExternal: pushExternalImpl,
+    clearIfResolved,
+    wasResolvedRecently,
+  }
 }
 
 // 解析用户的审批回复（自然语言或 /allow /always /deny 命令式）。

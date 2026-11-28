@@ -1095,9 +1095,17 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
       // 会话隔离：审批裁决放行该用户全部有货 lane（drainQueue 自身对忙 lane 空转安全）
       for (const lk of msgQueue.laneKeysOf(userId)) void drainQueue(userId, sessionIdOfLane(lk))
     },
-    // A 项：审批卡片发送（失败自动降级文字菜单，permission 域内处理）；origin 穿透到卡片正文
-    sendApprovalPrompt: (ctx, request, mainSessionId, origin) =>
-      sendApprovalCard({ appId: config.qq.appId, clientSecret: config.qq.clientSecret }, ctx, request, mainSessionId, origin),
+    // A 项：审批卡片发送（失败自动降级文字菜单，permission 域内处理）；origin 穿透到卡片正文；
+    // isCancelled 穿透到发送层——token 后/QQ API 前再查，死卡不发。
+    sendApprovalPrompt: (ctx, request, mainSessionId, origin, isCancelled) =>
+      sendApprovalCard(
+        { appId: config.qq.appId, clientSecret: config.qq.clientSecret },
+        ctx,
+        request,
+        mainSessionId,
+        origin,
+        isCancelled,
+      ),
     // 多角色：审批态按角色分文件（缺省 legacy 全局）
     persistFile: storageAppId ? roleFile("pending-permissions.json") : undefined,
   })
@@ -1335,6 +1343,10 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
   // DEF-qqbot-20261112-1：反查必须带会话自身目录——引擎待审按 location 实例分仓，
   // 裸查只命中服务端 cwd 实例，项目会话的请求永远查空 → 恒弃推（ZERO2 实证挂起 5h24m 被误弃）。
   async function flushPermPush(uid: string, req: PermissionRequest): Promise<void> {
+    if (perm.wasResolvedRecently(req.id)) {
+      console.log(`[perm-event] 延迟判定：请求近期已解决，弃推 user=${uid.slice(0, 8)}… request=${req.id}`)
+      return
+    }
     const bound = sessions.getSession(uid)
     try {
       const res = await client.permission.list({ directory: bound?.directory })
