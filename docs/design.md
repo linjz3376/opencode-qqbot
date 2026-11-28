@@ -106,7 +106,7 @@
 | `gateway.ts` | WebSocket 状态机：IDENTIFY→心跳→事件分发→断线 RESUME | 会话/seq 持久化（gateway-state），重启优先 RESUME、seq 回补观测；单活跃连接（QQ 协议约束）；4008 平台限流 60s 官方退避、4914/4915 FATAL 不重连、握手双超时防卡死、命令门表情规范化（faceType 实体 + emoji 字符剥离） |
 | `api.ts` | REST 封装：Token 管理、消息发送 | Token singleflight + 后台刷新；401 清缓存重试一次；密钥脱敏日志；429 尊重 Retry-After 退避；`QQ_SANDBOX` 沙箱域切换；C2C typing 输入状态提示 |
 | `sender.ts` | 发送管线：Markdown 化、长文分割、被动窗口 | 分条/节流/被动回复窗口（msgId 引用） |
-| `media.ts` | 附件下载与注入 | 超时/大小白名单/临时目录清场；语音消息 QQ 内置 ASR 零下载直通转写；≤2MB 图片转 data: URL 供桌面预览 |
+| `media.ts` | 附件下载与注入 | 超时/大小白名单/临时目录清场；语音消息 QQ 内置 ASR 零下载直通转写；≤2MB 图片转 data: URL 供桌面预览；通用 file 附件按文本/PDF/Office 分流——文本与 Office 提取文本以 `file://` 注入，PDF 原样注入并提示模型能力，legacy OLE Office 明确拒识 |
 | `types.ts` | 协议类型 | — |
 
 ### 3.2 OpenCode 对接层（`src/opencode/`）

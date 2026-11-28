@@ -26,7 +26,7 @@ Built for production, not just message bridging: a self-healing watchdog, an aud
 | Remote commands | `/new /cancel /status /sessions /history /models /agents /rename /progress /queue /ledger /send /undo /amend /goal /compact /redo /btw` |
 | Busy-time steer | New messages while a turn is running merge into the current turn (official steer semantics — the default); enqueue explicitly with `/queue <text>`; classic FIFO via `QQ_BUSY_DEFAULT=queue` |
 | Goal mode | `/goal <objective>` passes through to the engine's goal mode with status-change notifications and kickoff attribution; `/goal` shows status, `pause|resume|clear` to control |
-| Rich media | Receive images (native attachments go to the AI for vision); **receive voice** (QQ's built-in ASR transcribes to text into the prompt for free); **send images/files** — the AI calls the native `qq_send_file` tool (path allowlist + idempotent dedupe + precise errors; `QQ_SEND_FILE:` marker retained as fallback) or you run `/send <path>`; 20MB limit |
+| Rich media | Receive images (native attachments go to the AI for vision); **receive voice** (QQ's built-in ASR transcribes to text into the prompt for free); **receive text/PDF/Office documents** (txt/md/code inject directly, docx/xlsx/pptx extract text locally, PDF passes through; legacy doc/xls/ppt gets explicit conversion guidance); **send images/files** — the AI calls the native `qq_send_file` tool (path allowlist + idempotent dedupe + precise errors; `QQ_SEND_FILE:` marker retained as fallback) or you run `/send <path>`; 20MB limit |
 | Quote context | Long-press quote a message and ask — the AI sees the quoted content (our own replies are indexed too) |
 | Long tasks never lost | 30-min foreground timeout falls back to a background wait (SSE + polling, up to 24h); a 30-min stall triggers a proactive notice with status (stalled / unknown / finished-but-lost), the latest tool action, and how long there's been no progress |
 | Duplicate-proof delivery | Two-layer dedup: cross-process atomic msgId claim + same-content in-flight fingerprint; long identical replies deduped outbound for 24h; "received" ack bubble off by default (`QQ_ACK_RECEIPT=1` to enable) |
@@ -288,7 +288,7 @@ Hard-won findings from real deployments (Windows 11 / OpenCode v2.2.2) — the p
 **QQ platform**
 
 1. The token endpoint `POST https://bots.qq.com/app/getAppAccessToken` takes **`clientSecret`** (older docs say `appSecret`); the `100016 invalid appid or secret` error is misleading — check the field name before resetting your secret.
-2. Tokens are environment-independent and always use the production domain `bots.qq.com`; **the sandbox domain `sandbox.api.sgroup.qq.com has no token endpoint** (it returns `11001 unsupported call`).
+2. Tokens are environment-independent and always use the production domain `bots.qq.com`; **the sandbox domain `sandbox.api.sgroup.qq.com` has no token endpoint** (it returns `11001 unsupported call`).
 3. Sandbox bots have a separate gateway: `GET https://sandbox.api.sgroup.qq.com/gateway` → `wss://sandbox.api.sgroup.qq.com/websocket`; a sandbox bot connecting to the production gateway is rejected with 4914.
 
 **OpenCode side**

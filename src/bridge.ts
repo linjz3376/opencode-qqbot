@@ -9,7 +9,7 @@ import { homedir } from "os"
 import type { Config } from "./config.js"
 import type { MessageContext } from "./qq/types.js"
 import { getAccessToken, sendC2CInputNotify, sendC2CMessage, sendGroupMessage } from "./qq/api.js"
-import { prepareQQAttachments, augmentPromptWithAttachments, purgeOldQQImages } from "./qq/media.js"
+import { prepareQQAttachments, augmentPromptWithAttachments, purgeOldQQImages, purgeOldQQFiles } from "./qq/media.js"
 import { normalizeForCommandGate } from "./qq/gateway.js"
 import type { OpencodeClient, SessionMessage, PermissionRequest } from "./opencode/client.js"
 import {
@@ -1941,8 +1941,9 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
 
   // 摘要镜像：启动时对全部映射会话挂常驻订阅
   mirror.ensureSubs()
-  // 图片落盘：清理 7 天前的 QQ 图片（原生附件接入）
+  // 附件落盘：清理 7 天前的 QQ 图片与文件附件（原生附件接入）
   purgeOldQQImages()
+  purgeOldQQFiles()
 
   const handleMessage = async (ctx: MessageContext): Promise<void> => {
     let claimedMsgId = ""

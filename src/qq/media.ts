@@ -1,8 +1,9 @@
 // @input:  ./api (getAccessToken), ./types (MessageAttachment), node:fs/os/path
-// @output: extForImageMime, isAllowedDownloadHost, MAX_IMAGE_BYTES, imageDir,
-//          downloadQQAttachment, prepareQQAttachments, groupOutcomes,
-//          augmentPromptWithAttachments, purgeOldQQImages
-// @pos:    qq层 - QQ 图片下载落盘 + prompt 文本/附件合成（原生附件接入 2026-10-14）
+// @output: extForImageMime, isAllowedDownloadHost, MAX_IMAGE_BYTES, MAX_FILE_BYTES,
+//          imageDir, fileDir, classifyFileAttachment, downloadQQAttachment,
+//          prepareQQAttachments, groupOutcomes, augmentPromptWithAttachments,
+//          purgeOldQQImages, purgeOldQQFiles
+// @pos:    qq层 - QQ 图片/文件下载落盘 + prompt 文本/附件合成（原生附件接入 2026-10-14）
 //
 // QQ 图片消息到网关只有 URL（MessageAttachment.url）；本模块下载落盘成文件，
 // 再转成 prompt body 的 files（{uri, name}，v2 PromptInput schema 内字段）。
@@ -14,6 +15,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import type { MessageAttachment } from "./types.js"
 import { sttConfigured, sttTranscribe } from "../core/stt.js"
+import { extractOfficeTextFromFile, isLegacyOfficePath, officeKindForPath } from "../core/office-text.js"
 
 export interface PromptFile {
   uri: string
@@ -27,7 +29,7 @@ export interface PreparedAttachments {
 
 /** 下载结果（纯数据，便于单测分组逻辑） */
 export type AttachmentOutcome =
-  | { path: string; name: string }
+  | { path: string; name: string; kind?: "image" | "text" | "pdf" | "office-text"; sourceName?: string }
   | { failed: string }
   | { unsupported: string }
   /** 语音消息：QQ 内置 ASR 免费给 asr_refer_text，零下载零 STT 调用直接转文字（生态观察缺口 2） */
@@ -41,6 +43,7 @@ export function extForImageMime(mime: string): string | null {
 }
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+export const MAX_FILE_BYTES = 20 * 1024 * 1024
 const ALLOWED_HOST_SUFFIXES = [".qpic.cn", ".qq.com", ".qq.com.cn"]
 
 /** 下载域白名单（R2-P1-2）：只信 QQ 自家 CDN 且必须 https——在 fetch 之前
@@ -61,6 +64,10 @@ export function imageDir(): string {
   return join(tmpdir(), "opencode", "qq-images")
 }
 
+export function fileDir(): string {
+  return join(tmpdir(), "opencode", "qq-files")
+}
+
 async function fetchWithTimeout(url: string, ms: number, auth?: string): Promise<Response> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), ms)
@@ -74,8 +81,80 @@ async function fetchWithTimeout(url: string, ms: number, auth?: string): Promise
   }
 }
 
+export type IncomingFileKind = "text" | "pdf" | "office"
+
+const TEXT_FILE_EXTENSIONS = new Set([
+  "txt", "md", "markdown", "json", "jsonc", "log", "csv", "tsv", "xml", "yaml", "yml",
+  "toml", "ini", "cfg", "conf", "js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "java",
+  "go", "rs", "c", "h", "cpp", "hpp", "cs", "sql", "sh", "ps1", "bat", "cmd", "html",
+  "htm", "css", "scss", "less", "vue", "svelte",
+])
+
+/** QQ file 附件分类：按官方 content_type=file 为入口，文件名扩展名决定可处理形态。 */
+export function classifyFileAttachment(att: MessageAttachment): IncomingFileKind | null {
+  const filename = (att.filename || "").toLowerCase()
+  const contentType = (att.content_type || "").toLowerCase().split(";")[0].trim()
+  if (isLegacyOfficePath(filename)) return null // 由调用方给出专门的 legacy 指引
+  if (officeKindForPath(filename)) return "office"
+  if (filename.endsWith(".pdf") || contentType === "application/pdf") return "pdf"
+  const ext = filename.match(/\.([a-z0-9]+)$/)?.[1] ?? ""
+  if (contentType.startsWith("text/") || TEXT_FILE_EXTENSIONS.has(ext)) return "text"
+  return null
+}
+
+function safeAttachmentName(name: string): string {
+  const cleaned = name.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").trim() || "attachment"
+  if (cleaned.length <= 80) return cleaned
+  const ext = cleaned.match(/\.[a-z0-9]+$/i)?.[0] ?? ""
+  return `${cleaned.slice(0, Math.max(1, 80 - ext.length))}${ext}`
+}
+
+async function downloadToBuffer(
+  att: MessageAttachment,
+  getAuth: (() => Promise<string>) | undefined,
+  maxBytes: number,
+  tooLargeMessage: string,
+): Promise<{ data: Buffer } | { failed: string }> {
+  if (!isAllowedDownloadHost(att.url)) return { failed: "下载域不在白名单" }
+  try {
+    let res = await fetchWithTimeout(att.url, 15000)
+    if ((res.status === 401 || res.status === 403) && getAuth) {
+      try {
+        res = await fetchWithTimeout(att.url, 15000, await getAuth())
+      } catch {
+        /* 鉴权兜底失败：保持原状态，走下方 !res.ok 归 failed */
+      }
+    }
+    if (!res.ok) {
+      console.log("[media] 下载失败:", res.status, att.url) // 原始 URL 只进本机日志（B7 校准）
+      return { failed: `HTTP ${res.status}` }
+    }
+    const len = Number(res.headers.get("content-length") || 0)
+    if (len > maxBytes) return { failed: tooLargeMessage }
+    const reader = res.body?.getReader()
+    if (!reader) return { failed: "无响应体" }
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel()
+        return { failed: tooLargeMessage }
+      }
+      chunks.push(value)
+    }
+    if (total === 0) return { failed: "空响应" }
+    return { data: Buffer.concat(chunks) }
+  } catch (e) {
+    console.log("[media] 下载失败:", att.url, e instanceof Error ? e.message : e)
+    return { failed: "网络错误或超时" }
+  }
+}
+
 /**
- * 下载 QQ 图片附件到本地。非图片类型返回 unsupported；下载失败返回 failed
+ * 下载 QQ 图片/文件附件到本地。非支持类型返回 unsupported；下载失败返回 failed
  * （脱敏短语，原始 URL/错误只进本机日志）。fetch 前过域白名单（R2-P1-2）；
  * 401/403 时带 access_token 重试一次（此时目标必为 QQ 自家域，token 不出站）；
  * 10MB 流式上限，超限 cancel 熔断。
@@ -113,52 +192,48 @@ export async function downloadQQAttachment(
       return { failed: "语音转写失败（外部 STT 未响应或识别为空）" }
     }
   }
+  const fileKind = classifyFileAttachment(att)
+  if (fileKind) {
+    const downloaded = await downloadToBuffer(att, getAuth, MAX_FILE_BYTES, "超过20MB")
+    if ("failed" in downloaded) return downloaded
+    const dir = fileDir()
+    mkdirSync(dir, { recursive: true })
+    const safeName = safeAttachmentName(att.filename || `attachment-${Date.now()}`)
+    const storedName = `qq-file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}`
+    const storedPath = join(dir, storedName)
+    try {
+      writeFileSync(storedPath, downloaded.data)
+      if (fileKind === "text") return { path: storedPath, name: safeName, kind: "text" }
+      if (fileKind === "pdf") return { path: storedPath, name: safeName, kind: "pdf" }
+      const extracted = extractOfficeTextFromFile(storedPath)
+      const textPath = `${storedPath}.extracted.txt`
+      writeFileSync(textPath, extracted, "utf8")
+      return { path: textPath, name: `${safeName}.txt`, kind: "office-text", sourceName: safeName }
+    } catch (error) {
+      console.log("[media] 文件处理失败:", safeName, error instanceof Error ? error.message : error)
+      return { failed: fileKind === "office" ? "Office 文档解析失败" : "文件处理失败" }
+    }
+  }
+
   const ext = extForImageMime(att.content_type || "")
-  if (!ext) return { unsupported: att.content_type || att.filename || "未知类型" }
-  if (!isAllowedDownloadHost(att.url)) return { failed: "下载域不在白名单" }
+  if (!ext) {
+    if (isLegacyOfficePath(att.filename || "")) {
+      return { unsupported: "旧版 Office 二进制（请另存为 docx/xlsx/pptx 或导出文本/PDF）" }
+    }
+    return { unsupported: att.content_type || att.filename || "未知类型" }
+  }
+  const downloaded = await downloadToBuffer(att, getAuth, MAX_IMAGE_BYTES, "超过10MB")
+  if ("failed" in downloaded) return downloaded
   try {
     const dir = imageDir()
     mkdirSync(dir, { recursive: true })
     const name = `qq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`
-    let res = await fetchWithTimeout(att.url, 15000)
-    if ((res.status === 401 || res.status === 403) && getAuth) {
-      try {
-        const tok = await getAuth()
-        res = await fetchWithTimeout(att.url, 15000, tok)
-      } catch {
-        /* 鉴权兜底失败：保持原状态，走下方 !res.ok 归 failed */
-      }
-    }
-    if (!res.ok) {
-      console.log("[media] 下载失败:", res.status, att.url) // 原始 URL 只进本机日志（B7 校准）
-      return { failed: `HTTP ${res.status}` }
-    }
-    // R2-P1-2：10MB 上限——Content-Length 预检 + 流式逐块计数熔断
-    //（无 Content-Length 的分块响应同样有界；超限即 cancel，内存不涨）
-    const len = Number(res.headers.get("content-length") || 0)
-    if (len > MAX_IMAGE_BYTES) return { failed: "超过10MB" }
-    const reader = res.body?.getReader()
-    if (!reader) return { failed: "无响应体" }
-    const chunks: Uint8Array[] = []
-    let total = 0
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      total += value.byteLength
-      if (total > MAX_IMAGE_BYTES) {
-        await reader.cancel()
-        return { failed: "超过10MB" }
-      }
-      chunks.push(value)
-    }
-    if (total === 0) return { failed: "空响应" }
     const full = join(dir, name)
-    writeFileSync(full, Buffer.concat(chunks))
-    return { path: full, name }
+    writeFileSync(full, downloaded.data)
+    return { path: full, name, kind: "image" }
   } catch (e) {
-    // 原始错误只进本机日志；回给用户的备注是脱敏短语（R2-P3）
-    console.log("[media] 下载失败:", att.url, e instanceof Error ? e.message : e)
-    return { failed: "网络错误或超时" }
+    console.log("[media] 图片落盘失败:", e instanceof Error ? e.message : e)
+    return { failed: "文件落盘失败" }
   }
 }
 
@@ -179,14 +254,21 @@ export function groupOutcomes(outcomes: AttachmentOutcome[]): PreparedAttachment
   const notes: string[] = []
   for (const o of outcomes) {
     if ("path" in o) {
-      // 桌面 TUI 预览实证通道：≤2MB 的图片用 data: URL（opencode 对 data: 内嵌预览友好）；
-      // 大图/非图保留 file:// 路径（避免 base64 膨胀）。
-      const dataUrl = tryImageDataUrl(o.path, 2 * 1024 * 1024)
-      files.push(dataUrl ? { uri: dataUrl, name: o.name } : { uri: `file:///${o.path.replace(/\\/g, "/")}`, name: o.name })
+      const kind = o.kind ?? "image"
+      if (kind === "image") {
+        // 桌面 TUI 预览实证通道：≤2MB 的图片用 data: URL（opencode 对 data: 内嵌预览友好）；
+        // 大图保留 file:// 路径（避免 base64 膨胀）。
+        const dataUrl = tryImageDataUrl(o.path, 2 * 1024 * 1024)
+        files.push(dataUrl ? { uri: dataUrl, name: o.name } : { uri: `file:///${o.path.replace(/\\/g, "/")}`, name: o.name })
+      } else {
+        files.push({ uri: `file:///${o.path.replace(/\\/g, "/")}`, name: o.name })
+        if (kind === "pdf") notes.push(`（PDF 附件已注入：${o.name}；需要模型支持 PDF 输入）`)
+        if (kind === "office-text") notes.push(`（Office 文档已提取为文本：${o.sourceName ?? o.name}）`)
+      }
     } else if ("voice" in o) {
       notes.push(`（语音转写：${o.voice}）`)
     } else if ("failed" in o) {
-      notes.push(`（图片下载失败：${o.failed}）`)
+      notes.push(`（附件下载失败：${o.failed}）`)
     } else {
       notes.push(`（暂不支持的附件类型：${o.unsupported}）`)
     }
@@ -212,6 +294,11 @@ function tryImageDataUrl(path: string, maxBytes: number): string | null {
  * - 纯图（无文字）：占位文字，模型经 files 直接看到图
  * - 纯失败（图没下下来）：备注即正文，QQ 端可见而不是静默
  */
+function isImagePromptFile(file: PromptFile): boolean {
+  if (file.uri.startsWith("data:image/")) return true
+  return /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name ?? "")
+}
+
 export function augmentPromptWithAttachments(
   rawContent: string,
   prepared: PreparedAttachments,
@@ -219,16 +306,18 @@ export function augmentPromptWithAttachments(
   const base = rawContent.trim()
   const { files, notes } = prepared
   let text = base
-  if (!text && files.length > 0) text = "（用户通过 QQ 发来了图片，未附文字）"
+  if (!text && files.length > 0) {
+    text = files.some(isImagePromptFile)
+      ? "（用户通过 QQ 发来了图片，未附文字）"
+      : "（用户通过 QQ 发来了文件，未附文字）"
+  }
   if (!text && notes.length > 0) text = "（用户通过 QQ 发来了内容，但无法处理）"
   if (notes.length > 0) text = text ? `${text}\n\n${notes.join("\n")}` : notes.join("\n")
   return { text, files }
 }
 
-/** 启动清理：删掉 7 天前的落盘图片（只在自己的子目录内操作） */
-export function purgeOldQQImages(maxAgeMs = 7 * 24 * 60 * 60 * 1000): void {
+function purgeOldFilesIn(dir: string, maxAgeMs: number): void {
   try {
-    const dir = imageDir()
     const now = Date.now()
     for (const f of readdirSync(dir)) {
       const full = join(dir, f)
@@ -241,4 +330,14 @@ export function purgeOldQQImages(maxAgeMs = 7 * 24 * 60 * 60 * 1000): void {
   } catch {
     /* 目录不存在等忽略 */
   }
+}
+
+/** 启动清理：删掉 7 天前的落盘图片（只在自己的子目录内操作） */
+export function purgeOldQQImages(maxAgeMs = 7 * 24 * 60 * 60 * 1000): void {
+  purgeOldFilesIn(imageDir(), maxAgeMs)
+}
+
+/** 启动清理：删掉 7 天前的落盘文件附件与 Office 提取文本。 */
+export function purgeOldQQFiles(maxAgeMs = 7 * 24 * 60 * 60 * 1000): void {
+  purgeOldFilesIn(fileDir(), maxAgeMs)
 }
