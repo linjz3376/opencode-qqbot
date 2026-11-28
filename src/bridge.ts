@@ -1267,7 +1267,14 @@ const sessionSubs = new Map<string, Set<string>>()   // sessionID -> userIds
               console.log(`[push-gate] 审批卡拦截（轮询兜底）：绑定已切走 uid=${uid.slice(0, 8)}… sid=${shortId(req.sessionID)}`)
               continue
             }
-            perm.pushExternal(uid, ctxForUser(uid), req, req.sessionID)
+            // 统一发卡时序（2026-11-28 架构收口）：轮询兜底发现与 SSE asked 走同一延迟闸——
+            // defer 窗内被桌面自动审批处置的请求不推卡（此前轮询直推绕过延迟闸，109ms 推卡实证，
+            // 1000-1500ms 延迟带的决议会漏成死卡）；闸按 uid+requestID 去重，与 SSE 路径互不重复；
+            // flushPermPush 内仍做悬置复查+回合归属标注，SSE 断线时本路径仍是兜底（REST 复查 fail-open）。
+            console.log(
+              `[perm-event] 轮询兜底发现待审（延迟 ${PERM_DEFER_MS}ms 判定）user=${uid.slice(0, 8)}… request=${req.id}`,
+            )
+            permPushGate.schedule(uid, req.id, () => void flushPermPush(uid, req))
           }
         }
       }
