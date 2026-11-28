@@ -360,11 +360,12 @@ export interface SuperviseDeps {
   policy?: SupervisorPolicy
   /**
    * 触发形态：health-check=周期巡检（默认）；manual-restart=openqq restart
-   * 人工请求（design §3.9.1：restart 是 superviseOnce 的调用方而非独立实现）。
-   * manual-restart 下健康实例也会被优雅杀后拉起，并跳过「杀前复核」（人工意图
-   * 即权威，复核只防监督者误杀）；强度账/冷却/认领互斥/审计分家全部照旧。
+   * 人工请求；manual-stop=openqq stop 人工停止（design §3.9.1：restart/stop 都是
+   * superviseOnce 的调用方而非独立实现）。manual-restart 下健康实例也会被优雅杀后拉起；
+   * manual-stop 下健康实例优雅杀后不拉起、不计重启强度账。两者都跳过「杀前复核」
+   * （人工意图即权威，复核只防监督者误杀）；认领互斥/审计分家全部照旧。
    */
-  request?: "health-check" | "manual-restart"
+  request?: "health-check" | "manual-restart" | "manual-stop"
   now?: () => number
   kill?: (pid: number, signal?: "SIGTERM" | "SIGKILL") => void
   isAlive?: (pid: number) => boolean
@@ -456,6 +457,15 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
     const state = readJson<SupervisorState>(statePath, { restartLog: [] })
     let action = decideSupervise(health, state, now, policy)
 
+    // 人工请求停止（design §3.9.1 生命周期入口）：停止是用户显式意图，必须可执行——
+    // 不被重启强度/冷却拦截（give-up 场景恰恰需要能停下来）；bot 未运行/已死则只清锁不拉起。
+    if (deps.request === "manual-stop") {
+      action =
+        health.lockPid !== null && health.pidAlive !== false
+          ? { kind: "grace-kill-spawn", killPid: health.lockPid, reason: "人工请求停止（openqq stop）" }
+          : { kind: "spawn", reason: "人工请求停止（bot 未运行，仅清锁）" }
+    }
+
     // 人工请求重启（design §3.9.1 入口 3）：健康实例也要优雅杀后拉起；
     // bot 未运行/已死则只拉起。强度与冷却约束在 decideSupervise 内已经生效
     //（needsRestart 为 false 时同样先查 give-up/cooldown，再走到这里覆盖动作）。
@@ -518,7 +528,7 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
       // 若有心跳落盘必须被看见；随后重读一次，转新鲜即改判 ok、放弃本轮，全程审计留痕。
       // 心跳「缺失」不豁免（语义同 decide：缺失视为未恢复，维持原判）。——
       // 例外：manual-restart（人工意图即权威，不存在"误杀"）。——
-      if (deps.request !== "manual-restart") {
+      if (deps.request !== "manual-restart" && deps.request !== "manual-stop") {
         await sleep(300)
         const recheck = readBotHealth(deps.paths, Date.now())
         const recheckFresh =
@@ -582,6 +592,36 @@ export async function superviseOnce(deps: SuperviseDeps): Promise<SuperviseResul
     } catch {
       /* 清锁失败不阻断拉起 */
     }
+
+    // 人工停止：与重启共用认领互斥/优雅杀/清锁/审计，但不拉起、不计重启强度账。
+    // bot 独立存活是故障隔离语义，不是脱离用户控制；stop 是显式生命周期终点。
+    if (deps.request === "manual-stop") {
+      const detail = killedPid
+        ? `${action.reason}；已优雅停 pid=${killedPid}；锁已清`
+        : `${action.reason}；锁已清`
+      if (killedPid !== null) {
+        appendKillLog({
+          kind: "decision",
+          reason: action.reason,
+          health: {
+            lockPid: health.lockPid,
+            pidAlive: health.pidAlive,
+            heartbeatAgeMs: health.heartbeatAgeMs,
+            lockAgeMs: health.lockAgeMs,
+          },
+          killedPid,
+          killEscalation: "TERM",
+          spawnedPid: null,
+          restartIntensity: `${state.restartLog.length}/${policy.maxRestarts}`,
+          livenessVerdict: "stopped",
+          at: Date.now(),
+        })
+      }
+      audit(`主动停：${detail}`)
+      log(`[supervisor] 主动停：${detail}`)
+      return { action: "stopped", detail, killedPid, spawnedPid: null }
+    }
+
     const spawnedPid = deps.spawn()
     state.restartLog.push(Date.now())
     state.restartLog = state.restartLog.filter((t) => t > Date.now() - policy.windowMs * 2)

@@ -92,6 +92,13 @@ QQ_SANDBOX=false
 - **Plugin flavor**: nothing to start manually — once the plugin is installed and credentials are set, the plugin's patrol launches the bot; it also recovers when the OpenCode service restarts.
 - **Standalone flavor**: run `openqq` in the foreground; for daemon mode pick your OS (Windows: Task Scheduler via `openqq service install`; Linux: `systemd --user`; macOS: launchd or `nohup`).
 
+### Stop and uninstall (to avoid confusion)
+
+- **Stop the bot**: `openqq stop` (waits for in-flight turns by default, then performs a supervised graceful stop without spawning a replacement).
+- **Remove autostart only**: `openqq service uninstall` (the bot may keep running).
+- **Full shutdown**: `openqq service uninstall --stop-bot` (remove autostart, then stop the bot through the same supervised path).
+- **Plugin removal boundary**: `opencode plugin remove @linjz/opencode-qqbot` removes only the in-host bootstrap and patrol; it **does not stop an already independent bot process**. Run `openqq service uninstall --stop-bot` for a complete shutdown.
+
 <details>
 <summary>Linux: systemd --user unit (copy-paste ready)</summary>
 

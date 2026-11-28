@@ -343,13 +343,17 @@ actual  = mirrorUnsubs.keys()
 
 #### 3.9.1 杀与重启（系统唯一权威）
 
-**唯一权威 = `superviseOnce`（监督矩阵执行器）**。系统内一切"杀 bot / 拉 bot"只能经由它，不存在第二套杀逻辑。触发入口共三个，全部是它的调用方而非独立实现：
+**唯一权威 = `superviseOnce`（监督矩阵执行器）**。系统内一切"杀 bot / 拉 bot / 停 bot"只能经由它，不存在第二套杀逻辑。触发入口共五个，全部是它的调用方而非独立实现：
 
 | 入口 | 形态 |
 |---|---|
 | 计划任务看门狗 | 每 10min `--once`（schtasks 注册，常驻兜底） |
 | 插件引导器巡检 | OpenCode 宿主内每 5min（OpenCode 在线时的主通道） |
-| `openqq restart [--force]` | 人工/脚本请求式入口，复用同一 grace-kill + spawn 原语与强度约束 |
+| `openqq restart [--force]` | 人工/脚本请求式重启，复用同一 grace-kill + spawn 原语与强度约束 |
+| `openqq stop [--timeout-min N]` | 人工受控停止：默认等在途空闲，manual-stop 优雅杀后不拉起、不计重启强度账 |
+| `openqq service uninstall --stop-bot` | 完整卸载组合：先注销自启，再按同一 manual-stop 停止 bot |
+
+**生命周期语义（防误解）**：bot 独立存活是**故障隔离**能力——OpenCode 重启、插件重载、宿主短时离线不应打断 QQ 消息链路；它不是脱离 OpenCode/用户控制的“游离进程”。三层动作必须分清：插件卸载只移除宿主内引导与巡检，不停止已独立运行的 bot；`service uninstall` 只注销 OS 自启；`openqq stop` / `service uninstall --stop-bot` 才是 bot 的显式生命周期终点。manual-stop 与 manual-restart 一样跳过杀前复核（人工意图即权威），但不被重启强度/冷却拦截，也不把停止计入重启强度账。
 
 **监督者租约（2026-11-25 定稿：channel 优先级 + 时间戳，pid 仅诊断）**：service（计划任务）与 plugin（宿主内巡检）双触发器的归一仲裁。租约文件 `~/.openqq/supervisor-lease.json` 记 `{channel, until, pid}`——pid 仅作诊断，**不参与选主判定**（旧版按 pid 判定致 `--once` 每轮新 pid 自相让贤、5min 任务变 10min 的实证缺陷已修）。
 
@@ -375,7 +379,7 @@ actual  = mirrorUnsubs.keys()
 ### 3.10 入口、CLI 与插件引导器
 
 - `index.ts`：抢锁→写心跳→401 快速失败（连续 3 次认证被拒即退出释放锁）→连接检查→bridge→gateway；优雅关闭清定时器。
-- `openqq-main.ts` → `openqq-cli.js`：请求式重启入口（杀/拉设计见 §3.9.1）；`--force` 跳过等空闲。
+- `openqq-main.ts` → `openqq-cli.js`：请求式重启/停止入口（杀/拉/停设计见 §3.9.1）；restart `--force` 跳过等空闲，stop 默认等空闲。
 - `watchdog-main.ts` → `openqq-watchdog.js`：计划任务侧巡检入口（`--once` / `--loop`，设计见 §3.9.1）。
 - `service-main.ts`：自启注册（win32=schtasks / linux=systemd user / darwin=launchd，三平台生成器纯函数可测）；经 `openqq-cli service` 子命令路由。
 - `notify.ts` → `openqq notify`：通知出队，独立可用。
@@ -389,6 +393,7 @@ actual  = mirrorUnsubs.keys()
 | 受理幂等 K1/K2 | msgId 跨进程原子认领 + 内容指纹窗口去重 | 网关 backlog 重放、消息重推、启动对账重派都必须收敛到"同内容不重复投递" |
 | 网关状态持久化 | session/seq 落盘，重启优先 RESUME | 重启 IDENTIFY 失忆会引发 backlog 重放，与幂等/台账叠加成风暴 |
 | 杀/重启归一 | 唯一权威与完整机制**只出在 §3.9.1**（superviseOnce：优雅杀+冷却+强度上限+give-up 告警） | kill+spawn 分散多处 = 互杀与边杀边拉的根源；所有重启必须受控 |
+| 生命周期边界 | bot 独立存活=故障隔离，不是游离；插件卸载≠bot 停止，`openqq stop` / `service uninstall --stop-bot` 经同一 superviseOnce manual-stop 收尾 | 用户可预期的停止/卸载闭环；防止“插件已删但 bot 仍在跑”的误解 |
 | 在途台账 | 一切"重启后要记住"的状态落盘；退出路径必须结账 | 内存态即缺陷候选；孤儿/幽灵必须可观测、可修复、禁静默删除 |
 | 队列恢复语义 | 重启后 queued 条目重建队列"继续排队"，非重跑；重建按 (用户,锚定会话) lane 归组 | "重跑一条"会重复副作用；"继续排队"保持用户意图 |
 | 会话隔离（DEF-qqbot-20261112-01 修法①） | 队列/忙锁按 (用户,会话) lane；入队锚定 sessionId 快照、drain 按锚定派发；出站推送门=锚定≠当前绑定不推 | 僵尸/长回合只堵所在会话；persona 面单活绑定的出站语义（owner 2026-11-14） |

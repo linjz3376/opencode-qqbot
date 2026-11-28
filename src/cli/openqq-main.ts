@@ -4,12 +4,13 @@
 //
 // 用法：
 //   node dist/openqq-cli.js restart [--force] [--timeout-min 60]
-//   node dist/openqq-cli.js service install|uninstall|status
+//   node dist/openqq-cli.js stop [--timeout-min 60]
+//   node dist/openqq-cli.js service install|uninstall [--stop-bot] |status
 // 2026-11-09 架构红线：取代 safe-restart.ps1 / start-openqq.ps1 / watchdog.ps1，全 TS 跨平台。
 import { existsSync } from "fs"
 import { dirname, join } from "path"
 import { fileURLToPath } from "url"
-import { restartBot } from "../core/bot-control.js"
+import { restartBot, stopBot } from "../core/bot-control.js"
 import {
   serviceInstall,
   serviceStatus,
@@ -65,6 +66,17 @@ async function main(): Promise<void> {
     return
   }
 
+  if (cmd === "stop") {
+    const timeoutMin = Number(parseFlag(process.argv.slice(2), "--timeout-min"))
+    const res = await stopBot({
+      timeoutMs: Number.isFinite(timeoutMin) && timeoutMin > 0 ? timeoutMin * 60_000 : undefined,
+      log: (line) => console.log(line),
+    })
+    console.log(`[stop] ${res.action}（${res.reason}）killed=${res.killedPid ?? "-"}`)
+    process.exitCode = res.action === "stopped" ? 0 : 2
+    return
+  }
+
   if (cmd === "service") {
     const spec: ServiceSpec = {
       runtimeCmd: runtimeCommand(),
@@ -72,7 +84,23 @@ async function main(): Promise<void> {
       intervalMin: DEFAULT_INTERVAL_MIN,
     }
     if (sub === "install") return printResult("service install", serviceInstall(spec))
-    if (sub === "uninstall") return printResult("service uninstall", serviceUninstall())
+    if (sub === "uninstall") {
+      const uninstall = serviceUninstall()
+      printResult("service uninstall", uninstall)
+      if (!process.argv.includes("--stop-bot")) return
+      // --stop-bot 是完整停用语义：自启注销失败（含任务本就不存在）不得阻断 bot 停止；
+      // 退出码反映两步结果——都成 0，仅停止成 1，停止未成 2。
+      const stop = await stopBot({
+        timeoutMs: (() => {
+          const timeoutMin = Number(parseFlag(process.argv.slice(2), "--timeout-min"))
+          return Number.isFinite(timeoutMin) && timeoutMin > 0 ? timeoutMin * 60_000 : undefined
+        })(),
+        log: (line) => console.log(line),
+      })
+      console.log(`[stop] ${stop.action}（${stop.reason}）killed=${stop.killedPid ?? "-"}`)
+      process.exitCode = stop.action === "stopped" ? (uninstall.ok ? 0 : 1) : 2
+      return
+    }
     if (sub === "status") {
       const r = serviceStatus()
       return printResult("service status", {
@@ -80,12 +108,12 @@ async function main(): Promise<void> {
         detail: `runtime=${spec.runtimeCmd}\nscript=${spec.scriptPath}\n${r.detail}`,
       })
     }
-    console.error("用法：openqq service install|uninstall|status")
+    console.error("用法：openqq service install|uninstall [--stop-bot]|status")
     process.exitCode = 2
     return
   }
 
-  console.error("用法：openqq-cli restart [--force] [--timeout-min N] | service install|uninstall|status")
+  console.error("用法：openqq-cli restart [--force] [--timeout-min N] | stop [--timeout-min N] | service install|uninstall [--stop-bot]|status")
   process.exitCode = 2
 }
 

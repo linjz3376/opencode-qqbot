@@ -87,6 +87,13 @@ QQ_SANDBOX=false
 - **插件形态**：无需手动启动——装好插件 + 配好凭据后，插件巡检自动拉起 bot；opencode 服务重启也会自动恢复。
 - **独立部署形态**：`openqq` 前台运行；常驻按 OS 自选（Windows：`openqq service install` 注册计划任务；Linux `systemd --user`；macOS launchd 或 `nohup`）。
 
+### 停止与卸载（避免误解）
+
+- **停止 bot**：`openqq stop`（默认等待在途回合空闲，走监督矩阵优雅停止，不拉起新进程）。
+- **只移除自启**：`openqq service uninstall`（bot 仍可能继续运行）。
+- **完整停用**：`openqq service uninstall --stop-bot`（先注销自启，再受控停止 bot）。
+- **插件移除边界**：`opencode plugin remove @linjz/opencode-qqbot` 只移除 OpenCode 宿主内的引导与巡检，**不会停止已独立运行的 bot**；要彻底停用请再执行 `openqq service uninstall --stop-bot`。
+
 <details>
 <summary>Linux：systemd --user 单元（复制即用）</summary>
 

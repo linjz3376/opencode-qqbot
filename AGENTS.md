@@ -106,6 +106,8 @@ npx -p @linjz/opencode-qqbot openqq-setup        # 手机 QQ 扫码绑定，自�
 openqq service install                           # 自启注册（win=计划任务 / linux=systemd / mac=launchd）
 ```
 - 常驻：插件引导器在 OpenCode 在线时自动拉起 bot 并巡检（看门狗内嵌）；serve 重启自动恢复。
+- 生命周期边界：插件移除只停止宿主内引导/巡检，不停止已独立运行的 bot；完整停用用
+  `openqq service uninstall --stop-bot`（或先 `service uninstall` 再 `openqq stop`）。
 - 升级：`opencode plugin add @linjz/opencode-qqbot@latest`（重装同目录即更新），
   然后 `openqq restart`（等空闲）激活新代码。
 
@@ -136,7 +138,8 @@ openqq watchdog --loop --interval-min 10      # 或注册自启：openqq service
 
 1. **禁止裸杀**：不得 `taskkill`/`Stop-Process`/任务管理器结束 bot。Windows 下进程被杀无
    退出日志、在途审批/回合中断、事后无法归因。
-2. **重启唯一入口**：`node <plugin>/dist/openqq-cli.js restart [--force]`（走锁交接）。
+2. **重启/停止唯一入口**：`node <plugin>/dist/openqq-cli.js restart [--force]` 或
+   `node <plugin>/dist/openqq-cli.js stop [--timeout-min N]`（同走 superviseOnce 锁交接/优雅停）。
    执行前查在途；有 inflight 回合先告知用户或等待完成。
 3. **部署窗口纪律**：即 §3.3——禁止在长回合（>5min）中反复 restart（心跳陈旧会触发看门狗
    优雅杀，与人工重启叠加成连环死亡）。

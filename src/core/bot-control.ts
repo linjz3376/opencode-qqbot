@@ -1,6 +1,6 @@
 // @input:  ~/.openqq/.env、实例锁、在途台账、core/bot-launcher（运行时解析与 detached 拉起）、
 //          core/watchdog（superviseOnce 杀/拉唯一权威）
-// @output:  resolveInstalledBotEntry, readAppId, countInflight, waitUntilIdle, startBot, restartBot
+// @output:  resolveInstalledBotEntry, readAppId, countInflight, waitUntilIdle, startBot, restartBot, stopBot
 // @pos:    core - bot 生命周期控制（跨平台；替代 safe-restart.ps1 / start-openqq.ps1）
 //
 // 2026-11-09 架构红线：重启是运维代码，必须随插件包分发且跨平台。
@@ -8,7 +8,7 @@
 // 2026-11-10 design §3.9.1 归一：杀/拉唯一权威 = superviseOnce。restartBot 只是它的
 // 调用方（等空闲 → 同一 grace-kill+spawn 原语 + supervisor.json 强度账 + 审计分家 +
 // 认领互斥），本文件不再实现任何独立杀逻辑（原 stopLockedBot 已删除）。
-import { existsSync, readFileSync } from "fs"
+import { existsSync, readFileSync, readdirSync } from "fs"
 import { dirname, join } from "path"
 import { homedir } from "os"
 import { fileURLToPath } from "url"
@@ -69,15 +69,35 @@ export function inflightPath(): string {
   return join(homedir(), ".openqq", "inflight.json")
 }
 
-/** 在途回合数（safe-restart 的空闲判据：state=inflight 即算活跃） */
-export function countInflight(path = inflightPath()): number {
+/** 全部角色在途台账路径：legacy 根 + roles/<appId>/（多角色停止/重启的空闲判据必须看全量）。 */
+export function inflightPaths(): string[] {
+  const root = join(homedir(), ".openqq")
+  const paths = [join(root, "inflight.json")]
   try {
-    const raw = JSON.parse(readFileSync(path, "utf-8")) as unknown
-    if (!Array.isArray(raw)) return 0
-    return raw.filter((e) => (e as { state?: string }).state === "inflight").length
+    for (const name of readdirSync(join(root, "roles"))) {
+      const path = join(root, "roles", name, "inflight.json")
+      if (existsSync(path)) paths.push(path)
+    }
   } catch {
-    return 0
+    /* 无 roles 目录=legacy 单角色 */
   }
+  return paths
+}
+
+/** 在途回合数（safe-restart/stop 的空闲判据：state=inflight 即算活跃；默认全角色合计）。 */
+export function countInflight(paths: string | string[] = inflightPaths()): number {
+  const list = Array.isArray(paths) ? paths : [paths]
+  let total = 0
+  for (const path of list) {
+    try {
+      const raw = JSON.parse(readFileSync(path, "utf-8")) as unknown
+      if (!Array.isArray(raw)) continue
+      total += raw.filter((e) => (e as { state?: string }).state === "inflight").length
+    } catch {
+      /* 单文件损坏不阻断其他角色判活 */
+    }
+  }
+  return total
 }
 
 export async function waitUntilIdle(opts?: {
@@ -163,4 +183,45 @@ export async function restartBot(opts: RestartOptions): Promise<RestartResult> {
     default:
       return { action: "skipped", killedPid: null, spawnedPid: null, reason: `无需动作：${r.detail}` }
   }
+}
+
+export interface StopOptions {
+  timeoutMs?: number
+  log?: (line: string) => void
+}
+
+export interface StopResult {
+  action: "stopped" | "skipped"
+  killedPid: number | null
+  reason: string
+}
+
+/**
+ * 受控停止：默认等空闲；复用 superviseOnce 的 manual-stop（认领互斥 + 优雅杀 + 清锁 + 审计），
+ * 不拉起、不计重启强度账。bot 独立存活是故障隔离，不是脱离用户控制——stop 是显式生命周期终点。
+ */
+export async function stopBot(opts: StopOptions = {}): Promise<StopResult> {
+  const log = opts.log ?? (() => {})
+  const appId = readAppId()
+  if (!appId) throw new Error("缺少 ~/.openqq/.env 的角色凭据（QQ_APP_ID 或 QQ_BOTS 首角色），无法定位实例锁")
+  const idle = await waitUntilIdle({
+    timeoutMs: opts.timeoutMs,
+    onWait: (n, elapsed) => log(`[bot-control] 仍在途 ${n} 条（已等 ${Math.round(elapsed / 1000)}s），继续等待空闲后停止`),
+  })
+  if (!idle) {
+    log("[bot-control] 等待空闲超时：本次不停止（请稍后重试，或先处理在途回合）")
+    return { action: "skipped", killedPid: null, reason: "等待空闲超时" }
+  }
+  const r = await superviseOnce({
+    paths: botWatchdogPaths(appId),
+    request: "manual-stop",
+    spawn: () => {
+      throw new Error("manual-stop 不应拉起 bot")
+    },
+    log,
+  })
+  if (r.action === "stopped") {
+    return { action: "stopped", killedPid: r.killedPid, reason: r.killedPid ? "已优雅停止（经监督矩阵）" : "bot 未运行，已清锁" }
+  }
+  return { action: "skipped", killedPid: null, reason: r.detail }
 }

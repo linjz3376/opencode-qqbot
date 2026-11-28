@@ -24,7 +24,7 @@ function runChild(cmd, args) {
 if (argv[0] === "watchdog") {
   runChild(detectBun() ?? "node", [join(root, "dist", "openqq-watchdog.js"), ...argv.slice(1)])
 }
-if (argv[0] === "restart" || argv[0] === "service") {
+if (argv[0] === "restart" || argv[0] === "stop" || argv[0] === "service") {
   runChild("node", [join(root, "dist", "openqq-cli.js"), ...argv])
 }
 
