@@ -102,6 +102,7 @@ QQ_SANDBOX=false
 - **Remove autostart only**: `openqq service uninstall` (the bot may keep running).
 - **Full shutdown**: `openqq service uninstall --stop-bot` (remove autostart, then stop the bot through the same supervised path).
 - **Plugin removal boundary**: `opencode plugin remove @linjz/opencode-qqbot` removes only the in-host bootstrap and patrol; it **does not stop an already independent bot process**. Run `openqq service uninstall --stop-bot` for a complete shutdown.
+- **Migrate standalone back to the plugin**: `openqq service uninstall` (remove autostart) → `openqq restart` (idle; the plugin patrol takes over keep-alive) → optionally `npm uninstall -g @linjz/opencode-qqbot` (the next launch runs the plugin copy). Registering the plugin alone does NOT convert the machine — the service channel still wins the election until the autostart is removed; `openqq-setup` auto-detects this and prints the guidance after default registration.
 
 <details>
 <summary>Linux: systemd --user unit (copy-paste ready)</summary>

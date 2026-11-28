@@ -60,6 +60,10 @@ if (standalone) {
     console.log("请手动完成插件注册（二选一）：")
     console.log("  1) opencode plugin add @linjz/opencode-qqbot")
     console.log('  2) 在 opencode.json(c) 的 plugins 数组加入 "@linjz/opencode-qqbot"')
+  } else {
+    // 存量独立部署扭转：注册只完成一半，检出 service 自启则给三步迁移指引
+    const { printMigrationHintIfNeeded } = await import("./setup-flavor.mjs")
+    await printMigrationHintIfNeeded({})
   }
   console.log("如确需独立部署形态（无桌面 opencode 的服务器/自管守护）：openqq-setup --standalone")
   console.log("若曾 npm i -g 安装本包：插件形态下全局副本不参与运行，可 npm uninstall -g @linjz/opencode-qqbot 清理（保留亦无冲突）。")
