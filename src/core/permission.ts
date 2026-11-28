@@ -101,6 +101,13 @@ export function resolvePermDeferMs(envValue: string | undefined): number {
   return Number.isFinite(n) && n >= 0 && n <= 10_000 ? n : 500
 }
 
+/** QQ_PERM_SEND_GRACE_MS 解析（默认 500ms，0=关闭）：审批卡真正调 QQ API 前的可取消发送窗。 */
+export function resolvePermSendGraceMs(envValue: string | undefined): number {
+  if (envValue === undefined || envValue.trim() === "") return 500
+  const n = Number(envValue)
+  return Number.isFinite(n) && n >= 0 && n <= 10_000 ? n : 500
+}
+
 export const DECISION_LABELS: Record<PermissionDecision, string> = {
   once: "允许（本次）",
   always: "总是允许（已存入项目白名单）",
@@ -202,6 +209,8 @@ export interface PermissionGateDeps {
   onDecision?: (userId: string) => void
   /** 10min 无裁决告警间隔（测试注入小值；缺省 PERM_NUDGE_MS） */
   nudgeMs?: number
+  /** 审批卡发送窗（测试注入；缺省 QQ_PERM_SEND_GRACE_MS/500ms，0=关闭） */
+  sendGraceMs?: number
   /** 跨重启恢复读盘入口（测试注入；缺省读 legacy 全局 pending-permissions.json） */
   loadPending?: () => Record<string, PersistedPermission>
   /** 多角色：落盘文件（缺省 legacy 全局 pending-permissions.json） */
@@ -236,6 +245,7 @@ export interface PermissionGate {
 export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
   // 多角色（2026-11-17）：审批态落盘文件可按角色注入；缺省 legacy 全局路径
   const PERSIST_FILE = deps.persistFile ?? PENDING_PERM_FILE
+  const SEND_GRACE_MS = deps.sendGraceMs ?? resolvePermSendGraceMs(process.env.QQ_PERM_SEND_GRACE_MS)
   const { client, sendReply, safeDeliver } = deps
   const pendingPermissions = new Map<string, PendingPermission>()
   // 发卡取消语义（2026-11-28 死卡竞态修复）：请求被清槽/裁决/TTL 后短 TTL 记名——
@@ -262,6 +272,14 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       return false
     }
     return true
+  }
+  /** 发送窗：给 replied/resolve 一个取消在飞发卡的窗口；仅 SEND_GRACE_MS>0 才等待，0 保持原同步路径。 */
+  async function waitSendGrace(): Promise<void> {
+    if (SEND_GRACE_MS <= 0) return
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, SEND_GRACE_MS)
+      timer.unref?.()
+    })
   }
   // DEF-qqbot-20261112-5（2026-11-12 ZERO4 实测卡风暴实证）：同一回合并联发起多个
   // ask（异 request id）时，单挂槽跨请求覆写 + 双推送路径竞态会让先到的请求被重复
@@ -391,6 +409,13 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
           if (isCancelled()) {
             console.log(`[perm] 发卡前复查：槽已清，放弃发卡 request=${request.id}`)
             return
+          }
+          if (SEND_GRACE_MS > 0) {
+            await waitSendGrace()
+            if (isCancelled()) {
+              console.log(`[perm] 发送窗内请求已解决，放弃发卡 request=${request.id}`)
+              return
+            }
           }
           const sentByCard = deps.sendApprovalPrompt
             ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, "bot", isCancelled).catch(() => false)
@@ -572,6 +597,13 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         if (isCancelled()) {
           console.log(`[perm] 发卡前复查：槽已清，放弃发卡 request=${request.id}`)
           return
+        }
+        if (SEND_GRACE_MS > 0) {
+          await waitSendGrace()
+          if (isCancelled()) {
+            console.log(`[perm] 发送窗内请求已解决，放弃发卡 request=${request.id}`)
+            return
+          }
         }
         const sentByCard = deps.sendApprovalPrompt
           ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, origin, isCancelled).catch(() => false)
