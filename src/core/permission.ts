@@ -38,6 +38,10 @@ export interface PendingPermission {
    *  属误报，只在从磁盘恢复的条目上投递。 */
   resumedFromDisk?: boolean
   origin?: PermOrigin // 2026-11-09：回合归属标注——bot=机器人回合，external=桌面端发起（镜像推送）
+  /** 2026-11-28：审批提示（卡片或文字菜单）已实际投递到 QQ。clearIfResolved 仅在此置位
+   *  （或 resumedFromDisk）时发「自动关闭」回执——延迟判定窗/发送窗内清槽时无卡可关，
+   *  回执属误报（owner 实证：无卡却收「QQ 审批自动关闭」）。 */
+  promptDelivered?: boolean
   /** DEF-qqbot-20261112-1：裁决 reply 的 x-opencode-directory 值（建槽时快照；
    *  引擎待审批按 location 实例分仓，裁决/超时拒答不带目录会对项目会话 404） */
   directory?: string
@@ -251,12 +255,18 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
   // 发卡取消语义（2026-11-28 死卡竞态修复）：请求被清槽/裁决/TTL 后短 TTL 记名——
   // clearIfResolved 只能清槽，不能撤回已在飞的 sendApprovalPrompt；发卡全链据此放弃。
   const RESOLVED_RECENT_TTL_MS = 5 * 60_000
-  const resolvedRecently = new Map<string, number>()
+  /** 清槽时提示未投递 → 「自动关闭」回执挂起；卡若随后迟到投递成功（死卡）由发卡路径补发。 */
+  type StashedNotice = { label: string; origin?: PermOrigin; ctx: MessageContext }
+  const resolvedRecently = new Map<string, { exp: number; notice?: StashedNotice }>()
   function markResolvedRecently(requestID: string): void {
-    resolvedRecently.set(requestID, Date.now() + RESOLVED_RECENT_TTL_MS)
+    const prev = resolvedRecently.get(requestID)
+    resolvedRecently.set(requestID, {
+      exp: Date.now() + RESOLVED_RECENT_TTL_MS,
+      ...(prev?.notice ? { notice: prev.notice } : {}),
+    })
     if (resolvedRecently.size > 500) {
       const now = Date.now()
-      for (const [id, exp] of resolvedRecently) if (exp <= now) resolvedRecently.delete(id)
+      for (const [id, e] of resolvedRecently) if (e.exp <= now) resolvedRecently.delete(id)
       while (resolvedRecently.size > 500) {
         const first = resolvedRecently.keys().next().value
         if (first === undefined) break
@@ -265,13 +275,26 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     }
   }
   function wasResolvedRecently(requestID: string): boolean {
-    const exp = resolvedRecently.get(requestID)
-    if (exp === undefined) return false
-    if (exp <= Date.now()) {
+    const e = resolvedRecently.get(requestID)
+    if (e === undefined) return false
+    if (e.exp <= Date.now()) {
       resolvedRecently.delete(requestID)
       return false
     }
     return true
+  }
+  /** 提示（卡片/文字菜单）实际投递后置标；若清槽回执因「无卡可关」被挂起且卡已迟到投递，补发回执。 */
+  function markPromptDelivered(userId: string, requestID: string): void {
+    const cur = pendingPermissions.get(userId)
+    if (cur?.request.id === requestID) cur.promptDelivered = true
+    const e = resolvedRecently.get(requestID)
+    if (!e?.notice) return
+    const n = e.notice
+    e.notice = undefined
+    void safeDeliver(
+      n.ctx,
+      `🔄 审批 ${requestID.slice(-8)} 已由${n.origin === "bot" ? "机器人回合侧" : "桌面端"}处理（${n.label}），QQ 审批自动关闭`,
+    ).catch(() => {})
   }
   /** 发送窗：给 replied/resolve 一个取消在飞发卡的窗口；仅 SEND_GRACE_MS>0 才等待，0 保持原同步路径。 */
   async function waitSendGrace(): Promise<void> {
@@ -420,15 +443,18 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
           const sentByCard = deps.sendApprovalPrompt
             ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, "bot", isCancelled).catch(() => false)
             : false
+          if (sentByCard) markPromptDelivered(ctx.userId, request.id)
           const stillPending = () => pendingPermissions.get(ctx.userId)?.request.id === request.id
           if (!stillPending()) {
             console.log(`[perm] 发卡途中槽被清：卡片将迟到（死卡，平台无撤回），request=${request.id}`)
             return
           }
           if (!sentByCard) {
-            await sendReply(ctx, formatPermissionPrompt(request, mainSessionId, "bot")).catch((error) => {
-              console.error("[bridge] 发送审批请求失败:", error)
-            })
+            await sendReply(ctx, formatPermissionPrompt(request, mainSessionId, "bot"))
+              .then(() => markPromptDelivered(ctx.userId, request.id))
+              .catch((error) => {
+                console.error("[bridge] 发送审批请求失败:", error)
+              })
           }
         })()
       }
@@ -532,10 +558,13 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         const sentByCard = deps.sendApprovalPrompt
           ? await deps.sendApprovalPrompt(e.ctx, e.request, e.mainSessionId, e.origin).catch(() => false)
           : false
+        if (sentByCard) markPromptDelivered(uid, e.request.id)
         if (!sentByCard) {
-          await sendReply(e.ctx, formatPermissionPrompt(e.request, e.mainSessionId, e.origin)).catch((error) => {
-            console.error("[bridge] 恢复审批推送失败:", error)
-          })
+          await sendReply(e.ctx, formatPermissionPrompt(e.request, e.mainSessionId, e.origin))
+            .then(() => markPromptDelivered(uid, e.request.id))
+            .catch((error) => {
+              console.error("[bridge] 恢复审批推送失败:", error)
+            })
         }
       })()
     }
@@ -608,15 +637,18 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
         const sentByCard = deps.sendApprovalPrompt
           ? await deps.sendApprovalPrompt(ctx, request, mainSessionId, origin, isCancelled).catch(() => false)
           : false
+        if (sentByCard) markPromptDelivered(userId, request.id)
         const stillPending = () => pendingPermissions.get(userId)?.request.id === request.id
         if (!stillPending()) {
           console.log(`[perm] 发卡途中槽被清：卡片将迟到（死卡，平台无撤回），request=${request.id}`)
           return
         }
         if (!sentByCard) {
-          await sendReply(ctx, formatPermissionPrompt(request, mainSessionId, "external")).catch((error) => {
-            console.error("[bridge] 发送审批请求失败:", error)
-          })
+          await sendReply(ctx, formatPermissionPrompt(request, mainSessionId, "external"))
+            .then(() => markPromptDelivered(userId, request.id))
+            .catch((error) => {
+              console.error("[bridge] 发送审批请求失败:", error)
+            })
         }
       })()
     }
@@ -644,10 +676,19 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
               ? "拒绝"
               : `已处理（${String(reply ?? "未知")}）`
       console.log(`[perm] 联动清槽（源头已解决）：uid=${uid.slice(0, 8)}… request=${requestID} reply=${String(reply)}`)
-      void safeDeliver(
-        e.ctx,
-        `🔄 审批 ${requestID.slice(-8)} 已由${e.origin === "bot" ? "机器人回合侧" : "桌面端"}处理（${label}），QQ 审批自动关闭`,
-      ).catch(() => {})
+      // 2026-11-28：「自动关闭」回执只在提示实际投递后发出——无卡可关时发回执属误报（owner 实证）。
+      // 提示未投递则挂起：卡若随后迟到投递成功（死卡）由 markPromptDelivered 补发；始终未投递则静默。
+      // resumedFromDisk 保持保守旧行为（重启前可能确有旧卡）。
+      if (e.promptDelivered || e.resumedFromDisk) {
+        void safeDeliver(
+          e.ctx,
+          `🔄 审批 ${requestID.slice(-8)} 已由${e.origin === "bot" ? "机器人回合侧" : "桌面端"}处理（${label}），QQ 审批自动关闭`,
+        ).catch(() => {})
+      } else {
+        const r = resolvedRecently.get(requestID)
+        if (r) r.notice = { label, origin: e.origin, ctx: e.ctx }
+        console.log(`[perm] 提示未投递（无卡可关），自动关闭回执挂起 request=${requestID}`)
+      }
       return true
     }
     return false
